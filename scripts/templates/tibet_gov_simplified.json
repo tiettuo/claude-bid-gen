@@ -1,0 +1,171 @@
+{
+  "$schema_version": "1.0",
+  "template_id": "tibet_gov_simplified_v2026",
+  "display_name": "西藏自治区简易综合评估法范本(邮政/教育/政府类小型工程)",
+  "_doc": "Tier 0 范本零提取层。命中后下游免抽 16 章主题/B1.x 31 条/1.4.3 24 项限制/10.16 格式/评分公式。基于仓储类项目A、仓储类项目B、学校类项目三项目逐字相同内容固化。",
+
+  "match_rules": {
+    "_doc": "范本指纹比对规则。在主文档前 50 页扫描下列关键词,命中数 >= min_match 即命中范本。",
+    "any_of": [
+      "西藏自治区",
+      "简易综合评估法",
+      "智能化招投标电子交易系统",
+      "公共资源交易"
+    ],
+    "code_pattern": "^S\\d{16}$",
+    "min_match": 2,
+    "scope_pages": 50
+  },
+
+  "outline": {
+    "_doc": "施工组织设计必含一级主题(招标文件第七章 技术标准和要求 原文)。合格制项目下章节锚点 = 此 16 项;评分制项目下作为'必含底线'。",
+    "source_chapter": "第七章 技术标准和要求",
+    "source_page_hint": "p149-p159",
+    "topics": [
+      {"index": 1,  "title_original": "工程概况",                                 "subsections_original": ["项目主要情况", "项目主要施工条件"]},
+      {"index": 2,  "title_original": "编制依据",                                 "subsections_original": ["法律法规", "国家行业地方标准", "行政主管部门批准文件", "施工合同", "工程设计文件"]},
+      {"index": 3,  "title_original": "总体施工部署",                             "subsections_original": ["施工总目标", "分阶段交付计划", "阶段施工顺序及空间组织", "重点和难点简要分析", "新技术新工艺部署"]},
+      {"index": 4,  "title_original": "项目组织管理机构",                         "subsections_original": ["项目管理组织机构形式(框图)", "主要管理人员", "分包项目施工单位资质和能力要求"]},
+      {"index": 5,  "title_original": "施工总进度计划",                           "subsections_original": ["网络图/横道图", "编制说明", "总进度计划表", "分期开竣工日期一览表", "技术准备", "现场准备", "资金准备", "劳动力配置计划", "物资配置计划"]},
+      {"index": 6,  "title_original": "施工总平面布置",                           "subsections_original": ["布置原则", "平面布置图(分阶段)", "用地范围", "拟建建构筑物", "加工运输存贮供电供水道路办公生活用房"]},
+      {"index": 7,  "title_original": "施工方案与技术措施",                       "subsections_original": ["第一节 建筑工程", "第二节 机电设备及安装工程", "第三节 金属结构设备及安装工程", "第四节 管网安装工程"]},
+      {"index": 8,  "title_original": "质量管理体系与措施",                       "subsections_original": ["质量目标管理", "质量保证体系", "工程质量总承包措施", "施工过程质量控制", "工程技术质量控制措施", "落实质量保证措施", "保证工程质量的技术组织措施", "质量责任制", "关键及重要部位质量控制措施"]},
+      {"index": 9,  "title_original": "工期保证技术组织措施",                     "subsections_original": ["工期目标及安排", "工期保证的原则", "工期保证的组织措施", "工期进度保证的技术措施", "材料供应保证工期的措施", "保证工期的经济和信息措施"]},
+      {"index": 10, "title_original": "安全文明施工体系与措施",                   "subsections_original": ["危险源清单", "建立安全生产管理机构", "确保安全生产的技术组织措施", "防火安全措施", "施工现场临时用电安全措施", "机械设备安全管理措施", "机械安全操作要求", "安全应急救援预案", "施工场地治安管理及突发治安事件紧急预案"]},
+      {"index": 11, "title_original": "绿色施工管理体系与措施",                   "subsections_original": ["环境保护管理体系与卫生", "文明施工具体措施", "施工现场环保标准化管理措施", "控制噪声污染措施", "水资源保护措施", "防止大气污染", "卫生防疫措施", "道路污染防治", "振动防治措施", "防止光污染措施", "固体废渣废弃物处理措施及水土保持", "防止水土流失和废料废方处理", "扬尘治理专项措施", "防止误用有害材料的保证措施"]},
+      {"index": 12, "title_original": "季节性施工措施",                           "subsections_original": ["雨期施工措施", "冬期施工措施", "农忙期安排", "高温期施工措施"]},
+      {"index": 13, "title_original": "地下管线及其他地上地下设施的保护加固措施", "subsections_original": ["物探", "避让", "加固", "旁站", "应急"]},
+      {"index": 14, "title_original": "民工工资保证措施",                         "subsections_original": ["工资支付保障制度", "实名制管理", "工资专用账户与投诉处理"]},
+      {"index": 15, "title_original": "附图及附表",                               "subsections_original": []},
+      {"index": 16, "title_original": "其他",                                     "subsections_original": []}
+    ],
+    "attachments": [
+      {"label": "附表一", "title_original": "拟投入本标段的主要施工设备表"},
+      {"label": "附表二", "title_original": "拟配备本标段的试验和检测仪器设备表"},
+      {"label": "附表三", "title_original": "劳动力计划表"},
+      {"label": "附表四", "title_original": "计划开、竣工日期和施工进度网络图"},
+      {"label": "附表五", "title_original": "施工总平面图"}
+    ]
+  },
+
+  "format_rules": {
+    "_doc": "招标文件 10.16 条格式约束。任一违反 → 不合格 = 不响应实质性要求。",
+    "source_clause": "10.16",
+    "page_size": "A4",
+    "orientation": "纵向单面(平面图/进度图横向除外)",
+    "color_allowed": false,
+    "margins_cm": {"top": 2.54, "bottom": 2.54, "left": 2.54, "right": 2.54},
+    "font_chinese_body": "宋体",
+    "font_size_body": "四号(14pt)",
+    "font_size_table": "五号(10.5pt)",
+    "line_color": "黑色",
+    "line_weight_pt": 0.75,
+    "line_spacing": "1.5倍",
+    "first_line_indent_chars": 2,
+    "document_grid": "无网格",
+    "page_limit_by_size": {
+      "small_medium": 70,
+      "large_complex": 100
+    },
+    "must_upload_format": "Word(.docx) 至公共资源交易系统"
+  },
+
+  "rejection_clauses_b1": {
+    "_doc": "招标文件第三章评标办法 否决投标条件 B1.1-B1.31 共 31 条。三个项目逐字相同。",
+    "source_page_hint": "p75 评标办法附表 否决条款汇总",
+    "clauses": [
+      {"id": "B1.1",  "category": "形式", "topic": "投标函未盖公章",     "text_original": "投标文件中的投标函未加盖投标人的公章"},
+      {"id": "B1.2",  "category": "形式", "topic": "法人/委托人未盖章",  "text_original": "投标文件中的投标函未加盖企业法定代表人(或企业法定代表人委托代理人)印章(或签字)的"},
+      {"id": "B1.3",  "category": "形式", "topic": "委托书无效",         "text_original": "如投标函加盖企业法定代表人委托代理人印章(或签字)的,企业法定代表人委托代理人没有合法、有效的委托书"},
+      {"id": "B1.4",  "category": "资格", "topic": "资格条件不符",       "text_original": "投标人资格条件不符合国家有关规定或招标文件要求的"},
+      {"id": "B1.5",  "category": "资格", "topic": "投标人名称组织变更", "text_original": "投标人名称或组织结构与资格预审时不一致的"},
+      {"id": "B1.6",  "category": "资格", "topic": "项目负责人变更",     "text_original": "除在投标截止时间前经招标人书面同意外,项目负责人与资格预审时不一致的"},
+      {"id": "B1.7",  "category": "资格", "topic": "联合体协议缺失",     "text_original": "组成联合体投标未提供联合体各方共同投标协议的"},
+      {"id": "B1.8",  "category": "资格", "topic": "联合体重复投标",     "text_original": "在同一招标项目中,联合体成员以自己名义单独投标或者参加其他联合体投标的"},
+      {"id": "B1.9",  "category": "资格", "topic": "联合体成员变更",     "text_original": "联合体成员与资格预审确定的结果不一致的"},
+      {"id": "B1.10", "category": "报价", "topic": "报价超控制价/低于成本", "text_original": "投标报价低于成本或者高于招标文件设定的最高投标限价的"},
+      {"id": "B1.11", "category": "形式", "topic": "重复投标",           "text_original": "同一投标人提交两个及以上的投标文件或者投标报价,但招标文件要求提交备选投标的除外"},
+      {"id": "B1.12", "category": "格式", "topic": "暂估价不一致",       "text_original": "与招标文件规定的暂估价、暂列金额及甲供材料价格不一致的"},
+      {"id": "B1.13", "category": "格式", "topic": "不可竞争费用不一致", "text_original": "与招标文件明确列出的不可竞争费用项目或费率或计算基础不一致的"},
+      {"id": "B1.14", "category": "格式", "topic": "工程量清单不一致",   "text_original": "与招标文件提供的工程量清单中的项目编码、项目名称、项目特征、计量单位、工程量不一致的"},
+      {"id": "B1.15", "category": "形式", "topic": "保证金未提供",       "text_original": "未按招标文件要求提供投标保证金的"},
+      {"id": "B1.16", "category": "评审", "topic": "工期超限",           "text_original": "投标文件载明的招标项目完成期限超过招标文件规定的期限的"},
+      {"id": "B1.17", "category": "评审", "topic": "技术标准不响应",     "text_original": "明显不符合技术规范、技术标准的要求的"},
+      {"id": "B1.18", "category": "格式", "topic": "包装/检验不响应",    "text_original": "投标文件载明的货物包装方式、检验标准和方法等不符合招标文件的要求的"},
+      {"id": "B1.19", "category": "评审", "topic": "结算支付不响应",     "text_original": "投标文件提出了不能满足招标文件要求或招标人不能接受的工程验收、计量、价款结算和支付办法的"},
+      {"id": "B1.20", "category": "形式", "topic": "解密失败",           "text_original": "未按招标文件要求提供电子投标文件,或者投标文件未能在规定时间内解密且按照招标文件明确的投标文件解密失败的补救方案补救不成功的"},
+      {"id": "B1.21", "category": "形式", "topic": "雷同投标",           "text_original": "不同投标人的投标文件以及投标文件制作过程出现了评标委员会认为不应当雷同的情况的"},
+      {"id": "B1.22", "category": "形式", "topic": "串通/弄虚作假",      "text_original": "以他人的名义投标、串通投标、以行贿手段谋取中标或者以其他弄虚作假方式投标的"},
+      {"id": "B1.23", "category": "格式", "topic": "造价工程师章缺",     "text_original": "投标工程量清单没有加盖投标人(或受托人)造价工程师执业印章的。受托人编制的投标工程量清单,没有提供授权委托书"},
+      {"id": "B1.24", "category": "形式", "topic": "未澄清/澄清不被接受", "text_original": "投标人未在规定时间内作出澄清或说明的,或者评标委员会认为该投标人两次澄清或说明都不符合评标委员会要求的"},
+      {"id": "B1.25", "category": "形式", "topic": "不接受算术修正",     "text_original": "投标报价有算术错误的,评标委员会按以下原则对投标报价进行修正,修正的价格经投标人书面确认后具有约束力。投标人不接受修正价格的"},
+      {"id": "B1.26", "category": "形式", "topic": "投标文件不完整",     "text_original": "投标人提交的投标文件不完整、出现错误或不满足招标文件要求的视为未响应招标文件实质性要求的"},
+      {"id": "B1.27", "category": "格式", "topic": "xml 缺项增项",       "text_original": "投标人提交的已标价工程量清单 xml 电子文档检查过程中出现缺项、增项或名称、单位等不一致的"},
+      {"id": "B1.28", "category": "报价", "topic": "不平衡报价 ≥20%",    "text_original": "以招标控制价、清单控制单价作为基准价,对投标人递交的已标价工程量清单 xml 电子文档的部分分项清单单价、总价措施费、措施清单单价进行不平衡报价分析,存在差额率"},
+      {"id": "B1.29", "category": "形式", "topic": "施组雷同性串标",     "text_original": "评标委员会在评标过程中发现施工组织设计雷同性占比达到属于串通投标情形,且证据确凿的"},
+      {"id": "B1.30", "category": "形式", "topic": "定额套取一致",       "text_original": "核对已标价工程量清单的定额套取错误一致(安装工程清单子目主材名称存在一致的)"},
+      {"id": "B1.31", "category": "形式", "topic": "其他法定情形",       "text_original": "法律规定的其他情形"}
+    ]
+  },
+
+  "restriction_1_4_3": {
+    "_doc": "投标人须知 1.4.3 限制投标情形,共 24 项。命中任一项 → 不得参加投标(资格审查阶段否决)。",
+    "source_clause": "1.4.3",
+    "items": [
+      {"index": 1,  "text_original": "为招标人不具有独立法人资格的附属机构(单位)"},
+      {"index": 2,  "text_original": "与招标人存在利害关系且可能影响招标公正性"},
+      {"index": 3,  "text_original": "与本招标项目的其他投标人为同一个单位负责人"},
+      {"index": 4,  "text_original": "与本招标项目的其他投标人存在控股、管理关系"},
+      {"index": 5,  "text_original": "为本招标项目的代建人"},
+      {"index": 6,  "text_original": "为本招标项目的招标代理机构"},
+      {"index": 7,  "text_original": "与本招标项目的代建人或招标代理机构同为一个法定代表人"},
+      {"index": 8,  "text_original": "与本招标项目的代建人或招标代理机构存在控股或参股关系"},
+      {"index": 9,  "text_original": "与本招标项目的施工承包人以及建筑材料、建筑构配件和设备供应商有隶属关系或者其他利害关系"},
+      {"index": 10, "text_original": "投标资格被暂停、取消或被责令停产停业期间"},
+      {"index": 11, "text_original": "企业资质证书、安全生产许可证超出有效期、被暂扣、被撤销"},
+      {"index": 12, "text_original": "财产被接管、冻结丧失履约能力或处于破产状态"},
+      {"index": 13, "text_original": "在最近三年内发生重大施工质量安全问题或质量事故(以相关行业主管部门的行政处罚决定或司法机关出具的有关法律文书为准)"},
+      {"index": 14, "text_original": "被市场监督管理部门在'国家企业信用信息公示系统'中列入经营异常名录或严重违法失信名单"},
+      {"index": 15, "text_original": "被最高人民法院在'信用中国'中列入失信被执行人查询名单、经营(活动)异常名录查询名单、严重失信主体名单查询、重大税收违法失信主体名单"},
+      {"index": 16, "text_original": "与招标人存在利害关系且可能影响招标公正性"},
+      {"index": 17, "text_original": "在最近三年内投标人或其法定代表人、拟委任的项目经理及技术负责人有行贿、受贿、围标、串标及其他违法违规行为事实"},
+      {"index": 18, "text_original": "在最近一年内投标人拟委任的项目经理因违反《注册建造师管理规定》被建设主管部门或者其他有关部门行政处罚"},
+      {"index": 19, "text_original": "单位负责人为同一人或者存在控股、管理关系的不同单位,不得在同一标段或未划分标段的同一项目中同时投标"},
+      {"index": 20, "text_original": "拟派项目管理班子不符合《西藏自治区房屋建筑和市政基础设施工程施工现场关键岗位人员配备管理办法》,以及拟派项目管理班子成员参加本项目投标时(指提交投标文件截止时间)已经在其他项目中标或履职"},
+      {"index": 21, "text_original": "根据国家或行政区域内有关部门制定的联合惩戒措施规范性文件(联合惩戒措施包括限制参与工程招投标或限制参与政府采购活动),被列为联合惩戒对象"},
+      {"index": 22, "text_original": "联合体投标的未提交共同投标协议、未明确各方承担连带责任、未明确联合体牵头人,或者联合体组成发生变化且在投标截止之日前未征得招标人书面同意的"},
+      {"index": 23, "text_original": "在最近三年内投标人存在隐瞒实情、提供虚假资料骗取中标行为"},
+      {"index": 24, "text_original": "未配备满足经营活动所需的相应人员和技术装备或与其他投标人共用办公设备或网络通道;使用非自有办公设备编制、加密、递交或解密电子投标文件;在投标过程中使用虚拟机;与他人共享投标文件内容;篡改用于编制、签章、加密投标文件的软件或硬件信息;删除招标工程量清单所记录的软硬件信息"}
+    ]
+  },
+
+  "scoring_method": {
+    "_doc": "评分公式骨架。各项分值在三项目可能略有差异,但 method 和公式形态稳定。",
+    "method": "简易综合评估法",
+    "tech_org_design": "合格制(不计入分值,合格/不合格判定)",
+    "scoring_categories": [
+      {"id": "1.1", "title": "投标总报价",       "score_typical": 24, "formula": "评标基准价 = 有效报价算术平均值 × A% (A=97~100 随机)"},
+      {"id": "1.2", "title": "工程量清单综合单价", "score_typical": 26, "formula": "随机抽 26 条清单,基准价 = 有效单价均值 × B% (B=95~100 随机)"},
+      {"id": "2",   "title": "建筑企业信用",     "score_typical": 25, "formula": "min(动态信用分 × 16.67%, 25)"},
+      {"id": "3",   "title": "企业工程业绩",     "score_typical": 5,  "formula": "A 级 3/B 级 2/C 级 1,limit 5"},
+      {"id": "4.1", "title": "项目经理工程业绩", "score_typical": 12, "formula": "A 级 3/B 级 2/C 级 1,limit 12"},
+      {"id": "4.2", "title": "项目管理班子动态信用", "score_typical": 8, "formula": "注册类 ×2% + 非注册类 ×1.5%,limit 8"}
+    ]
+  },
+
+  "drives": {
+    "_doc": "范本字段驱动哪些章节/校验。",
+    "outline.topics":            ["chapter_plan.chapter_anchors", "bid_plan_verify.outline_coverage"],
+    "format_rules":              ["bid_assemble.fmt", "bid_format_audit"],
+    "rejection_clauses_b1":      ["disqualification_rules.md", "bid_compliance"],
+    "restriction_1_4_3":         ["bid_compliance.qualification_check"],
+    "scoring_method":            ["brain.md.section5", "evaluation_method.json"]
+  },
+
+  "_source": {
+    "based_on_projects": ["仓储类项目A(2026-04)", "仓储类项目B(2026-04)", "学校类项目(2026-05)"],
+    "extraction_date": "2026-05-05",
+    "verified_pages": ["招标文件 p1-p160 范围内的不变内容,主要集中在第二章投标人须知 + 第三章评标办法 + 第七章技术标准和要求"],
+    "applicability": "西藏自治区公共资源交易系统发布的简易综合评估法小型工程项目(房建/邮政/教育/政府类)。非西藏 / 非简易综合评估法 / 大型复杂工程时不命中。"
+  }
+}

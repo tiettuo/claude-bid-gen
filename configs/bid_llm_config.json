@@ -1,0 +1,143 @@
+{
+  "_comment": "投标文件批量生成 - 多模型客户端配置。API Key 从环境变量读取，建议配置到 ~/.env 或系统环境。",
+  "models": {
+    "glm": {
+      "display_name": "智谱 GLM-4.6",
+      "endpoint": "https://open.bigmodel.cn/api/paas/v4",
+      "model_name": "glm-4.6",
+      "api_key_env": "GLM_API_KEY",
+      "max_tokens": 8000,
+      "output_char_cap": 5500,
+      "supports_openai_compat": true,
+      "extra_body": {
+        "thinking": {
+          "type": "disabled"
+        }
+      },
+      "notes": "中文公文能力强；GLM-4.6 默认自动判断是否推理，extra_body 强制关"
+    },
+    "deepseek": {
+      "display_name": "DeepSeek-V4-Flash",
+      "endpoint": "https://api.deepseek.com/v1",
+      "model_name": "deepseek-v4-flash",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "max_tokens": 16000,
+      "output_char_cap": 12000,
+      "supports_openai_compat": true,
+      "notes": "1M context(够装整本招标),非推理模式;输入 $0.14/1M tokens;输出 $0.28/1M。提取/翻译场景专用（需吞整本招标）。"
+    },
+    "deepseek_chat": {
+      "display_name": "DeepSeek-V3-Chat",
+      "endpoint": "https://api.deepseek.com/v1",
+      "model_name": "deepseek-chat",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "max_tokens": 8000,
+      "output_char_cap": 5500,
+      "supports_openai_compat": true,
+      "notes": "v3 chat 路径，64K 上下文，写作场景专用。写作单章 prompt ~5K 字够用，无需 1M context；风格更成熟稳定。"
+    },
+    "qwen": {
+      "display_name": "通义千问 Qwen3-Max",
+      "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "model_name": "qwen3-max",
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "max_tokens": 8000,
+      "output_char_cap": 5500,
+      "supports_openai_compat": true,
+      "disabled": true,
+      "notes": "字数严重不足(66-68%)，已禁用。测试替代方案 qwen35（Qwen3.5-Plus）"
+    },
+    "qwen35": {
+      "display_name": "通义千问 Qwen3.5-Plus",
+      "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "model_name": "qwen3.5-plus",
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "max_tokens": 8000,
+      "output_char_cap": 5500,
+      "supports_openai_compat": true,
+      "notes": "替代 qwen3-max；实测81%字数达成率（vs 69%），仍非主力，仅兜底应急"
+    },
+    "kimi": {
+      "display_name": "月之暗面 Kimi-K2.5",
+      "endpoint": "https://api.moonshot.cn/v1",
+      "model_name": "kimi-k2.5",
+      "api_key_env": "MOONSHOT_API_KEY",
+      "max_tokens": 8000,
+      "output_char_cap": 5500,
+      "supports_openai_compat": true,
+      "force_temperature": 0.6,
+      "extra_body": {
+        "thinking": {
+          "type": "disabled"
+        }
+      },
+      "notes": "长文档一致性好；kimi-k2.5 温度不可变强制 0.6（k2-thinking 才是 1.0）；extra_body 关深度思考"
+    },
+    "minimax": {
+      "display_name": "MiniMax-M2.5",
+      "endpoint": "https://api.minimaxi.com/v1",
+      "model_name": "MiniMax-M2.5",
+      "api_key_env": "MINIMAX_API_KEY",
+      "max_tokens": 8000,
+      "output_char_cap": 5000,
+      "supports_openai_compat": true,
+      "disabled": true,
+      "extra_body": {
+        "reasoning_split": true
+      },
+      "strip_think_tag": true,
+      "notes": "P/G比仅0.58(项目针对性差)，已禁用。升级到 minimax_m27（M2.7）"
+    },
+    "minimax_m27": {
+      "display_name": "MiniMax-M2.7",
+      "endpoint": "https://api.minimaxi.com/v1",
+      "model_name": "MiniMax-M2.7",
+      "api_key_env": "MINIMAX_API_KEY",
+      "max_tokens": 8000,
+      "output_char_cap": 5500,
+      "supports_openai_compat": true,
+      "extra_body": {
+        "reasoning_split": true
+      },
+      "strip_think_tag": true,
+      "notes": "字数109%达标；P/G比0.42偏低但字数够用。reasoning_split分离think；strip_think_tag兜底剥离"
+    },
+    "doubao": {
+      "display_name": "字节豆包 Pro",
+      "endpoint": "https://ark.cn-beijing.volces.com/api/v3",
+      "model_name": "doubao-1-5-pro-32k-250115",
+      "api_key_env": "ARK_API_KEY",
+      "max_tokens": 8000,
+      "output_char_cap": 5500,
+      "supports_openai_compat": true,
+      "disabled": true,
+      "notes": "未充值停用；保留配置以便日后恢复；disabled=true 时不进入分配池"
+    }
+  },
+  "retry": {
+    "max_attempts": 3,
+    "backoff_seconds": 30,
+    "timeout_seconds": 180
+  },
+  "default_model": "kimi",
+  "fallback_order": [
+    "kimi",
+    "deepseek",
+    "deepseek_chat",
+    "glm",
+    "qwen35",
+    "minimax_m27"
+  ],
+  "default_temperature": 0.6,
+  "temperature_variants": [
+    0.5,
+    0.7,
+    0.9
+  ],
+  "max_concurrency": {
+    "default": 3,
+    "glm": 1,
+    "qwen": 1,
+    "minimax": 2
+  }
+}

@@ -1,0 +1,33 @@
+# bid-gen 投标技术文件生成系统 — Python 依赖
+# 来源：Claude Code 脚本目录/bid_run.py 的 REQUIRED_PKGS / OPTIONAL_PKGS
+
+# ─── 必需 ───────────────────────────────────────────
+pdfplumber>=0.11          # PDF 文本/表格提取
+openpyxl>=3.1             # Excel xlsx 读取
+python-docx>=1.1          # DOCX 组装（import 名为 docx）
+openai>=1.50              # LLM 客户端（兼容 GLM/DeepSeek/Qwen/Kimi/MiniMax OpenAI 协议）
+
+# ─── 图表渲染 ────────────────────────────────────────
+matplotlib>=3.9           # 7 种图表渲染器
+numpy>=1.26               # 图表数据处理
+Pillow>=10.0              # 图片处理 / EXIF 清理
+
+# ─── 可选（缺失会降级，建议安装）──────────────────────
+simhash>=2.1              # Step 6 相似度检查
+datasketch>=1.6           # 相似度备用算法
+jieba>=0.42               # 中文分词
+PyMuPDF>=1.24             # PDF 解析备用引擎（import 名 fitz）
+olefile>=0.46             # 旧版 .doc 文件支持
+xlrd>=2.0                 # 旧版 .xls 文件支持
+python-dotenv>=1.0        # 自动加载 .env
+
+# ─── 系统二进制（需手动安装）─────────────────────────
+# pandoc          — Step 4 组装 DOCX 必需
+#   macOS:   brew install pandoc
+#   Ubuntu:  apt-get install pandoc
+#   Windows: choco install pandoc
+#
+# 中文字体（matplotlib 渲染图表用）—— 任一即可：
+#   macOS:   系统自带 PingFang SC / Heiti SC
+#   Ubuntu:  apt-get install fonts-noto-cjk
+#   Windows: 系统自带 Microsoft YaHei / SimHei

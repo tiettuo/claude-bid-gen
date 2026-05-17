@@ -1,0 +1,169 @@
+{
+  "name": "bid-gen 投标文件自动生成",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "1",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "fileSelector": "/path/to/招标文件.zip",
+        "options": {}
+      },
+      "id": "2",
+      "name": "Read 招标 zip",
+      "type": "n8n-nodes-base.readBinaryFile",
+      "typeVersion": 1,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5000/upload",
+        "sendBinaryData": true,
+        "binaryProperty": "data",
+        "options": {
+          "bodyContentType": "multipart-form-data"
+        },
+        "bodyParametersUi": {
+          "parameter": [
+            {"name": "company_name", "value": "={{$json.company_name || '投标单位名称'}}"},
+            {"name": "target_pages", "value": "={{$json.target_pages || ''}}"}
+          ]
+        }
+      },
+      "id": "3",
+      "name": "POST /upload",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [640, 300],
+      "notes": "上传招标 zip;响应是 302 重定向到 /status/<job_id>;从 Location header 提取 job_id"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 从 Location header (302) 提取 job_id\nconst loc = $input.first().headers.location || $input.first().json.location || '';\nconst m = loc.match(/\\/status\\/([a-f0-9]+)/);\nreturn [{ json: { job_id: m ? m[1] : null, location: loc } }];"
+      },
+      "id": "4",
+      "name": "提取 job_id",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [840, 300]
+    },
+    {
+      "parameters": {
+        "amount": 30,
+        "unit": "seconds"
+      },
+      "id": "5",
+      "name": "Wait 30s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [1040, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=http://127.0.0.1:5000/status/{{$node['提取 job_id'].json.job_id}}?json=1",
+        "options": {}
+      },
+      "id": "6",
+      "name": "GET /status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1240, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {"value1": "={{$json.finished}}", "value2": true}
+          ]
+        }
+      },
+      "id": "7",
+      "name": "完成?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1440, 300],
+      "notes": "false → 回到 Wait;true → 进入下载"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=http://127.0.0.1:5000/download/{{$node['提取 job_id'].json.job_id}}",
+        "responseFormat": "file",
+        "options": {}
+      },
+      "id": "8",
+      "name": "GET /download",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1640, 200]
+    },
+    {
+      "parameters": {
+        "fileName": "=/tmp/bid_result_{{$node['提取 job_id'].json.job_id}}.zip",
+        "options": {}
+      },
+      "id": "9",
+      "name": "保存 docx zip",
+      "type": "n8n-nodes-base.writeBinaryFile",
+      "typeVersion": 1,
+      "position": [1840, 200]
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "subject": "投标文件已生成: {{$node['提取 job_id'].json.job_id}}",
+        "toEmail": "you@example.com",
+        "text": "=任务完成,docx 已保存到 /tmp/bid_result_{{$node['提取 job_id'].json.job_id}}.zip\\n\\n查看详情: http://127.0.0.1:5000/status/{{$node['提取 job_id'].json.job_id}}"
+      },
+      "id": "10",
+      "name": "邮件通知(可选)",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [2040, 200],
+      "disabled": true,
+      "notes": "需要配置 SMTP credential 才能启用"
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [[{"node": "Read 招标 zip", "type": "main", "index": 0}]]
+    },
+    "Read 招标 zip": {
+      "main": [[{"node": "POST /upload", "type": "main", "index": 0}]]
+    },
+    "POST /upload": {
+      "main": [[{"node": "提取 job_id", "type": "main", "index": 0}]]
+    },
+    "提取 job_id": {
+      "main": [[{"node": "Wait 30s", "type": "main", "index": 0}]]
+    },
+    "Wait 30s": {
+      "main": [[{"node": "GET /status", "type": "main", "index": 0}]]
+    },
+    "GET /status": {
+      "main": [[{"node": "完成?", "type": "main", "index": 0}]]
+    },
+    "完成?": {
+      "main": [
+        [{"node": "GET /download", "type": "main", "index": 0}],
+        [{"node": "Wait 30s", "type": "main", "index": 0}]
+      ]
+    },
+    "GET /download": {
+      "main": [[{"node": "保存 docx zip", "type": "main", "index": 0}]]
+    },
+    "保存 docx zip": {
+      "main": [[{"node": "邮件通知(可选)", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "active": false,
+  "tags": ["bid-gen"]
+}
