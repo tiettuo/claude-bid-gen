@@ -75,8 +75,9 @@ v2 的解决方案:**强制把骨架抽取交给机器(LLM 出 JSON),让 Claude 
 ### 2.1 命令
 
 ```bash
-python Claude Code 脚本目录/bid_extract.py "$TENDER_DIR"
-python Claude Code 脚本目录/bid_fingerprint.py "$TENDER_DIR"  # 推荐
+cd "${BID_GEN_HOME:-BID_GEN_HOME}"
+python3 scripts/bid_extract.py "$TENDER_DIR"
+python3 scripts/bid_fingerprint.py "$TENDER_DIR"  # 推荐
 ```
 
 ### 2.2 关键产出
@@ -95,7 +96,7 @@ python Claude Code 脚本目录/bid_fingerprint.py "$TENDER_DIR"  # 推荐
 - `scoring`:评分办法
 - `outline`:**施组编制大纲(★ v2 新增)**
 
-`outline` 类的关键词在 `Claude Code 配置目录/bid_vision_config.json`,包括"主要技术内容""技术标准和要求""施工组织设计编制要求"等。这是 v2 修复 R1 根因的第一道闸——保证招标第七章 16 项原文一定走视觉重抽,不被 pdfplumber 漏行。
+`outline` 类的关键词在 `${BID_GEN_HOME:-BID_GEN_HOME}/configs/bid_vision_config.json`,包括"主要技术内容""技术标准和要求""施工组织设计编制要求"等。这是 v2 修复 R1 根因的第一道闸——保证招标第七章 16 项原文一定走视觉重抽,不被 pdfplumber 漏行。
 
 ### 2.4 完成判据
 
@@ -110,7 +111,8 @@ python Claude Code 脚本目录/bid_fingerprint.py "$TENDER_DIR"  # 推荐
 ### 3.1 命令
 
 ```bash
-python Claude Code 脚本目录/bid_skeleton_extract.py "$TENDER_DIR"
+cd "${BID_GEN_HOME:-BID_GEN_HOME}"
+python3 scripts/bid_skeleton_extract.py "$TENDER_DIR"
 ```
 
 或在 bid_run.py 流程内自动跑(已嵌入 Step 1.5)。
@@ -335,7 +337,8 @@ python Claude Code 脚本目录/bid_skeleton_extract.py "$TENDER_DIR"
 ### 5.1 命令
 
 ```bash
-python Claude Code 脚本目录/bid_plan_verify.py "$TENDER_DIR"
+cd "${BID_GEN_HOME:-BID_GEN_HOME}"
+python3 scripts/bid_plan_verify.py "$TENDER_DIR"
 ```
 
 ### 5.2 八条铁律(v2 共 8 项,新增 5/6/7/8)

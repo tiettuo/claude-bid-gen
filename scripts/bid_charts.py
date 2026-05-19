@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import random
 import re
 import shutil
 import sys
@@ -1925,6 +1926,147 @@ def _prepend_chapter_number(text: str, chapter_idx: int) -> str:
     return text
 
 
+# ── 标题编号风格 ─────────────────────────────────────────────
+# 12 种常用编号体系，组装时随机分配给变体
+
+_CN_NUMERALS = "一二三四五六七八九十"
+_ROMAN = ["Ⅰ","Ⅱ","Ⅲ","Ⅳ","Ⅴ","Ⅵ","Ⅶ","Ⅷ","Ⅸ","Ⅹ","Ⅺ","Ⅻ"]
+
+def _cn_num(n: int) -> str:
+    """整数转中文数字：1→一, 10→十, 12→十二"""
+    if n <= 0:
+        return ""
+    if n <= 10:
+        return _CN_NUMERALS[n - 1]
+    if n < 20:
+        return "十" + ("" if n == 10 else _CN_NUMERALS[n - 11])
+    if n < 100:
+        tens, ones = divmod(n, 10)
+        s = _CN_NUMERALS[tens - 1] + "十"
+        if ones:
+            s += _CN_NUMERALS[ones - 1]
+        return s
+    return str(n)
+
+_HEADING_STYLES = {
+    # id: (name, h2_fmt, h3_fmt, h4_fmt)
+    # 格式函数签名: (ch_str, h2_n, h3_n, h4_n) -> prefix_str
+    "A": ("数字分节",
+          lambda c, h2, h3, h4: f"{int(c)}.{h2}",
+          lambda c, h2, h3, h4: f"{int(c)}.{h2}.{h3}",
+          lambda c, h2, h3, h4: f"{int(c)}.{h2}.{h3}.{h4}"),
+    "B": ("数字带章号",
+          lambda c, h2, h3, h4: f"{c}.{h2}",
+          lambda c, h2, h3, h4: f"{c}.{h2}.{h3}",
+          lambda c, h2, h3, h4: f"{c}.{h2}.{h3}.{h4}"),
+    "C": ("公文传统",
+          lambda c, h2, h3, h4: f"{_cn_num(h2)}、",
+          lambda c, h2, h3, h4: f"（{_cn_num(h3)}）",
+          lambda c, h2, h3, h4: f"{h4}."),
+    "D": ("公文简化",
+          lambda c, h2, h3, h4: f"{_cn_num(h2)}、",
+          lambda c, h2, h3, h4: f"{h3}.",
+          lambda c, h2, h3, h4: f"（{h4}）"),
+    "E": ("公文完整",
+          lambda c, h2, h3, h4: f"{_cn_num(h2)}、",
+          lambda c, h2, h3, h4: f"（{_cn_num(h3)}）",
+          lambda c, h2, h3, h4: f"{h4}."),
+    "F": ("纯数字",
+          lambda c, h2, h3, h4: f"{h2}.",
+          lambda c, h2, h3, h4: f"{h3}.",
+          lambda c, h2, h3, h4: f"{h4}."),
+    "G": ("数字+括号",
+          lambda c, h2, h3, h4: f"{h2}.",
+          lambda c, h2, h3, h4: f"（{h3}）",
+          lambda c, h2, h3, h4: f"{'①②③④⑤⑥⑦⑧⑨⑩'[h4-1]}" if h4 <= 10 else f"({h4})"),
+    "H": ("圆圈数字",
+          lambda c, h2, h3, h4: f"{'①②③④⑤⑥⑦⑧⑨⑩'[h2-1]}" if h2 <= 10 else f"({h2})",
+          lambda c, h2, h3, h4: f"{'①②③④⑤⑥⑦⑧⑨⑩'[h3-1]}" if h3 <= 10 else f"({h3})",
+          lambda c, h2, h3, h4: f"{'①②③④⑤⑥⑦⑧⑨⑩'[h4-1]}" if h4 <= 10 else f"({h4})"),
+    "I": ("章节式",
+          lambda c, h2, h3, h4: f"第{_cn_num(h2)}节",
+          lambda c, h2, h3, h4: f"{_cn_num(h3)}、",
+          lambda c, h2, h3, h4: f"（{_cn_num(h4)}）"),
+    "J": ("罗马数字",
+          lambda c, h2, h3, h4: f"{_ROMAN[h2-1]}." if h2 <= 12 else f"{h2}.",
+          lambda c, h2, h3, h4: f"{_ROMAN[h2-1]}.{h3}" if h2 <= 12 else f"{h2}.{h3}",
+          lambda c, h2, h3, h4: f"{_ROMAN[h2-1]}.{h3}.{h4}" if h2 <= 12 else f"{h2}.{h3}.{h4}"),
+    "K": ("混合A",
+          lambda c, h2, h3, h4: f"{_cn_num(h2)}、",
+          lambda c, h2, h3, h4: f"（{_cn_num(h3)}）",
+          lambda c, h2, h3, h4: f"{h4})"),
+    "L": ("混合B",
+          lambda c, h2, h3, h4: f"（{_cn_num(h2)}）",
+          lambda c, h2, h3, h4: f"{h3}.",
+          lambda c, h2, h3, h4: f"（{h4}）"),
+}
+
+
+def assign_heading_style(variant_seed: int) -> str:
+    """基于 variant seed 随机分配一种编号风格。"""
+    keys = list(_HEADING_STYLES.keys())
+    rng = random.Random(variant_seed ^ 0xBEEF)
+    return rng.choice(keys)
+
+
+def _normalize_heading_numbers(text: str, chapter_idx: int,
+                               style_id: str = "B") -> str:
+    """为 H2/H3/H4 自动补序号（支持 12 种编号风格）。
+
+    LLM 输出的标题可能带序号（07.1 xxx）也可能不带（施工方案）。
+    此函数先剥离已有序号，再用指定风格重新编号。
+
+    style_id: A-L 对应 _HEADING_STYLES 中的编号风格。
+    """
+    if chapter_idx <= 0:
+        return text
+    ch_str = str(chapter_idx).zfill(2)
+
+    style = _HEADING_STYLES.get(style_id, _HEADING_STYLES["B"])
+    h2_fmt, h3_fmt, _ = style[1], style[2], style[3]
+
+    # 检测标题行
+    h2_pat = re.compile(r'^(##)\s+')
+    h3_pat = re.compile(r'^(###)\s+')
+    h4_pat = re.compile(r'^(####)\s+')
+    # 已有序号模式（各种格式都匹配，以便剥离）
+    any_num = re.compile(r'^(\d+\.?\d*\.?\d*\.?\d*|[一二三四五六七八九十]+[、．.]|（[一二三四五六七八九十\d]+）|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+\.?\d*|第[一二三四五六七八九十\d]+节|[\d]+[）)]|①②③④⑤⑥⑦⑧⑨⑩)\s*')
+
+    lines = text.split("\n")
+    h2_counter = 0
+    h3_counter = 0
+
+    for i, line in enumerate(lines):
+        # H3（要先于 H2 检测，因为 ### 也匹配 ##）
+        m3 = h3_pat.match(line)
+        if m3:
+            h3_counter += 1
+            title = line[m3.end():]
+            # 剥离已有编号
+            nm = any_num.match(title)
+            if nm:
+                title = title[nm.end():]
+            prefix = h3_fmt(ch_str, h2_counter, h3_counter, 0)
+            lines[i] = f"### {prefix} {title}"
+            continue
+
+        # H2
+        m2 = h2_pat.match(line)
+        if m2 and not h3_pat.match(line):
+            h2_counter += 1
+            h3_counter = 0
+            title = line[m2.end():]
+            # 剥离已有编号
+            nm = any_num.match(title)
+            if nm:
+                title = title[nm.end():]
+            prefix = h2_fmt(ch_str, h2_counter, 0, 0)
+            lines[i] = f"## {prefix} {title}"
+            continue
+
+    return "\n".join(lines)
+
+
 def _strip_bare_json(text: str, filename: str, data_dir: Path,
                      log: logging.Logger) -> str:
     """扫描并剥离非围栏包裹的裸 JSON 对象/数组。
@@ -2540,6 +2682,7 @@ def preprocess_md(
     log: logging.Logger,
     chapter_idx: int = 0,
     chart_style: dict | None = None,
+    heading_style: str = "B",
 ) -> Path:
     """处理单个 md，返回临时 md 的 Path。
 
@@ -2547,6 +2690,7 @@ def preprocess_md(
     """
     text = src_md.read_text(encoding="utf-8")
     text = _prepend_chapter_number(text, chapter_idx)
+    text = _normalize_heading_numbers(text, chapter_idx, heading_style)
     blocks = list(iter_fences(text))
 
     stem = src_md.stem
@@ -2667,10 +2811,12 @@ def preprocess_chapter_dir(
     variant_id: str = "",
     add_chapter_prefix: bool = True,
     chart_style: dict | None = None,
+    heading_style: str = "",
 ) -> list[Path]:
     """对一个章节目录（output/ 或 output/VXX/）做批量预处理。
 
     返回临时 md 路径列表，供 pandoc 读取。原 md 文件不动。
+    heading_style: A-L 编号风格，空字符串则自动基于 variant_id 随机分配。
     """
     tmp_dir = chapter_dir / ".assemble_tmp"
     charts_dir = chapter_dir / "charts"
@@ -2682,6 +2828,13 @@ def preprocess_chapter_dir(
     charts_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
 
+    # 编号风格：指定或随机分配
+    if not heading_style:
+        seed = hash(variant_id) & 0xFFFFFFFF
+        heading_style = assign_heading_style(seed)
+    style_name = _HEADING_STYLES.get(heading_style, _HEADING_STYLES["B"])[0]
+    log.info(f"标题编号风格: {heading_style}({style_name})  variant={variant_id}")
+
     log.info(f"图表预处理: {chapter_dir.name}  ({len(md_files)} 个章节)")
     tmp_paths = []
     for idx, src in enumerate(md_files, start=1):
@@ -2691,7 +2844,8 @@ def preprocess_chapter_dir(
         else:
             chapter_idx = 0
         tmp = preprocess_md(src, tmp_dir, charts_dir, data_dir, variant_id, log,
-                            chapter_idx=chapter_idx, chart_style=chart_style)
+                            chapter_idx=chapter_idx, chart_style=chart_style,
+                            heading_style=heading_style)
         tmp_paths.append(tmp)
     return tmp_paths
 

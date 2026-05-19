@@ -55,7 +55,8 @@
       "max_tokens": 8000,
       "output_char_cap": 5500,
       "supports_openai_compat": true,
-      "notes": "替代 qwen3-max；实测81%字数达成率（vs 69%），仍非主力，仅兜底应急"
+      "writer_role": "system_only",
+      "notes": "替代 qwen3-max；实测81%字数达成率（vs 69%），仅用于制度管理类章节和兜底，writer_role=system_only 阻止进入核心章节"
     },
     "kimi": {
       "display_name": "月之暗面 Kimi-K2.5",
@@ -100,7 +101,8 @@
         "reasoning_split": true
       },
       "strip_think_tag": true,
-      "notes": "字数109%达标；P/G比0.42偏低但字数够用。reasoning_split分离think；strip_think_tag兜底剥离"
+      "writer_role": "system_only",
+      "notes": "字数109%达标；P/G比0.42偏低但字数够用。writer_role=system_only 仅用于制度管理类章节。reasoning_split分离think；strip_think_tag兜底剥离"
     },
     "doubao": {
       "display_name": "字节豆包 Pro",

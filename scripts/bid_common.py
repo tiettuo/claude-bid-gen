@@ -254,9 +254,11 @@ def parse_plan_subitems(plan_path: Path) -> dict[str, list[dict]]:
         return {}
     text = plan_path.read_text(encoding="utf-8")
     m = re.search(r"##\s*子项分配[^\n]*\n(.*?)(?=\n##\s|\Z)", text, re.S)
-    if not m:
-        return {}
-    section = m.group(1)
+    if m:
+        section = m.group(1)
+    else:
+        # 无"子项分配"标题时，直接解析全文（兼容 chapter_plan_variant.md）
+        section = text
     result: dict[str, list[dict]] = {}
     current: str | None = None
     for line in section.splitlines():

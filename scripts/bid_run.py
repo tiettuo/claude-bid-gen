@@ -53,6 +53,7 @@ STEPS = [
     "input_assemble",# bid_input_assemble.py (合并 → project_input.json,与 docx assemble 区分)
     "fingerprint",   # bid_fingerprint.py (可选)
     "variants",      # bid_variants.py (批量专用)
+    "plan_variants", # bid_plan_variants.py (每变体独立标题计划+图表分配)
     "chart_specs",   # bid_chart_specs.py (从 chapter_plan 派生 chart_specs.json)
     "write",         # bid_writer.py
     "review",        # bid_reviewer.py
@@ -958,6 +959,28 @@ def run_pipeline(tender_dir: Path, args, log) -> int:
                     mark_step(state, step, "skip")
                     continue
                 code = run_script("bid_chart_specs.py", [str(tender_dir)], log)
+                # 派生失败仅警告,不阻断
+            elif step == "plan_variants":
+                # 为每个变体生成独立的标题计划 + 图表分配
+                if mode != "batch":
+                    log.info("  单份模式，跳过 plan_variants")
+                    mark_step(state, step, "skip")
+                    continue
+                # 加载 variants 列表
+                _vj = ext / "variants.json"
+                _vlist = json.loads(_vj.read_text(encoding="utf-8")).get("variants", []) if _vj.exists() else []
+                # 检查是否所有变体都已有
+                all_done = True
+                for v in _vlist:
+                    vp = output / v["id"] / "chapter_plan_variant.md"
+                    if not vp.exists():
+                        all_done = False
+                        break
+                if all_done and not args.force:
+                    log.info("  所有变体标题计划已存在，跳过")
+                    mark_step(state, step, "skip")
+                    continue
+                code = run_script("bid_plan_variants.py", [str(tender_dir)], log)
                 # 派生失败仅警告,不阻断
                 if code != 0:
                     log.warning(f"  chart_specs 派生失败 code={code},降级为旧 prompt 流程")

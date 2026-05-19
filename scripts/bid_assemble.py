@@ -2394,14 +2394,43 @@ def _check_page_count(docx_path: Path, fmt: dict, log: logging.Logger) -> int | 
     return pages
 
 
-def _make_chart_style(variant_id: str) -> dict:
+def _make_chart_style(variant_id: str, variant: dict = None) -> dict:
     """按 variant 生成不同的图表视觉风格，防串标。
 
-    三个 variant 的图表在配色/字号/间距/圆角上各不相同：
-      V01: 蓝色系 标准字号 圆角
-      V02: 绿色系 加粗0.5pt 0.85间距
-      V03: 橙色系 减细 1.15间距 更大圆角
+    优先从 variant["chart_style"] 读取完整样式（由 bid_variants.py 的
+    generate_variant_style() 生成，包含 org_direction/box_shape/gantt 等
+    全部差异化参数）。若不存在则回退到 V01/V02/V03 硬编码样式。
     """
+    # 优先使用 variant.chart_style 的完整字段
+    if variant and isinstance(variant.get("chart_style"), dict):
+        cs = variant["chart_style"]
+        style = {}
+        # 方向
+        style["flow_direction"] = cs.get("flow_direction", cs.get("org_direction", "TB"))
+        # 字号/线宽/间距
+        style["font_size_offset"] = cs.get("font_size_offset", 0)
+        style["line_width"] = cs.get("line_width", 0.8)
+        style["flow_corner_radius"] = cs.get("flow_corner_radius", 4)
+        style["spacing_factor"] = cs.get("spacing_factor", 1.0)
+        style["chart_scale"] = cs.get("chart_scale", 1.0)
+        # 甘特图
+        style["gantt_grays"] = cs.get("gantt_grays", ["#4A4A4A", "#6E6E6E", "#929292", "#B6B6B6", "#8A8A8A"])
+        style["gantt_bar_hatch"] = cs.get("gantt_bar_hatch", "///")
+        style["gantt_bar_height"] = cs.get("gantt_bar_height", 0.55)
+        style["gantt_grid"] = cs.get("gantt_grid", "dashed")
+        style["gantt_milestone_style"] = cs.get("gantt_milestone_style", ":")
+        style["gantt_date_fmt"] = cs.get("gantt_date_fmt", "%m月")
+        # org chart
+        style["org_direction"] = cs.get("org_direction", "TB")
+        style["org_box_shape"] = cs.get("org_box_shape", "box")
+        # 资源曲线/网络图
+        style["resource_bar_width"] = cs.get("resource_bar_width", 0.6)
+        style["resource_hatches"] = cs.get("resource_hatches", ["", "//", "\\\\", "xx"])
+        style["network_node_radius"] = cs.get("network_node_radius", 0.3)
+        style["network_label_pos"] = cs.get("network_label_pos", "above")
+        return style
+
+    # 兜底：V01/V02/V03 硬编码
     styles = {
         "V01": {
             "flow_direction": "TB",
@@ -2409,7 +2438,7 @@ def _make_chart_style(variant_id: str) -> dict:
             "line_width": 0.8,
             "flow_corner_radius": 4,
             "spacing_factor": 1.0,
-            "chart_scale": 1.0,      # 基准尺寸
+            "chart_scale": 1.0,
             "gantt_grays": ["#4A4A4A", "#6E6E6E", "#929292", "#B6B6B6", "#8A8A8A"],
             "gantt_bar_hatch": "///",
             "gantt_bar_height": 0.55,
@@ -2421,7 +2450,7 @@ def _make_chart_style(variant_id: str) -> dict:
             "flow_direction": "TB",
             "font_size_offset": 2,
             "line_width": 1.5,
-            "chart_scale": 1.3,      # 放大 30%
+            "chart_scale": 1.3,
             "flow_corner_radius": 0,
             "spacing_factor": 0.80,
             "gantt_grays": ["#808080", "#A0A0A0", "#C0C0C0", "#595959", "#9E9E9E"],
@@ -2434,7 +2463,7 @@ def _make_chart_style(variant_id: str) -> dict:
         "V03": {
             "flow_direction": "BT",
             "font_size_offset": -2,
-            "chart_scale": 1.6,      # 放大 60%
+            "chart_scale": 1.6,
             "line_width": 0.5,
             "flow_corner_radius": 10,
             "spacing_factor": 1.20,
@@ -2525,7 +2554,7 @@ def _assemble_one(
 
     # ─── 图表预处理：剥离 JSON/mermaid，渲染进度甘特图 PNG ──
     variant_id = variant["id"] if variant else ""
-    chart_style = _make_chart_style(variant_id) if variant else None
+    chart_style = _make_chart_style(variant_id, variant=variant) if variant else None
     try:
         tmp_md_files = preprocess_chapter_dir(
             chapter_dir, md_files, log, variant_id,

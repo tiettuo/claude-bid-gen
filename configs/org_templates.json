@@ -1,0 +1,303 @@
+{
+  "_doc": "组织架构图模板库：5 种结构，覆盖土建/市政混合。chart_style.org_template 字段引用 template_id。",
+  "templates": {
+    "dept": {
+      "label": "部门制",
+      "description": "项目经理→总工+副经理→6-8 职能部门",
+      "typical_nodes": 14,
+      "depth": 3,
+      "root": "项目经理",
+      "children": [
+        {
+          "label": "技术负责人",
+          "children": [
+            {"label": "工程技术部", "children": []},
+            {"label": "质量检查部", "children": []},
+            {"label": "试验室", "children": []}
+          ]
+        },
+        {
+          "label": "项目副经理",
+          "children": [
+            {"label": "安全环保部", "children": []},
+            {"label": "物资设备部", "children": []},
+            {"label": "计划合同部", "children": []}
+          ]
+        },
+        {
+          "label": "综合办公室",
+          "children": [
+            {"label": "财务部", "children": []},
+            {"label": "后勤保障组", "children": []}
+          ]
+        }
+      ],
+      "variants": [
+        {
+          "_comment": "部门制变体A：增加安全总监",
+          "children": [
+            {
+              "label": "技术负责人",
+              "children": [
+                {"label": "工程技术部", "children": []},
+                {"label": "质量检查部", "children": []}
+              ]
+            },
+            {
+              "label": "项目副经理(生产)",
+              "children": [
+                {"label": "施工管理部", "children": []},
+                {"label": "物资设备部", "children": []}
+              ]
+            },
+            {
+              "label": "安全总监",
+              "children": [
+                {"label": "安全环保部", "children": []}
+              ]
+            },
+            {
+              "label": "综合办公室",
+              "children": [
+                {"label": "计划合同部", "children": []},
+                {"label": "财务部", "children": []},
+                {"label": "后勤保卫组", "children": []}
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "workzone": {
+      "label": "工区制",
+      "description": "项目经理→工区主任(按子工程分组)→专业队",
+      "typical_nodes": 12,
+      "depth": 3,
+      "root": "项目经理",
+      "children": [
+        {
+          "label": "总工程师",
+          "children": []
+        },
+        {
+          "label": "暖棚工区",
+          "children": [
+            {"label": "土建施工队", "children": []},
+            {"label": "钢结构安装队", "children": []}
+          ]
+        },
+        {
+          "label": "牧道工区",
+          "children": [
+            {"label": "路基施工队", "children": []},
+            {"label": "桥涵施工队", "children": []}
+          ]
+        },
+        {
+          "label": "综合保障组",
+          "children": [
+            {"label": "安全管理组", "children": []},
+            {"label": "物资机械组", "children": []},
+            {"label": "质量检测组", "children": []}
+          ]
+        }
+      ],
+      "variants": [
+        {
+          "_comment": "工区制变体：加市政工区",
+          "children": [
+            {
+              "label": "技术负责人",
+              "children": []
+            },
+            {
+              "label": "第一工区(棚圈工程)",
+              "children": [
+                {"label": "基础班组", "children": []},
+                {"label": "主体班组", "children": []}
+              ]
+            },
+            {
+              "label": "第二工区(牧道桥涵)",
+              "children": [
+                {"label": "路基班组", "children": []},
+                {"label": "桥涵班组", "children": []}
+              ]
+            },
+            {
+              "label": "第三工区(配套工程)",
+              "children": [
+                {"label": "安装班组", "children": []},
+                {"label": "收尾班组", "children": []}
+              ]
+            },
+            {
+              "label": "项目职能组",
+              "children": [
+                {"label": "安质部", "children": []},
+                {"label": "物资部", "children": []}
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "matrix": {
+      "label": "矩阵制",
+      "description": "项目经理→职能部门×工区的交叉矩阵",
+      "typical_nodes": 16,
+      "depth": 3,
+      "root": "项目经理",
+      "children": [
+        {
+          "label": "总工程师",
+          "children": [
+            {"label": "技术组", "children": []},
+            {"label": "质量组", "children": []},
+            {"label": "安全组", "children": []},
+            {"label": "试验组", "children": []}
+          ]
+        },
+        {
+          "label": "生产副经理",
+          "children": [
+            {"label": "棚圈施工作业队", "children": []},
+            {"label": "牧道施工作业队", "children": []},
+            {"label": "桥涵施工作业队", "children": []}
+          ]
+        },
+        {
+          "label": "经营副经理",
+          "children": [
+            {"label": "合同预算部", "children": []},
+            {"label": "物资采购部", "children": []},
+            {"label": "财务成本部", "children": []}
+          ]
+        },
+        {
+          "label": "综合管理部",
+          "children": []
+        }
+      ],
+      "variants": []
+    },
+    "flat": {
+      "label": "扁平制",
+      "description": "项目经理→3-4 个工作组，层级少、反应快",
+      "typical_nodes": 9,
+      "depth": 3,
+      "root": "项目经理",
+      "children": [
+        {
+          "label": "技术负责人",
+          "children": []
+        },
+        {
+          "label": "施工管理组",
+          "children": [
+            {"label": "土建施工组", "children": []},
+            {"label": "装配安装组", "children": []},
+            {"label": "道路工程组", "children": []}
+          ]
+        },
+        {
+          "label": "综合办公室",
+          "children": [
+            {"label": "后勤保障组", "children": []},
+            {"label": "安全环保组", "children": []}
+          ]
+        }
+      ],
+      "variants": [
+        {
+          "_comment": "扁平制变体：更精简",
+          "children": [
+            {
+              "label": "项目技术负责人",
+              "children": []
+            },
+            {
+              "label": "施工组",
+              "children": [
+                {"label": "棚圈施工队", "children": []},
+                {"label": "牧道施工队", "children": []}
+              ]
+            },
+            {
+              "label": "管理组",
+              "children": [
+                {"label": "质量安全组", "children": []},
+                {"label": "物资后勤组", "children": []}
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "composite": {
+      "label": "复合制",
+      "description": "项目经理→总工+生产经理→施工队→班组，四级管理",
+      "typical_nodes": 15,
+      "depth": 4,
+      "root": "项目经理",
+      "children": [
+        {
+          "label": "项目总工",
+          "children": [
+            {"label": "技术科", "children": []},
+            {"label": "质检科", "children": []},
+            {"label": "试验室", "children": []}
+          ]
+        },
+        {
+          "label": "生产经理",
+          "children": [
+            {
+              "label": "棚圈施工队",
+              "children": [
+                {"label": "基础班", "children": []},
+                {"label": "钢结构班", "children": []}
+              ]
+            },
+            {
+              "label": "牧道施工队",
+              "children": [
+                {"label": "路基班", "children": []},
+                {"label": "桥涵班", "children": []}
+              ]
+            }
+          ]
+        },
+        {
+          "label": "安全主管",
+          "children": [
+            {"label": "专职安全员", "children": []}
+          ]
+        },
+        {
+          "label": "综合办主任",
+          "children": [
+            {"label": "物资设备岗", "children": []},
+            {"label": "合同财务岗", "children": []}
+          ]
+        }
+      ],
+      "variants": []
+    }
+  },
+  "management_chart_types": {
+    "_doc": "管理体系章节(质量08/安全10/绿色11)的图表类型分配方案。每个变体选一种 combination。",
+    "combinations": [
+      ["hierarchy_flow", "hierarchy_flow", "hierarchy_flow"],
+      ["hierarchy_flow", "process_flow", "org_chart"],
+      ["process_flow", "hierarchy_flow", "process_flow"],
+      ["org_chart", "process_flow", "hierarchy_flow"],
+      ["process_flow", "org_chart", "process_flow"],
+      ["hierarchy_flow", "org_chart", "process_flow"],
+      ["org_chart", "org_chart", "hierarchy_flow"],
+      ["process_flow", "process_flow", "org_chart"],
+      ["hierarchy_flow", "process_flow", "process_flow"],
+      ["org_chart", "hierarchy_flow", "org_chart"]
+    ]
+  }
+}

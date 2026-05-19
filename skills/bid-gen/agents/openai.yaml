@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bid Gen"
+  short_description: "Run bid-gen-v3 tender proposal workflow"
+  default_prompt: "Use $bid-gen to process this tender project directory and produce the bid workflow outputs."

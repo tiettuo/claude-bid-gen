@@ -18,6 +18,7 @@
 | R8 | [round_08/report.md](round_08/report.md) | 知识抽取复用 | 33 片段可结构化 |
 | R9 | [round_09/report.md](round_09/report.md) | 自动化瓶颈 | Compliance 普遍失败 |
 | R10 | [round_10/report.md](round_10/report.md) | 综合报告+v4路线图 | P0-P3 行动计划 |
+| R11 | [round_11/report.md](round_11/report.md) | 深化调研：v3审计+成本建模+竞品+盲区 | P0完成度75%, 审校成本异常, 蓝海确认 | | [round_10/report.md](round_10/report.md) | 综合报告+v4路线图 | P0-P3 行动计划 |
 
 ## 搜索范围递进
 
@@ -31,5 +32,5 @@ R6: 全部 13 项目规则完整性 ← 范围扩大
 R7: 7 种图表渲染器质量 ← 范围扩大
 R8: 6 类知识点跨项目抽取 ← 范围扩大
 R9: 8 项目自动化状态 ← 范围扩大
-R10: 9 轮交叉对账 + 路线图 ← 综合
+R10 | [round_10/report.md]: 9 轮交叉对账 + 路线图 ← 综合
 ```

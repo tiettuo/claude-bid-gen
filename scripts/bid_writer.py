@@ -96,6 +96,7 @@ def build_chart_spec_block(specs: list[dict]) -> str:
     """把本章 chart specs 转成可塞进 prompt 的字符串。
 
     若 chart_specs.json 为空返回空字符串(prompt 走旧的 7 种 type 总览)。
+    支持 _override_type 和 _skip 字段（来自 chart_assignment.json）。
     """
     if not specs:
         return ""
@@ -106,9 +107,11 @@ def build_chart_spec_block(specs: list[dict]) -> str:
         return ""
     lines = ["【本章必须输出的 ```json``` 图表块(由 chart_specs.json 派生,严格按规格)】"]
     for i, s in enumerate(specs, 1):
+        if s.get("_skip"):
+            continue
         flag = "★ 招标硬性要求" if s.get("required") else "建议补充"
         sec = s.get("section") or "末尾"
-        ctype = s.get("type", "")
+        ctype = s.get("_override_type") or s.get("type", "")
         hint = s.get("data_hint", "")
         lines.append(f"\n图 {i}({flag}) — 在 `{sec}` 节末附 ```json``` 块,类型 `{ctype}`,内容: {hint}")
         snippet = get_schema_prompt_snippet(ctype)
@@ -451,9 +454,17 @@ def _build_block3_chapter(
     subitems: list[dict], h1_title: str, band_lo: int, band_hi: int,
     target: int, coverage_line: str,
 ) -> str:
-    """Block 3: 本章任务(整章模式)。"""
+    """Block 3: 本章任务(整章模式)。
+
+    合格制(passfail)：不预设二级标题，LLM 自由组织章节结构，最大化差异化。
+    评分制(scoring)：严格对齐评分项，二级标题必须覆盖评分点。
+    """
     equip_lines = "\n".join(f"  - {k}: {v:+d} 台" for k, v in variant.get("equip_delta", {}).items())
     skeleton_block = render_skeleton_for_prompt(skeleton)
+
+    # 评标模式路由
+    eval_mode = (_AUTHORING_CTX.get("evaluation") or {}).get("evaluation_mode", "passfail")
+    is_scoring = eval_mode == "scoring"
 
     lines = [
         "【Block 3：本章任务（具体写什么）】",
@@ -464,24 +475,42 @@ def _build_block3_chapter(
         "",
     ]
 
-    # Phase 6 修正:subitems 非空时只用 subitem 作为 H2 唯一骨架
-    # (不再注入 skeleton,避免 writer 同时输出 skeleton "（一）/（二）"+ subitems "N.M" 双套 H2)
-    if subitems:
-        subitem_lines = "\n".join(
-            f"  - ## {s['title']}（目标 {s['chars']} 字，±15% 带）" for s in subitems
-        )
-        lines.extend([
-            f"本章必须输出且**只输出** {len(subitems)} 个 H2 二级子节(按顺序,标题字面一致含 N.M 序号不变,不得增减/重排/拆分)：",
-            subitem_lines,
-            "",
-        ])
+    if is_scoring:
+        # ── 评分制：严格对齐评分项，二级标题必须覆盖 ──
+        if subitems:
+            subitem_lines = "\n".join(
+                f"  - ## {s['title']}（目标 {s['chars']} 字）" for s in subitems
+            )
+            lines.extend([
+                f"本章必须输出且**只输出** {len(subitems)} 个 H2 二级子节"
+                f"(按顺序,标题字面一致含序号不变,不得增减/重排/拆分)：",
+                subitem_lines,
+                "",
+            ])
+        else:
+            lines.extend([
+                "本章必须使用的 H2/H3 骨架(顺序锁定,一字不动,不得新增/删除/重排)：",
+                skeleton_block,
+                "",
+            ])
     else:
-        # 大纲无子节兜底:走 skeleton_block 旧 4 子项
+        # ── 合格制：不预设二级标题，LLM 自由组织 ──
         lines.extend([
-            "本章必须使用的 H2/H3 骨架(顺序锁定,一字不动,不得新增/删除/重排)：",
-            skeleton_block,
+            "请自由组织本章结构。你可以自行决定分几个二级标题 `##`、"
+            "是否需要三级标题 `###`、各节篇幅分配等。要求：",
+            "  - 内容必须紧扣章节主题，专业且有深度",
+            "  - 自然融入下方「评分关键词」中的关键内容",
+            "  - 总字数达到目标即可，各小节篇幅自行把握",
+            "  - 禁止使用空洞的模板化表述（如\"编制依据/实施方案/保障措施/应急响应\"）",
             "",
         ])
+        # 如果有 subitems，仅作为参考方向提示（不强求）
+        if subitems:
+            ref_lines = "；".join(s['title'] for s in subitems)
+            lines.extend([
+                f"（参考方向：{ref_lines}。仅作参考，可自由调整）",
+                "",
+            ])
 
     lines.extend([
         "评分关键词（必须在正文实质性展开，不得照抄成 H2/H3 标题）：",
@@ -491,12 +520,23 @@ def _build_block3_chapter(
         "图表不计入字数；该用表就用表、该用图就用图。",
         "",
         "variants 差异化（必须自然融入正文叙述，严禁回显本段标签名）：",
-        f"  · 工期偏移：{variant['schedule_offset_days']:+d} 日历天",
         f"  · 劳动力配置系数：{variant['labor_factor']}",
         "  · 主要机械调整：",
         equip_lines if equip_lines else "    （无）",
         f"  · 优先引用规范版本：{variant.get('standard_year_preference','-')} 年版（不确定的规范不强加版本）",
     ])
+
+    # 组织架构模板注入（仅 04 章）
+    org_template_json = chapter.get("_org_template_json")
+    if org_template_json:
+        lines.extend([
+            "",
+            f"★ 组织架构图必须使用以下{chapter.get('_org_template_label', '')}模板结构（严格按此 JSON 结构生成 org_chart）：",
+            "```json",
+            org_template_json,
+            "```",
+            "  岗位名称可根据项目实际微调，但层级结构和分支数必须与模板一致。",
+        ])
     return "\n".join(lines).rstrip()
 
 
@@ -528,7 +568,6 @@ def _build_block3_subitem(
         "  · 不重复其他兄弟子节内容",
         "",
         "variants 差异化（融入正文，严禁回显标签名）：",
-        f"  · 工期偏移：{variant['schedule_offset_days']:+d} 日历天",
         f"  · 劳动力系数：{variant['labor_factor']}",
         "  · 主要机械调整：",
         equip_lines if equip_lines else "    （无）",
@@ -795,6 +834,18 @@ def _build_4block_user_prompt(
 
     chart_spec_block = build_chart_spec_block(get_chart_specs_for_chapter(chapter["num"]))
 
+    # 组织架构模板注入（仅 04 章，且 chart_assignment.json 中有模板数据时）
+    org_template_json = chapter.get("_org_template_json")
+    if org_template_json:
+        _org_template_block = (
+            f"\n★ 组织架构图必须使用以下{chapter.get('_org_template_label', '')}模板结构"
+            f"（严格按此 JSON 结构生成 org_chart）：\n"
+            f"```json\n{org_template_json}\n```\n"
+            f"  岗位名称可根据项目实际微调，但层级结构和分支数必须与模板一致。\n"
+        )
+    else:
+        _org_template_block = ""
+
     return f"""请为本投标项目撰写第 {chapter['num']} 章技术标内容。
 
 {block1}
@@ -806,6 +857,7 @@ def _build_4block_user_prompt(
 {block4}
 
 {chart_spec_block}
+{_org_template_block}
 现在开始撰写正文："""
 
 
@@ -850,6 +902,18 @@ def _legacy_build_user_prompt(
 
     chart_spec_block = build_chart_spec_block(get_chart_specs_for_chapter(chapter["num"]))
 
+    # 组织架构模板注入（仅 04 章，且 chart_assignment.json 中有模板数据时）
+    org_template_json = chapter.get("_org_template_json")
+    if org_template_json:
+        _org_template_block = (
+            f"\n★ 组织架构图必须使用以下{chapter.get('_org_template_label', '')}模板结构"
+            f"（严格按此 JSON 结构生成 org_chart）：\n"
+            f"```json\n{org_template_json}\n```\n"
+            f"  岗位名称可根据项目实际微调，但层级结构和分支数必须与模板一致。\n"
+        )
+    else:
+        _org_template_block = ""
+
     return f"""请为本投标项目撰写第 {chapter['num']} 章技术标内容。
 
 【章节标题（必须字面一致，作为一级标题 `#`）】
@@ -869,7 +933,6 @@ def _legacy_build_user_prompt(
 目标 {target} 字，允许 ±15% 浮动带：{band_lo}–{band_hi} 字。**图表不计入字数**，该用表就用表、该用图就用图。
 
 【差异化技术参数（必须自然融入正文叙述，严禁回显本段标签名）】
-- 工期偏移：原工期基础上 {variant['schedule_offset_days']:+d} 日历天（仍在招标要求范围内）
 - 劳动力配置系数：{variant['labor_factor']}（原基础 × 该系数）
 - 主要机械调整：
 {equip_lines}
@@ -910,6 +973,7 @@ def _legacy_build_user_prompt(
 14. 纯 Markdown 输出，不要任何元注释或解释
 
 {chart_spec_block}
+{_org_template_block}
 现在开始撰写正文："""
 
 
@@ -1007,7 +1071,6 @@ def _legacy_build_subitem_user_prompt(
 - 不要重复其他兄弟子节的内容
 
 【差异化技术参数（融入正文，严禁回显本段标签名）】
-- 工期偏移：{variant['schedule_offset_days']:+d} 日历天
 - 劳动力系数：{variant['labor_factor']}
 - 主要机械调整：
 {equip_lines}
@@ -1076,6 +1139,7 @@ def build_polish_user_prompt(chapter: dict, variant: dict, draft_markdown: str) 
     )
     h1_title = vary_chapter_title(chapter["title"], variant)
     chart_spec_block = build_chart_spec_block(get_chart_specs_for_chapter(chapter["num"]))
+    _org_template_block = ""  # polish 阶段不需要注入组织架构模板
     return f"""【章节标题】
 第 {chapter['num']} 章 {h1_title}
 
@@ -1105,6 +1169,7 @@ def _generate_one_cross(
     plan: dict,
     get_sem,
     response_keywords: list[dict] | None = None,
+    variant_chart_overrides: dict | None = None,
 ) -> bool:
     """交叉多模型：子项并行 + 主笔润色"""
     vid = variant["id"]
@@ -1233,15 +1298,81 @@ def _generate_one_cross(
     return True
 
 
+# ── 变体图表上下文注入 ─────────────────────────────────────────────
+
+def _apply_variant_chart_context(
+    chapter: dict, variant: dict,
+    chart_overrides: dict | None, log: logging.Logger,
+) -> None:
+    """将 chart_assignment.json 的信息注入 chapter/variant 上下文，
+    让 writer prompt 能感知组织架构模板和管理体系图类型。
+
+    通过临时修改全局 chart specs 实现。
+    """
+    if not chart_overrides:
+        return
+
+    ch_num_str = str(chapter["num"]).zfill(2)
+    org_template = chart_overrides.get("org_template", {})
+    mgmt_types = chart_overrides.get("management_chart_types", {})
+    chart_type_overrides = chart_overrides.get("chart_overrides", {})
+
+    # 1. 组织架构模板：在 04 章注入模板描述
+    if ch_num_str == "04" and org_template:
+        template_desc = json.dumps(org_template.get("children", []), ensure_ascii=False)
+        chapter["_org_template_json"] = template_desc
+        chapter["_org_template_label"] = org_template.get("template_label", "")
+
+    # 2. 管理体系图类型覆盖
+    if ch_num_str in mgmt_types:
+        override_type = mgmt_types[ch_num_str]
+        # 修改全局 chart specs 中对应章节的图表类型
+        ch_specs = _CHART_SPECS_BY_CHAPTER.get(ch_num_str, [])
+        for spec in ch_specs:
+            if "hierarchy" in spec.get("type", "") or "体系" in spec.get("data_hint", ""):
+                spec["_override_type"] = override_type
+                log.info(f"  [{variant['id']}] 章 {ch_num_str} 管理体系图类型覆盖为 {override_type}")
+
+    # 3. 可选图表类型覆盖
+    if ch_num_str in chart_type_overrides:
+        for ov in chart_type_overrides[ch_num_str]:
+            section = ov.get("section", "")
+            new_type = ov.get("override_type")
+            ch_specs = _CHART_SPECS_BY_CHAPTER.get(ch_num_str, [])
+            for spec in ch_specs:
+                if spec.get("section", "") == section:
+                    if new_type is None:
+                        spec["_skip"] = True
+                    else:
+                        spec["_override_type"] = new_type
+
+
 def _generate_one_single(
     client: LLMClient, chapter: dict, variant: dict,
     brain_excerpt: str, disq_excerpt: str,
     out_path: Path, log: logging.Logger,
     system_prompt: str,
     subitems: list[dict],
+    variant_chart_overrides: dict | None = None,
 ) -> bool:
     """老流程：单模型整章调用（兼容无 chapter_model_plan 的旧 variants.json）"""
-    skeleton = derive_variant_skeleton(chapter, variant)
+    # 优先使用变体专属大纲的 skeleton + subitems（从 chapter_plan_variant.md）
+    variant_plan_dir = out_path.parent
+    variant_plan_path = variant_plan_dir / "chapter_plan_variant.md"
+    if variant_plan_path.exists():
+        v_subitems_map = parse_plan_subitems(variant_plan_path)
+        v_subitems = v_subitems_map.get(chapter["num"])
+        if v_subitems:
+            subitems = v_subitems
+            skeleton = [{"level": 2, "title": s["title"], "children": []} for s in v_subitems]
+        else:
+            skeleton = derive_variant_skeleton(chapter, variant)
+    else:
+        skeleton = derive_variant_skeleton(chapter, variant)
+
+    # 注入变体图表分配（组织架构模板 + 管理体系图类型覆盖）
+    _apply_variant_chart_context(chapter, variant, variant_chart_overrides, log)
+
     prompt = build_user_prompt(chapter, variant, brain_excerpt, disq_excerpt, skeleton, subitems)
     log.info(
         f"[{variant['id']} {variant['company_name']}] 章 {chapter['num']} "
@@ -1290,7 +1421,8 @@ def generate_one(
     system_prompt: str,
     subitems: list[dict],
     get_sem=None,
-    response_keywords: list[dict] | None = None,
+    response_keywords=None,
+    variant_chart_overrides=None,
 ) -> bool:
     """生成单个 variant × 单个章节
 
@@ -1303,10 +1435,12 @@ def generate_one(
             client, chapter, variant, brain_excerpt, disq_excerpt,
             out_path, log, plan, get_sem,
             response_keywords=response_keywords,
+            variant_chart_overrides=variant_chart_overrides,
         )
     return _generate_one_single(
         client, chapter, variant, brain_excerpt, disq_excerpt,
         out_path, log, system_prompt, subitems,
+        variant_chart_overrides=variant_chart_overrides,
     )
 
 
@@ -1432,7 +1566,21 @@ def main() -> int:
 
     def run_task(v, ch, out_path):
         brain_excerpt = extract_brain_context(brain_text, ch["title"])
-        subitems = subitems_map.get(ch["num"], [])
+        # 优先使用变体专属子项分配
+        variant_subitems_path = output / v["id"] / "chapter_plan_variant.md"
+        if variant_subitems_path.exists():
+            v_subitems_map = parse_plan_subitems(variant_subitems_path)
+            subitems = v_subitems_map.get(ch["num"], subitems_map.get(ch["num"], []))
+        else:
+            subitems = subitems_map.get(ch["num"], [])
+        # 加载变体图表分配（如果存在）
+        chart_assign_path = output / v["id"] / "chart_assignment.json"
+        variant_chart_overrides = None
+        if chart_assign_path.exists():
+            try:
+                variant_chart_overrides = json.loads(chart_assign_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
         plan = (v.get("chapter_model_plan") or {}).get(ch["num"])
         if plan and plan.get("mode") == "cross_model":
             # 交叉模式：外层不占 sem，内层对每个子项独立占（否则主模型 sem 会与子项用主模型死锁）
@@ -1440,6 +1588,7 @@ def main() -> int:
                 client, ch, v, brain_excerpt, disq_excerpt, out_path, log,
                 system_prompt, subitems, get_sem=get_sem,
                 response_keywords=response_keywords,
+                variant_chart_overrides=variant_chart_overrides,
             )
         # 单模型模式：外层占主模型 sem（保留旧行为）
         sem = get_sem(v["model"])
@@ -1448,6 +1597,7 @@ def main() -> int:
                 client, ch, v, brain_excerpt, disq_excerpt, out_path, log,
                 system_prompt, subitems, get_sem=None,
                 response_keywords=response_keywords,
+                variant_chart_overrides=variant_chart_overrides,
             )
 
     if tasks:

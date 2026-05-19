@@ -245,12 +245,19 @@ def _plan_chapter_models(
 
         subitem_assignments = []
 
-        # 构建本章可用模型池（按字数上限过滤）
+        # 构建本章可用模型池（按字数上限 + writer_role 过滤）
+        is_system_ch = any(
+            kw in ch.get("title", "")
+            for kw in ("质量", "安全", "环保", "绿色", "工期", "文明", "民工", "进度")
+        )
         max_target = max(int(s["chars"]) for s in ch_subitems)
         chapter_pool = []
         for mk, mc in models_cfg.items():
             cap = int(mc.get("output_char_cap", DEFAULT_OUTPUT_CHAR_CAP))
             if max_target > cap:
+                continue
+            role = mc.get("writer_role", "")
+            if role == "system_only" and not is_system_ch:
                 continue
             chapter_pool.append(mk)
         if not chapter_pool:
