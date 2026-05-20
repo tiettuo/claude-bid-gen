@@ -118,6 +118,30 @@ def lookup_altitude(location: str | None) -> int | None:
     return None
 
 
+def extract_explicit_altitude(extracted_dir: Path | None) -> tuple[int | None, str | None]:
+    """从招标/清单原文中读取明确海拔，优先于地名库推断。"""
+    if not extracted_dir or not extracted_dir.exists():
+        return None, None
+    patterns = [
+        r"平均海拔(?:高度)?(?:为|约|：|:)?\s*(\d{3,5})\s*米",
+        r"海拔(?:高度)?(?:为|约|：|:)?\s*(\d{3,5})\s*米",
+        r"(\d{3,5})\s*米(?:以上)?(?:的)?高海拔",
+    ]
+    for txt in sorted(extracted_dir.glob("*.txt"), key=lambda p: ("清单" not in p.name, p.name)):
+        try:
+            text = txt.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        for pat in patterns:
+            m = re.search(pat, text[:200000])
+            if not m:
+                continue
+            val = int(m.group(1))
+            if 500 <= val <= 6000:
+                return val, txt.name
+    return None, None
+
+
 def parse_date(s: str | None) -> date | None:
     """解析日期字符串。支持 YYYY-MM-DD / YYYY年M月D日 / YYYY/MM/DD。"""
     if not s:
@@ -344,7 +368,7 @@ def size_class(control_price: float | None) -> str:
 # 3. 主流程
 # ────────────────────────────────────────────────────────────────────
 
-def derive(facts: dict) -> dict:
+def derive(facts: dict, extracted_dir: Path | None = None) -> dict:
     """从 project_facts.json 字段派生 project_derived.json。
 
     facts 字段格式:每个 key 下有 {"value": ..., "source": {...}}
@@ -361,7 +385,8 @@ def derive(facts: dict) -> dict:
     end_date_s = _val("end_date")
     control_price = _val("control_price")
 
-    altitude = lookup_altitude(location)
+    explicit_altitude, explicit_source = extract_explicit_altitude(extracted_dir)
+    altitude = explicit_altitude if explicit_altitude is not None else lookup_altitude(location)
     start = parse_date(start_date_s)
     end = parse_date(end_date_s)
 
@@ -376,6 +401,8 @@ def derive(facts: dict) -> dict:
         "altitude_m": altitude,
         "altitude_class": altitude_class(altitude),
         "altitude_lookup_source": location,
+        "altitude_source": explicit_source or "location_lookup",
+        "altitude_source_type": "explicit_text" if explicit_source else "location_lookup",
         "season_set": season_set(start, end),
         "spans_winter": spans_winter(start, end),
         "season_inferred_from": {
@@ -472,7 +499,7 @@ def main() -> int:
         return 2
 
     facts = json.loads(facts_path.read_text(encoding="utf-8"))
-    derived = derive(facts.get("facts", facts))
+    derived = derive(facts.get("facts", facts), ext)
     derived["_meta"] = {
         "extracted_by": "bid_derive.py",
         "facts_source": facts_path.name,

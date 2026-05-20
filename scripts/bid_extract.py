@@ -261,6 +261,8 @@ def extract_pdf(file_path: Path, log: logging.Logger, vision_report: dict | None
                 f"{sum(1 for m in page_meta if m['is_scanned'])}，"
                 f"强关键词 {len(vision_targets) - sum(1 for m in page_meta if m['is_scanned'])}）"
             )
+            # 阶段 3a：收集所有视觉页的图片 + 批量分流
+            batch_pages: list[tuple[int, bytes, set[str] | None]] = []
             for idx, reason in vision_targets:
                 if idx >= len(fitz_doc):
                     continue
@@ -269,15 +271,24 @@ def extract_pdf(file_path: Path, log: logging.Logger, vision_report: dict | None
                     fitz_page,
                     dpi=int(vision_cfg.get("render_dpi", 300)),
                 )
-                # 按 categories 路由主力模型(P1.2 改造)
                 cats = page_meta[idx]["classification"].categories
-                vision_text, model_used = bid_vision.vision_extract(
-                    image_bytes, log, config=vision_cfg, categories=cats
+                batch_pages.append((idx, image_bytes, cats))
+
+            batch_results = bid_vision.vision_extract_batch(
+                batch_pages, log, config=vision_cfg
+            )
+
+            # 阶段 3b：处理每页结果 + 失败降级
+            for idx, reason in vision_targets:
+                if idx >= len(fitz_doc):
+                    continue
+                vision_text, model_used = batch_results.get(idx, ("", ""))
+                image_bytes = next(
+                    (b for i, b, _ in batch_pages if i == idx), None
                 )
 
                 if not vision_text:
-                    # 视觉全部失败 → 降级到 PaddleOCR（仅扫描页有意义）
-                    if page_meta[idx]["is_scanned"]:
+                    if page_meta[idx]["is_scanned"] and image_bytes:
                         paddle_lines = _ocr_paddle(image_bytes, log)
                         if paddle_lines:
                             vision_text = "\n".join(t for t, _ in paddle_lines)
@@ -287,7 +298,6 @@ def extract_pdf(file_path: Path, log: logging.Logger, vision_report: dict | None
                             vision_text = page_meta[idx]["text"] or "[OCR 识别失败]"
                             model_used = "none"
                     else:
-                        # 强关键词页：视觉失败就保留 pdfplumber 原文
                         vision_text = page_meta[idx]["text"]
                         model_used = "none"
                         log.warning(f"    第{idx+1}页: 视觉失败，回退 pdfplumber 原文")
@@ -301,8 +311,8 @@ def extract_pdf(file_path: Path, log: logging.Logger, vision_report: dict | None
                     "reason": reason,
                     "model": model_used,
                     "categories": sorted(page_meta[idx]["classification"].categories),
-                    "hits": {k: v[:5] for k, v in hits.items()},  # 每类最多存 5 个命中词
-                    "vision_text": vision_text,  # ← P0.3 新增,解锁 Tier 1/4 转换
+                    "hits": {k: v[:5] for k, v in hits.items()},
+                    "vision_text": vision_text,
                 })
                 log.info(f"    第{idx+1}页 [{reason}] 模型={model_used} 字符={len(vision_text)}")
 

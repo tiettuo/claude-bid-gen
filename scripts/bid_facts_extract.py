@@ -122,17 +122,21 @@ FIELD_PATTERNS: dict[str, list[str]] = {
         _line_field(r"建设地点"),
     ],
     "client": [
+        r"本招标项目[^\n。]*?招标人为\s*([^\n。；;，,]{4,80})",
+        r"招标人为\s*([^\n。；;，,]{4,80})",
         # 优先抓"名称："后的第一段(去除地址/电话/联系人冗余)
         r"招标人[^|\n]*\|[^|]*?名称[:：]\s*([^\n地址电话邮箱联系人]+?)(?=\n|地址|电话|邮箱|联系人|\|)",
         r"招标人\s*[:：]\s*名称[:：]\s*([^\n|地址电话联系人]{4,80})",
         _table_cell(r"招标人"),
     ],
     "agent": [
+        r"招标代理机构[:：为\s]*([^\n。；;，,]{4,80})",
         r"招标代理机构[^|\n]*\|[^|]*?名称[:：]\s*([^\n地址电话邮箱联系人]+?)(?=\n|地址|电话|邮箱|联系人|\|)",
         r"招标代理机构\s*[:：]\s*名称[:：]\s*([^\n|地址电话联系人]{4,80})",
         _table_cell(r"招标代理机构"),
     ],
     "funding_source": [
+        r"建设资金为\s*([^\n。；;，,]{2,80})",
         _table_cell(r"资金来源"),
         _line_field(r"资金来源"),
     ],
@@ -145,6 +149,7 @@ FIELD_PATTERNS: dict[str, list[str]] = {
         r"最高投标限价为[:：]?\s*([\d,,]{5,15}\.?\d*)\s*元",
         r"最高限价为[:：]?\s*([\d,,]{5,15}\.?\d*)\s*元",
         r"投标限价(?:不得超过)?\s*([\d,,]{5,15}\.?\d*)\s*元",
+        r"建设资金为\s*([\d.]+\s*万元)",
     ],
     "duration_days": [
         r"计划工期[:：]\s*(\d{1,4})\s*日历?天",
@@ -201,6 +206,9 @@ def _normalize_price(s: str) -> float | None:
     if not s:
         return None
     s = s.replace(",", "").replace(",", "").strip()
+    if "万" in s:
+        m = re.search(r"(\d+\.?\d*)", s)
+        return float(m.group(1)) * 10000 if m else None
     m = re.match(r"^(\d+\.?\d*)$", s)
     if m:
         return float(m.group(1))
@@ -218,6 +226,87 @@ def _normalize_date(s: str) -> str | None:
         except ValueError:
             return None
     return None
+
+
+_PLACEHOLDER_VALUE_RE = re.compile(
+    r"^(?:见)?(?:投标人须知前附表|须知前附表|前附表|项目名称|工程名称|本项目|本工程|"
+    r"\(?项目名称\)?|（项目名称）|/|无|未明确)$"
+)
+
+
+def _is_bad_project_name(value: str | None) -> bool:
+    """识别招标文件模板占位词，避免污染封面/指纹/正文。"""
+    if not value:
+        return True
+    v = _clean(value)
+    if len(v) < 6 or len(v) > 120:
+        return True
+    if _PLACEHOLDER_VALUE_RE.search(v):
+        return True
+    if re.search(r"见\s*投标人须知", v):
+        return True
+    return False
+
+
+def _project_name_candidates(full_text: str) -> list[tuple[str, int, str]]:
+    """从首页、招标公告、工程名称等位置收集项目名候选。"""
+    patterns = [
+        (r"项\s*目\s*名\s*称\s*[:：]\s*([^\n|]{6,120})", "label_project_name"),
+        (r"工程名称\s*[:：]\s*([^\n|<]{6,120})", "label工程名称"),
+        (r"本招标项目\s*([^\n。；;]{6,120}?项目)\s*已由", "announcement"),
+        (r"^([^\n|]{6,120}?项目)\s*$", "line_project"),
+    ]
+    candidates: list[tuple[str, int, str]] = []
+    for pat, source in patterns:
+        for m in re.finditer(pat, full_text[:120000], flags=re.M):
+            name = _clean(m.group(1))
+            if _is_bad_project_name(name):
+                continue
+            # 清掉少量尾部模板词
+            name = re.sub(r"\s*(?:工程|标段)?\s*$", lambda mm: mm.group(0) if "项目" not in name else "", name).strip()
+            candidates.append((name, m.start(1), source))
+    return candidates
+
+
+def _repair_project_name(facts: dict, full_text: str, source_file: str, log) -> str | None:
+    """当 regex 抽到模板占位值时，用多候选排序修正项目名称。"""
+    cur = facts.get("project_name", {}).get("value")
+    if not _is_bad_project_name(cur):
+        return None
+
+    candidates = _project_name_candidates(full_text)
+    if not candidates:
+        return None
+
+    def score(item: tuple[str, int, str]) -> tuple[int, int]:
+        name, offset, source = item
+        s = 0
+        if source == "label_project_name":
+            s += 80
+        elif source == "announcement":
+            s += 70
+        elif source == "label工程名称":
+            s += 60
+        if "项目" in name:
+            s += 20
+        if any(k in name for k in ("招标", "开标", "评标", "投标")):
+            s -= 40
+        # 越靠前越优先
+        return (s, -offset)
+
+    name, offset, source = max(candidates, key=score)
+    facts["project_name"] = {
+        "value": name,
+        "raw": cur,
+        "source": {
+            "file": source_file,
+            "page": page_at_offset(full_text, offset),
+            "char_offset": offset,
+            "method": f"candidate_repair:{source}",
+        },
+    }
+    log.warning(f"  {WARN} project_name 原值疑似占位({cur!r})，已修正为 {name!r}")
+    return name
 
 
 def extract_field_regex(text: str, patterns: list[str]) -> tuple[str | None, int]:
@@ -560,6 +649,8 @@ def main() -> int:
                 facts[field] = entry
                 llm_hit += 1
         log.info(f"  LLM 兜底:补抽 {llm_hit}/{len(missing_fields)} 字段")
+
+    _repair_project_name(facts, full_text, main_txt.name, log)
 
     hit = sum(1 for v in facts.values() if v.get("value") is not None)
     miss = len(facts) - hit

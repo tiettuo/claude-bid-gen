@@ -4,6 +4,7 @@ import pytest
 from bid_skeleton_extract import (
     _grep_implicit_constraints,
     auto_detect_hybrid,
+    choose_skeleton_model,
     validate_b1,
     validate_b3,
 )
@@ -150,3 +151,33 @@ def test_validate_b1_chains_hybrid_detection():
     assert ok
     assert payload["evaluation_method"] == "passfail"
     assert payload.get("_hybrid_mode") is True
+
+
+def test_validate_b1_keeps_224_group_sections():
+    """2.2.4(1)-x 这类评分表编号应按括号分组,不能按首位 2 误归项目管理。"""
+    payload = {
+        "evaluation_method": "score",
+        "method_chinese": "综合评估法",
+        "total_tech_score": 20,
+        "tech_score_is_passfail": False,
+        "scoring_items": [
+            {"id": "2.2.4(1)-1", "section": "技术", "title_original": "施工方案与技术措施", "score": 3},
+            {"id": "2.2.4(1)-7", "section": "技术", "title_original": "工程竣工后的保修措施", "score": 2},
+            {"id": "2.2.4(2)-1", "section": "项目管理", "title_original": "类似项目业绩", "score": 8},
+            {"id": "2.2.4(3)", "section": "投标报价", "title_original": "投标报价", "score": 45},
+            {"id": "2.2.4(4)", "section": "其他因素", "title_original": "企业信用", "score": 10},
+        ],
+        "veto_items": [{"text_original": "投标报价超过招标控制价的", "source_page": 28}],
+    }
+
+    ok, warns = validate_b1(payload)
+
+    assert ok
+    sections = [i["section"] for i in payload["scoring_items"]]
+    assert sections == ["技术", "技术", "项目管理", "投标报价", "其他因素"]
+    assert not any("section 冲突" in w for w in warns)
+
+
+def test_skeleton_default_model_is_deepseek_even_if_global_default_is_kimi():
+    assert choose_skeleton_model(None, {"default_model": "kimi"}) == "deepseek"
+    assert choose_skeleton_model("glm", {"default_model": "kimi"}) == "glm"

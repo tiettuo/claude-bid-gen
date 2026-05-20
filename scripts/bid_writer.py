@@ -457,14 +457,14 @@ def _build_block3_chapter(
     """Block 3: 本章任务(整章模式)。
 
     合格制(passfail)：不预设二级标题，LLM 自由组织章节结构，最大化差异化。
-    评分制(scoring)：严格对齐评分项，二级标题必须覆盖评分点。
+    评分制(score/scoring)：严格对齐评分项，二级标题必须覆盖评分点。
     """
     equip_lines = "\n".join(f"  - {k}: {v:+d} 台" for k, v in variant.get("equip_delta", {}).items())
     skeleton_block = render_skeleton_for_prompt(skeleton)
 
     # 评标模式路由
     eval_mode = (_AUTHORING_CTX.get("evaluation") or {}).get("evaluation_mode", "passfail")
-    is_scoring = eval_mode == "scoring"
+    is_scoring = eval_mode in ("score", "scoring")
 
     lines = [
         "【Block 3：本章任务（具体写什么）】",

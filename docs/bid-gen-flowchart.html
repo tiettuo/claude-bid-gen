@@ -2,366 +2,687 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>bid-gen 业务逻辑流程图</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>bid-gen 项目逻辑流程图</title>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
 <style>
   * { box-sizing: border-box; }
+  :root {
+    --ink: #172033;
+    --muted: #5f6b7a;
+    --line: #d7dde5;
+    --panel: #ffffff;
+    --soft: #f6f8fb;
+    --blue: #2563eb;
+    --teal: #0f766e;
+    --amber: #b45309;
+    --green: #15803d;
+    --red: #b91c1c;
+    --violet: #6d28d9;
+  }
   body {
     margin: 0;
-    padding: 32px 24px 48px;
-    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
-    background: linear-gradient(135deg, #f5f7fa 0%, #e8ecf1 100%);
-    color: #1a1a2e;
-    min-height: 100vh;
+    padding: 24px;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+    color: var(--ink);
+    background: #eef2f7;
+    line-height: 1.55;
+  }
+  header, main, footer {
+    max-width: 1560px;
+    margin: 0 auto;
   }
   header {
-    max-width: 1500px;
-    margin: 0 auto 24px;
-    text-align: center;
+    margin-bottom: 18px;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 18px;
+    align-items: end;
   }
   h1 {
+    margin: 0 0 6px;
     font-size: 28px;
-    margin: 0 0 8px;
-    color: #2d3748;
-    letter-spacing: -0.5px;
+    letter-spacing: 0;
   }
   .subtitle {
-    color: #718096;
+    margin: 0;
+    color: var(--muted);
     font-size: 14px;
-    margin-bottom: 16px;
   }
   .toolbar {
     display: flex;
-    justify-content: center;
-    gap: 12px;
-    margin-bottom: 24px;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
   }
   button {
-    background: #2d3748;
-    color: white;
-    border: none;
-    padding: 8px 18px;
-    border-radius: 6px;
-    cursor: pointer;
+    border: 1px solid #c7d0dc;
+    background: var(--panel);
+    color: var(--ink);
+    border-radius: 7px;
+    padding: 8px 12px;
     font-size: 13px;
-    transition: all 0.2s;
+    cursor: pointer;
     font-family: inherit;
   }
-  button:hover { background: #1a202c; transform: translateY(-1px); }
-  button.secondary { background: #4a5568; }
-  button.secondary:hover { background: #2d3748; }
-
-  .container {
-    max-width: 1500px;
-    margin: 0 auto;
-    background: white;
-    border-radius: 12px;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.08);
-    padding: 32px;
-    overflow-x: auto;
+  button:hover { border-color: var(--blue); color: var(--blue); }
+  .tabs {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  .tab {
+    background: #dde5f0;
+    border-color: transparent;
+  }
+  .tab.active {
+    background: var(--blue);
+    color: #fff;
+    border-color: var(--blue);
+  }
+  .panel {
+    display: none;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 18px;
+    box-shadow: 0 8px 28px rgba(23,32,51,0.08);
+  }
+  .panel.active { display: block; }
+  .panel-title {
+    display: flex;
+    justify-content: space-between;
+    gap: 18px;
+    align-items: baseline;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 12px;
+    margin-bottom: 16px;
+  }
+  h2 {
+    margin: 0;
+    font-size: 18px;
+  }
+  .hint {
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .diagram-wrap {
+    overflow: auto;
+    background: #fff;
+    border: 1px solid #e4e9f0;
+    border-radius: 8px;
+    padding: 18px;
+  }
+  .static-flow {
+    min-width: 980px;
+    display: grid;
+    gap: 14px;
+  }
+  .flow-row {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(190px, 1fr));
+    gap: 12px;
+    align-items: stretch;
+  }
+  .flow-row.three {
+    grid-template-columns: repeat(3, minmax(220px, 1fr));
+  }
+  .flow-node {
+    border: 2px solid #cbd5e1;
+    border-radius: 8px;
+    padding: 12px;
+    background: #f8fafc;
+    min-height: 86px;
+  }
+  .flow-node h3 {
+    margin: 0 0 6px;
+    font-size: 14px;
+  }
+  .flow-node p {
+    margin: 0;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .flow-node.input { border-color: #2563eb; background: #dbeafe; }
+  .flow-node.think { border-color: #c2410c; background: #ffedd5; }
+  .flow-node.make { border-color: #15803d; background: #dcfce7; }
+  .flow-node.gate { border-color: #b91c1c; background: #fee2e2; }
+  .flow-node.end { border-color: #374151; background: #e5e7eb; }
+  .flow-arrow {
+    text-align: center;
+    color: #475569;
+    font-size: 20px;
+    line-height: 1;
+  }
+  .flow-split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .flow-note {
+    border: 1px dashed #94a3b8;
+    border-radius: 8px;
+    padding: 10px 12px;
+    background: #f8fafc;
+    color: #475569;
+    font-size: 12px;
   }
   .mermaid {
+    min-width: 980px;
     text-align: center;
-    min-height: 600px;
   }
-
-  .legend-grid {
-    max-width: 1500px;
-    margin: 32px auto 0;
+  .guide-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-    gap: 16px;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 12px;
+    margin-top: 16px;
   }
   .card {
-    background: white;
-    border-radius: 10px;
-    padding: 20px;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.06);
-    border-left: 4px solid #4299e1;
+    background: var(--soft);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--blue);
+    border-radius: 8px;
+    padding: 14px;
   }
   .card h3 {
-    margin: 0 0 12px;
+    margin: 0 0 8px;
     font-size: 15px;
-    color: #2d3748;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .card .badge {
-    display: inline-block;
-    width: 20px;
-    height: 20px;
-    border-radius: 4px;
-    flex-shrink: 0;
   }
   .card p {
     margin: 0;
+    color: var(--muted);
     font-size: 13px;
-    line-height: 1.6;
-    color: #4a5568;
   }
-  .card.extract { border-color: #4299e1; }
-  .card.skeleton { border-color: #38b2ac; }
-  .card.cognition { border-color: #ed8936; }
-  .card.variant { border-color: #d53f8c; }
-  .card.write { border-color: #48bb78; }
-  .card.review { border-color: #ed8936; }
-  .card.assemble { border-color: #9f7aea; }
-  .card.compliance { border-color: #f56565; }
-  .card.similarity { border-color: #f56565; }
-  .card.lessons { border-color: #d69e2e; background: #fffaf0; }
-
-  footer {
-    max-width: 1500px;
-    margin: 32px auto 0;
-    text-align: center;
-    color: #a0aec0;
+  .card strong { color: var(--ink); }
+  .card.teal { border-left-color: var(--teal); }
+  .card.amber { border-left-color: var(--amber); }
+  .card.green { border-left-color: var(--green); }
+  .card.red { border-left-color: var(--red); }
+  .card.violet { border-left-color: var(--violet); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    background: #fff;
+  }
+  th, td {
+    border-bottom: 1px solid var(--line);
+    padding: 10px 9px;
+    vertical-align: top;
+    text-align: left;
+  }
+  th {
+    background: #f3f6fa;
+    color: #344256;
+    font-weight: 650;
+  }
+  code {
+    background: #edf1f7;
+    padding: 2px 5px;
+    border-radius: 5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 12px;
+  }
+  .mode-box {
+    display: grid;
+    grid-template-columns: minmax(220px, 0.7fr) 1.3fr;
+    gap: 14px;
+    margin-bottom: 16px;
+  }
+  .mode-callout {
+    border-radius: 8px;
+    padding: 16px;
+    background: #e8f0ff;
+    border: 1px solid #bfd2ff;
+  }
+  .mode-callout h3 { margin: 0 0 8px; font-size: 16px; }
+  .mode-callout p { margin: 0; color: #334155; font-size: 13px; }
+  footer {
+    margin-top: 16px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  @media (max-width: 860px) {
+    body { padding: 14px; }
+    header { grid-template-columns: 1fr; }
+    .toolbar { justify-content: flex-start; }
+    .mode-box { grid-template-columns: 1fr; }
+    .panel { padding: 12px; }
+    .mermaid { min-width: 820px; }
+    .static-flow { min-width: 820px; }
   }
 </style>
 </head>
 <body>
-
 <header>
-  <h1>bid-gen 业务逻辑流程图</h1>
-  <div class="subtitle">投标技术文件生成 · Step 1 → Step 6 完整编排（含 Step 4 内部子流程）</div>
+  <div>
+    <h1>bid-gen 项目逻辑流程图</h1>
+    <p class="subtitle">给非程序人员看的项目地图：从上传招标文件，到生成 DOCX，再到哪里改、改完怎么看效果。</p>
+  </div>
   <div class="toolbar">
+    <button onclick="setScale(1)">原始大小</button>
+    <button onclick="setScale(0.8)">缩小查看</button>
     <button onclick="downloadSVG()">下载 SVG</button>
-    <button class="secondary" onclick="downloadPNG()">下载 PNG</button>
-    <button class="secondary" onclick="window.print()">打印 / 另存 PDF</button>
+    <button onclick="window.print()">打印 / 另存 PDF</button>
   </div>
 </header>
 
-<div class="container">
-  <div class="mermaid" id="diagram">
-flowchart TD
-    Start([用户提供投标目录路径]) --> S1
-
-    S1["<b>Step 1</b> bid_extract.py<br/>pdfplumber 抽文字层<br/>分层视觉 OCR (GLM-OCR 主 / Qwen-VL 辅)<br/>废标/暗标/评分/大纲 4 类强制视觉"]
-    S1 --> S1Out[/extracted/manifest.txt + *.txt + vision_report.json/]
-
-    S1Out --> S15["<b>Step 1.5</b> bid_skeleton_extract.py<br/>骨架优先提取 v2 方法论<br/>3 个 LLM 任务并行调用"]
-    S15 --> S15Out[/evaluation_method.json<br/>mandatory_outline.json<br/>disqualification.json<br/>document_map.md/]
-
-    S15Out --> S2["<b>Step 2</b> Claude 手工生成项目认知"]
-    S2 --> S2A["2.1 project_brain.md<br/>从 3 份骨架 JSON 1:1 翻译<br/>评分表/大纲/废标条款带来源页"]
-    S2A --> S2B["2.2 chapter_plan.md 第一圈<br/>项目规模判档 + 字数密度推算<br/>14pt+1.5倍行距 ≈ 500字/页"]
-
-    S2B --> Q1{用户确认页数?}
-    Q1 -->|调整| S2B
-    Q1 -->|确认| S2B2["第二圈 大章节分配<br/>第三圈 子项分配<br/>10列规范表头(分值列必填)"]
-
-    S2B2 --> S2C["2.3 disqualification_rules.md<br/>排版参数 + 废标条款 + 章节锚点<br/>★ yaml 字段必用全名<br/>(margin_*_cm / line_spacing_rule)"]
-    S2C --> S24["2.4 bid_plan_verify.py<br/>三铁律: 评分总分一致 + 章节锚点覆盖<br/>+ 废标条款来源标注"]
-
-    S24 --> Q2{校验通过?}
-    Q2 -->|退出码2 硬失败| S2A
-    Q2 -->|退出码1 警告| UserCheck[用户复核]
-    Q2 -->|退出码0| S25
-    UserCheck --> S25
-
-    S25["2.5 bid_chart_specs.py<br/>派生图表规格 (7 渲染器)<br/>schedule/aoa_network/site_layout<br/>process_flow/org_chart<br/>hierarchy_flow/resource_curve"] --> S26["2.6 用户确认全表<br/>章节 + 废标 + 图表"]
-
-    S26 --> Q3{投标家数?}
-    Q3 -->|单家| Variants[bid_variants.py 单家配置<br/>company 可空<br/>1 模型]
-    Q3 -->|多家| VariantsB["bid_variants.py 多家配置<br/>分配模型/温度<br/>数据指纹偏移"]
-
-    Variants --> S3
-    VariantsB --> S3
-
-    S3["<b>Step 3</b> bid_writer.py<br/>子项并行生成 + 主笔润色<br/>组装超 125% / 不足 95% 自动弃用"] --> S35
-
-    S35["<b>Step 3.5</b> bid_reviewer.py<br/>字数/H1标题/关键词覆盖<br/>暗标违规扫描<br/>分级 ok/minor/moderate/major"]
-    S35 --> Q4{有 major?}
-    Q4 -->|是| S35Fix["bid_writer.py --force --chapter NN<br/>重写 最多 2 次"]
-    S35Fix --> S35
-    Q4 -->|否| S4
-
-    %% Step 4 子流程
-    S4["<b>Step 4</b> bid_assemble.py 组装 DOCX"]
-    S4 --> S4_1["4.1 _extract_*: 解析 yaml 参数<br/>_ALIASES 短名映射<br/>边距/字号/行距/首行缩进"]
-    S4_1 --> S4_2["4.2 preprocess_chapter_dir<br/>JSON 块 → markdown 表格<br/>chart_specs → graphviz/matplotlib PNG<br/>(process_flow ≥4 节点用 LR)"]
-    S4_2 --> S4_3["4.3 pandoc 转 docx<br/>+ reference doc 注入样式"]
-    S4_3 --> S4_4["4.4 postprocess_docx<br/>封面/目录/页码/字体<br/>列表去黑点/表格规范<br/>软层微调 H2/H3 段前距"]
-    S4_4 --> S4_5["4.5 _fit_images<br/>图片版心宽缩放<br/>>85% 高 → 切横版"]
-    S4_5 --> S4_6["4.6 _fix_settings_lang_and_proofing<br/>themeFontLang ja-JP→zh-CN<br/>hideSpellingErrors+updateFields"]
-    S4_6 --> S4_7["4.7 _word_update_toc (★ macOS)<br/>AppleScript 打开 Word<br/>更新所有字段 (TOC) + 保存<br/>避免用户按 F9"]
-    S4_7 --> S4_8["4.8 _word_page_count<br/>AppleScript compute statistics<br/>真实页数 ≤ 招标硬顶?"]
-    S4_8 --> S4_9["4.9 _apply_docx_metadata<br/>core.xml: author/lastModifiedBy<br/>created/modified 按 variant 偏移"]
-    S4_9 --> S4_10["4.10 _strip_docx_fingerprints (★ 多层)<br/>app.xml 6 字段中性化<br/>settings.xml: rsids+embedSystemFonts<br/>document.xml: w:rsid* 属性<br/>media/*.png: PIL 重写抹 EXIF"]
-
-    S4_10 --> S5
-
-    S5["<b>Step 5</b> bid_compliance.py<br/>暗标禁词 + 章节对齐<br/>+ 章节锚点-大纲覆盖<br/>+ 图表覆盖核查 + 字数核查"]
-    S5 --> Q5{有红色风险?}
-    Q5 -->|是| Fix5[修复 .md 章节]
-    Fix5 --> S4
-    Q5 -->|否| Q6
-
-    Q6{是否批量模式?}
-    Q6 -->|否 单家| End1([交付单份 DOCX<br/>+ 合规报告])
-    Q6 -->|是 多家| S6
-
-    S6["<b>Step 6</b> bid_similarity.py<br/>SimHash 整体重复率<br/>+ 段落 n-gram Jaccard<br/>+ 数字指纹 + 元数据独立性"]
-    S6 --> Q7{超阈值?<br/>整体 ≥ 40% / 段落 ≥ 50%}
-    Q7 -->|是| Rewrite["针对性重写最差章节<br/>bid_writer.py --force<br/>最多 2 次"]
-    Rewrite --> S35
-    Q7 -->|否| End2([交付多家独立 DOCX<br/>+ 审校 + 合规 + 相似度报告])
-
-    classDef extract fill:#bee3f8,stroke:#2b6cb0,stroke-width:2px,color:#1a365d
-    classDef skeleton fill:#b2f5ea,stroke:#2c7a7b,stroke-width:2px,color:#234e52
-    classDef cognition fill:#feebc8,stroke:#c05621,stroke-width:2px,color:#7b341e
-    classDef variant fill:#fbb6ce,stroke:#b83280,stroke-width:2px,color:#702459
-    classDef write fill:#c6f6d5,stroke:#2f855a,stroke-width:2px,color:#22543d
-    classDef review fill:#fed7aa,stroke:#c05621,stroke-width:2px,color:#7b341e
-    classDef assemble fill:#e9d8fd,stroke:#6b46c1,stroke-width:2px,color:#44337a
-    classDef subassemble fill:#f3e8ff,stroke:#805ad5,stroke-width:1px,color:#553c9a
-    classDef compliance fill:#fed7d7,stroke:#c53030,stroke-width:2px,color:#742a2a
-    classDef decision fill:#fefcbf,stroke:#b7791f,stroke-width:2px,color:#744210
-    classDef terminal fill:#cbd5e0,stroke:#2d3748,stroke-width:2px,color:#1a202c
-
-    class S1,S1Out extract
-    class S15,S15Out skeleton
-    class S2,S2A,S2B,S2B2,S2C,S24,S25,S26,UserCheck cognition
-    class Variants,VariantsB variant
-    class S3 write
-    class S35,S35Fix,Rewrite review
-    class S4 assemble
-    class S4_1,S4_2,S4_3,S4_4,S4_5,S4_6,S4_7,S4_8,S4_9,S4_10 subassemble
-    class S5,Fix5,S6 compliance
-    class Q1,Q2,Q3,Q4,Q5,Q6,Q7 decision
-    class Start,End1,End2 terminal
-  </div>
-</div>
-
-<div class="legend-grid">
-  <div class="card extract">
-    <h3><span class="badge" style="background:#bee3f8"></span>Step 1 · 文本提取</h3>
-    <p>pdfplumber 抽文字层；废标 / 暗标 / 评分表 / 大纲 4 类强制视觉 OCR（<b>GLM-OCR 主 + Qwen-VL 辅</b>，layout_parsing 保留表格结构）。扫描页另触发文字密集类视觉。</p>
-  </div>
-  <div class="card skeleton">
-    <h3><span class="badge" style="background:#b2f5ea"></span>Step 1.5 · 骨架提取（v2 方法论）</h3>
-    <p>3 个 LLM 任务并行：评标方法 + 必含大纲 + 废标条款。机器先出结构化 JSON，Claude 再翻译，避免凭印象写漏关键大纲。</p>
-  </div>
-  <div class="card cognition">
-    <h3><span class="badge" style="background:#feebc8"></span>Step 2 · 项目认知（Claude 手工）</h3>
-    <p>三圈字数预算 + 评分表/大纲为锚点 + 废标条款带来源页。两轮阻断：先确认页数，再确认全表。<b>yaml 必用脚本期望全名（margin_*_cm / line_spacing_rule）</b>。</p>
-  </div>
-  <div class="card variant">
-    <h3><span class="badge" style="background:#fbb6ce"></span>变体配置</h3>
-    <p>单家可设 company 空。多家时为每家分配差异化模型/温度/工期偏移/劳动力系数/DOCX 元数据，避免雷同。</p>
-  </div>
-  <div class="card write">
-    <h3><span class="badge" style="background:#c6f6d5"></span>Step 3 · 章节撰写</h3>
-    <p>bid_writer.py 子项并行 + 主笔润色。组装结果超 125% 或不足 95% 弃用，回退子项拼接。模型池：GLM/DeepSeek/Qwen/Kimi/MiniMax。</p>
-  </div>
-  <div class="card review">
-    <h3><span class="badge" style="background:#fed7aa"></span>Step 3.5 · 机器审校</h3>
-    <p>字数 + H1 标题字面 1:1 + 关键词覆盖度 + 暗标违规扫描，分级 ok/minor/moderate/major。major 触发 --force 重写最多 2 次。</p>
-  </div>
-  <div class="card assemble">
-    <h3><span class="badge" style="background:#e9d8fd"></span>Step 4 · DOCX 组装（10 子步骤）</h3>
-    <p>yaml 解析 → 图表预处理 → pandoc 转换 → 后处理样式 → 图片缩放/横版 → 设置 zh-CN+updateFields → <b>Word 预渲染 TOC（避 F9）</b> → 页数检查 → 元数据注入 → 4 层指纹清理。</p>
-  </div>
-  <div class="card compliance">
-    <h3><span class="badge" style="background:#fed7d7"></span>Step 5 · 合规检查</h3>
-    <p>暗标禁词 + 章节-评分表对齐 + 章节锚点-大纲覆盖 + 图表 chart_specs 落地 + 字数核查。红色风险回退 Step 4 修复重组。</p>
-  </div>
-  <div class="card similarity">
-    <h3><span class="badge" style="background:#fed7d7"></span>Step 6 · 相似度（仅多家）</h3>
-    <p>SimHash 整体重复率 + 段落 n-gram + 数字指纹 + 元数据独立性。超阈值 40%/50% 时定位最差章节自动重写。</p>
+<main>
+  <div class="tabs">
+    <button class="tab active" data-target="overview">总流程</button>
+    <button class="tab" data-target="business">业务决策点</button>
+    <button class="tab" data-target="files">文件与脚本关系</button>
+    <button class="tab" data-target="change">修改指导表</button>
   </div>
 
-  <div class="card lessons">
-    <h3>★ 已沉淀经验</h3>
-    <p><b>yaml 短名陷阱</b>：不带 _rule 的 line_spacing 会被当 exact 磅值；short 形式 top_cm 没别名会沉默回退默认值。修：_ALIASES 已覆盖；_apply_line_spacing 启发式判 multiple。</p>
-  </div>
-  <div class="card lessons">
-    <h3>★ 横版逻辑</h3>
-    <p>process_flow 默认竖布局节点多→图变 1:4 极瘦→_fit_images 切横版。修：≥4 节点用 LR 横布局，图宽高比反转。招标允许的横版仅平面布置图、进度图。</p>
-  </div>
-  <div class="card lessons">
-    <h3>★ TOC 不需按 F9</h3>
-    <p>Mac Word 无视 settings.updateFields。bid_assemble 通过 AppleScript 预打开 Word 一次：update fields → save → close，把真实目录条目写入字段缓存。</p>
-  </div>
-  <div class="card lessons">
-    <h3>★ 4 层指纹清理</h3>
-    <p>core.xml（author/created/modified/title）+ app.xml（Application/AppVersion/TotalTime/Template/Company/Manager 6 字段）+ settings.xml（rsids/embedSystemFonts）+ document.xml（w:rsid* 属性）+ media/*.png（PIL 重写）。</p>
-  </div>
-</div>
+  <section class="panel active" id="overview">
+    <div class="panel-title">
+      <h2>一、系统总流程</h2>
+      <span class="hint">蓝色是输入，橙色是项目认知，绿色是生成，红色是质量门禁。</span>
+    </div>
+    <div class="mode-box">
+      <div class="mode-callout">
+        <h3>推荐采用的模式</h3>
+        <p>用这个 HTML + Mermaid 模式最好：流程是文字写的，改完保存后刷新浏览器就能马上看到；也能下载 SVG、打印 PDF，适合开会沟通。</p>
+      </div>
+      <div class="mode-callout">
+        <h3>怎么让修改马上体现</h3>
+        <p>修改流程图本身：编辑 <code>docs/bid-gen-flowchart.html</code> 后刷新页面。修改项目逻辑：改对应脚本或配置后，用 <code>python scripts/bid_run.py --doctor</code> 和相关测试验证。</p>
+      </div>
+    </div>
+    <div class="diagram-wrap">
+      <div class="static-flow">
+        <div class="flow-row">
+          <div class="flow-node input">
+            <h3>1. 用户提供资料</h3>
+            <p>招标文件目录或 ZIP，包含招标文件、清单、图纸、规范等。</p>
+          </div>
+          <div class="flow-node input">
+            <h3>2. 选择入口</h3>
+            <p>命令行用 bid_run.py；网页上传由 web/app.py 创建任务。</p>
+          </div>
+          <div class="flow-node input">
+            <h3>3. 一键编排</h3>
+            <p>bid_run.py 按 checkpoint 串起全部步骤，失败后可续跑。</p>
+          </div>
+          <div class="flow-node input">
+            <h3>4. 提取原始资料</h3>
+            <p>bid_extract.py 处理 PDF/DOCX/XLSX，并对关键页面做视觉 OCR。</p>
+          </div>
+        </div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-row">
+          <div class="flow-node think">
+            <h3>5. 前置理解</h3>
+            <p>template、facts、derive、skeleton、special 识别项目事实和硬要求。</p>
+          </div>
+          <div class="flow-node think">
+            <h3>6. 合并输入</h3>
+            <p>input_assemble.py 汇总为 project_input.json，给后续合成使用。</p>
+          </div>
+          <div class="flow-node think">
+            <h3>7. 自动合成项目认知</h3>
+            <p>生成 project_brain.md、chapter_plan.md、disqualification_rules.md。</p>
+          </div>
+          <div class="flow-node gate">
+            <h3>8. 计划校验</h3>
+            <p>bid_plan_verify.py 检查评分总分、章节锚点、废标来源。</p>
+          </div>
+        </div>
+        <div class="flow-arrow">↓ 校验通过后</div>
+        <div class="flow-row three">
+          <div class="flow-node think">
+            <h3>9. 单家/多家配置</h3>
+            <p>variants.py 决定单份投标，或多家公司差异化投标。</p>
+          </div>
+          <div class="flow-node think">
+            <h3>10. 章节与图表计划</h3>
+            <p>plan_variants.py 和 chart_specs.py 生成每家章节计划、图表规格。</p>
+          </div>
+          <div class="flow-node make">
+            <h3>11. 撰写章节</h3>
+            <p>bid_writer.py 输出 Markdown 章节，便于人工查看和局部修改。</p>
+          </div>
+        </div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-row">
+          <div class="flow-node gate">
+            <h3>12. 机器审校</h3>
+            <p>bid_reviewer.py 检查字数、标题、关键词、暗标风险。</p>
+          </div>
+          <div class="flow-node gate">
+            <h3>13. major 自动重写</h3>
+            <p>发现重大问题时，自动强制重写问题章节，最多 2 轮。</p>
+          </div>
+          <div class="flow-node make">
+            <h3>14. 组装 Word</h3>
+            <p>bid_assemble.py 生成 DOCX，处理目录、页码、样式、图表、元数据。</p>
+          </div>
+          <div class="flow-node gate">
+            <h3>15. 合规检查</h3>
+            <p>bid_compliance.py 检查暗标禁词、响应缺失、字数和图表落地。</p>
+          </div>
+        </div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-split">
+          <div class="flow-node end">
+            <h3>单家模式交付</h3>
+            <p>输出 DOCX、项目总览、审校报告、合规报告。</p>
+          </div>
+          <div class="flow-node gate">
+            <h3>多家模式再查相似度</h3>
+            <p>bid_similarity.py 超阈值时自动重写最相似章节，再回到审校和组装。</p>
+          </div>
+        </div>
+        <div class="flow-note">看图方式：颜色表示环节性质。蓝色=输入和入口，橙色=项目认知，绿色=生成文件，红色=质量门禁，灰色=交付结果。</div>
+      </div>
+    </div>
+    <div class="guide-grid">
+      <div class="card">
+        <h3>输入资料</h3>
+        <p>用户只需要给招标文件目录或 ZIP。系统会把招标文件、清单、图纸、规范等资料转成可分析文本。</p>
+      </div>
+      <div class="card amber">
+        <h3>项目认知</h3>
+        <p>系统自动生成 <strong>项目理解、章节计划、废标规则</strong> 三件套，这是后续写作的总指挥。</p>
+      </div>
+      <div class="card green">
+        <h3>生成文件</h3>
+        <p>章节 Markdown 先生成，再组装成 Word。这样方便中途人工改某一章，不用推倒重来。</p>
+      </div>
+      <div class="card red">
+        <h3>质量门禁</h3>
+        <p>审校、合规、相似度三个关卡会把明显风险拦下来，部分问题可以自动重写。</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" id="business">
+    <div class="panel-title">
+      <h2>二、业务决策点</h2>
+      <span class="hint">这些是最适合你指导工作的地方，不需要先读代码。</span>
+    </div>
+    <div class="diagram-wrap">
+      <div class="mermaid">
+flowchart LR
+  A[招标资料] --> B[抽取评分表<br/>evaluation_method.json]
+  A --> C[抽取施工组织设计大纲<br/>mandatory_outline.json]
+  A --> D[抽取废标/否决条款<br/>disqualification.json]
+
+  B --> E[project_brain.md<br/>项目理解]
+  C --> E
+  D --> E
+  E --> F[chapter_plan.md<br/>章节怎么排、每章写多少字]
+  E --> G[disqualification_rules.md<br/>暗标、页数、字体、装订等硬规则]
+
+  F --> H{你最该确认的 4 件事}
+  G --> H
+  H --> H1[章节标题是否和评分表/大纲一致]
+  H --> H2[目标页数和每章字数是否合理]
+  H --> H3[废标条款有没有漏]
+  H --> H4[图表/附表是否放在招标要求的位置]
+
+  H1 --> I[确认后再生成章节]
+  H2 --> I
+  H3 --> I
+  H4 --> I
+      </div>
+    </div>
+    <div class="guide-grid">
+      <div class="card amber">
+        <h3>最重要的人工确认</h3>
+        <p>优先看 <code>extracted/project_brain.md</code>、<code>extracted/chapter_plan.md</code>、<code>extracted/disqualification_rules.md</code>。这三份文件决定投标文件方向。</p>
+      </div>
+      <div class="card red">
+        <h3>不要随意省略的内容</h3>
+        <p>评分项、施工组织设计大纲、废标条款必须 1:1 对齐。尤其合格制项目，大纲主题少一项就可能被认为不响应。</p>
+      </div>
+      <div class="card green">
+        <h3>可以灵活调整的内容</h3>
+        <p>章节字数、图表数量、施工方案详略、批量投标各家的差异化程度，可以根据实际投标策略调整。</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" id="files">
+    <div class="panel-title">
+      <h2>三、文件与脚本关系</h2>
+      <span class="hint">左边是你关心的业务动作，右边是程序实际做事的位置。</span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>业务动作</th>
+          <th>主要脚本/文件</th>
+          <th>输入</th>
+          <th>输出/影响</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>一键跑完整项目</td>
+          <td><code>scripts/bid_run.py</code></td>
+          <td>招标文件目录</td>
+          <td>按 checkpoint 串起全部步骤，失败可继续跑</td>
+        </tr>
+        <tr>
+          <td>网页上传和查看任务</td>
+          <td><code>web/app.py</code></td>
+          <td>ZIP、公司名、目标页数</td>
+          <td>任务列表、进度、下载结果</td>
+        </tr>
+        <tr>
+          <td>提取招标资料</td>
+          <td><code>bid_extract.py</code><br><code>bid_vision.py</code></td>
+          <td>PDF/DOCX/XLSX</td>
+          <td><code>extracted/*.txt</code>、视觉 OCR 报告</td>
+        </tr>
+        <tr>
+          <td>提取评分表/大纲/废标条款</td>
+          <td><code>bid_skeleton_extract.py</code></td>
+          <td><code>extracted/*.txt</code></td>
+          <td>三份核心 JSON，是项目认知的来源</td>
+        </tr>
+        <tr>
+          <td>生成项目认知和章节计划</td>
+          <td><code>bid_brain_translate.py</code><br><code>bid_rules_synthesize.py</code><br><code>bid_plan_synthesize.py</code></td>
+          <td>三份 JSON + 项目事实</td>
+          <td><code>project_brain.md</code>、<code>chapter_plan.md</code>、<code>disqualification_rules.md</code></td>
+        </tr>
+        <tr>
+          <td>校验计划是否靠谱</td>
+          <td><code>bid_plan_verify.py</code></td>
+          <td>三件套认知文件</td>
+          <td>拦截总分不符、章节锚点缺失、废标来源缺失</td>
+        </tr>
+        <tr>
+          <td>单家/多家投标差异化</td>
+          <td><code>bid_variants.py</code><br><code>bid_plan_variants.py</code></td>
+          <td>项目认知、公司数量</td>
+          <td><code>variants.json</code> 和每家独立计划</td>
+        </tr>
+        <tr>
+          <td>生成章节正文</td>
+          <td><code>bid_writer.py</code></td>
+          <td>章节计划、项目认知、规则</td>
+          <td><code>output/*.md</code> 或 <code>output/Vxx/*.md</code></td>
+        </tr>
+        <tr>
+          <td>审校章节质量</td>
+          <td><code>bid_reviewer.py</code></td>
+          <td>章节 Markdown</td>
+          <td><code>review_summary.json/md</code>，major 会触发重写</td>
+        </tr>
+        <tr>
+          <td>组装 Word</td>
+          <td><code>bid_assemble.py</code><br><code>bid_charts.py</code></td>
+          <td>章节 Markdown、格式规则、图表规格</td>
+          <td>最终 DOCX、目录、页码、图表、元数据处理</td>
+        </tr>
+        <tr>
+          <td>合规检查</td>
+          <td><code>bid_compliance.py</code></td>
+          <td>章节和 DOCX</td>
+          <td>暗标禁词、响应缺失、字数和图表落地检查</td>
+        </tr>
+        <tr>
+          <td>批量相似度检查</td>
+          <td><code>bid_similarity.py</code></td>
+          <td>多家 DOCX/章节</td>
+          <td>相似度矩阵，超阈值自动重写</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="panel" id="change">
+    <div class="panel-title">
+      <h2>四、修改指导表</h2>
+      <span class="hint">先按现象定位，再改对应位置。改完刷新或重跑对应步骤。</span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>你想调整什么</th>
+          <th>优先改哪里</th>
+          <th>改完怎么马上看效果</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>流程图说明、开会用的项目地图</td>
+          <td><code>docs/bid-gen-flowchart.html</code></td>
+          <td>保存后刷新浏览器；可下载 SVG 或打印 PDF</td>
+        </tr>
+        <tr>
+          <td>一键运行顺序、失败后怎么续跑、质量门禁规则</td>
+          <td><code>scripts/bid_run.py</code></td>
+          <td><code>python scripts/bid_run.py --doctor</code>；真实项目用 <code>--dry-run</code> 或 <code>--resume</code></td>
+        </tr>
+        <tr>
+          <td>招标文件 OCR、识别哪些页面必须视觉提取</td>
+          <td><code>configs/bid_vision_config.json</code><br><code>scripts/bid_extract.py</code></td>
+          <td>重跑 Step 1，看 <code>extracted/vision_report.json</code></td>
+        </tr>
+        <tr>
+          <td>评分表、大纲、废标条款漏提或提错</td>
+          <td><code>scripts/bid_skeleton_extract.py</code><br><code>skills/bid-gen/references/extraction-methodology.md</code></td>
+          <td>重跑 Step 1.5，看三份 JSON 是否准确</td>
+        </tr>
+        <tr>
+          <td>项目理解、章节计划、字数分配不符合你的判断</td>
+          <td><code>bid_brain_translate.py</code><br><code>bid_plan_synthesize.py</code><br><code>extracted/chapter_plan.md</code></td>
+          <td>重跑 Step 2 合成和 <code>bid_plan_verify.py</code></td>
+        </tr>
+        <tr>
+          <td>废标规则、暗标规则、格式参数</td>
+          <td><code>bid_rules_synthesize.py</code><br><code>extracted/disqualification_rules.md</code></td>
+          <td>重跑 plan verify、assemble、compliance</td>
+        </tr>
+        <tr>
+          <td>章节正文风格、专业深度、自动重写逻辑</td>
+          <td><code>scripts/bid_writer.py</code><br><code>configs/bid_llm_config.json</code></td>
+          <td>重写指定章节，再跑 reviewer</td>
+        </tr>
+        <tr>
+          <td>Word 样式、目录、页码、图片、横版、元数据</td>
+          <td><code>scripts/bid_assemble.py</code><br><code>scripts/bid_charts.py</code></td>
+          <td>重跑 Step 4，直接打开 DOCX 检查</td>
+        </tr>
+        <tr>
+          <td>网页界面字段、任务列表、下载入口</td>
+          <td><code>web/app.py</code></td>
+          <td>启动 <code>python web/app.py</code>，浏览器刷新页面</td>
+        </tr>
+        <tr>
+          <td>给智能体看的总提示词和操作规范</td>
+          <td><code>commands/bid-gen.md</code><br><code>skills/bid-gen/SKILL.md</code></td>
+          <td>下一次智能体执行时生效；关键改动建议同步 README</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="guide-grid">
+      <div class="card red">
+        <h3>修改优先级建议</h3>
+        <p>先改规则和配置，再改脚本。能通过 <code>chapter_plan.md</code>、<code>disqualification_rules.md</code> 指导的，不要急着动代码。</p>
+      </div>
+      <div class="card violet">
+        <h3>推荐沟通方式</h3>
+        <p>你可以直接说“总流程图里 Step 2 这里要改成……”，我就能根据图定位到脚本和文件。</p>
+      </div>
+      <div class="card teal">
+        <h3>验收方式</h3>
+        <p>小改看对应中间文件，大改至少跑 <code>--doctor</code> 和相关测试；涉及 Word 版式要实际打开 DOCX 看目录和页数。</p>
+      </div>
+    </div>
+  </section>
+</main>
 
 <footer>
-  bid-gen skill · Claude Code · 更新于 2026-05-06
+  当前版本按 bid-gen-v3 现有 README、commands/bid-gen.md、scripts/bid_run.py、web/app.py 整理。更新日期：2026-05-19。
 </footer>
 
 <script>
-  mermaid.initialize({
-    startOnLoad: true,
-    theme: 'default',
-    flowchart: {
-      curve: 'basis',
-      htmlLabels: true,
-      nodeSpacing: 50,
-      rankSpacing: 60,
-      padding: 15
-    },
-    themeVariables: {
-      fontFamily: '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
-      fontSize: '14px'
-    }
+  if (window.mermaid) {
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: "default",
+      flowchart: {
+        curve: "basis",
+        htmlLabels: true,
+        nodeSpacing: 42,
+        rankSpacing: 54,
+        padding: 12
+      },
+      themeVariables: {
+        fontFamily: "-apple-system, PingFang SC, Microsoft YaHei, Arial, sans-serif",
+        fontSize: "14px"
+      }
+    });
+  }
+
+  document.querySelectorAll(".tab").forEach(button => {
+    button.addEventListener("click", () => {
+      document.querySelectorAll(".tab").forEach(item => item.classList.remove("active"));
+      document.querySelectorAll(".panel").forEach(item => item.classList.remove("active"));
+      button.classList.add("active");
+      document.getElementById(button.dataset.target).classList.add("active");
+    });
   });
 
-  function getSVG() {
-    const svg = document.querySelector('#diagram svg');
-    if (!svg) { alert('图表尚未渲染完成，请稍候重试'); return null; }
-    return svg;
+  function setScale(value) {
+    document.querySelectorAll(".mermaid svg").forEach(svg => {
+      svg.style.transformOrigin = "top left";
+      svg.style.transform = "scale(" + value + ")";
+      svg.style.marginBottom = value < 1 ? "-" + Math.round(svg.getBoundingClientRect().height * (1 - value)) + "px" : "0";
+    });
+  }
+
+  function currentSVG() {
+    const active = document.querySelector(".panel.active .mermaid svg");
+    if (!active) {
+      alert("当前页没有 SVG 图。总流程是本地 HTML 流程图，可直接打印或另存 PDF；切到“业务决策点”后可下载 SVG。");
+      return null;
+    }
+    return active;
   }
 
   function downloadSVG() {
-    const svg = getSVG();
+    const svg = currentSVG();
     if (!svg) return;
     const serializer = new XMLSerializer();
     const source = '<?xml version="1.0" encoding="UTF-8"?>\n' + serializer.serializeToString(svg);
-    const blob = new Blob([source], { type: 'image/svg+xml;charset=utf-8' });
-    triggerDownload(URL.createObjectURL(blob), 'bid-gen-flowchart.svg');
-  }
-
-  function downloadPNG() {
-    const svg = getSVG();
-    if (!svg) return;
-    const serializer = new XMLSerializer();
-    const source = serializer.serializeToString(svg);
-    const svgBlob = new Blob([source], { type: 'image/svg+xml;charset=utf-8' });
-    const url = URL.createObjectURL(svgBlob);
-
-    const img = new Image();
-    img.onload = function() {
-      const scale = 2;
-      const canvas = document.createElement('canvas');
-      canvas.width = img.width * scale;
-      canvas.height = img.height * scale;
-      const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.scale(scale, scale);
-      ctx.drawImage(img, 0, 0);
-      canvas.toBlob(blob => {
-        triggerDownload(URL.createObjectURL(blob), 'bid-gen-flowchart.png');
-      }, 'image/png');
-      URL.revokeObjectURL(url);
-    };
-    img.src = url;
-  }
-
-  function triggerDownload(href, filename) {
-    const a = document.createElement('a');
-    a.href = href;
-    a.download = filename;
+    const blob = new Blob([source], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "bid-gen-flowchart.svg";
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 </script>
-
 </body>
 </html>

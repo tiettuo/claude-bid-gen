@@ -31,6 +31,7 @@ bid_boq_extract.py - 解析工程量清单(BoQ)
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import re
 import sys
@@ -92,7 +93,12 @@ def parse_boq_file(txt_path: Path, log) -> list[dict]:
                 "items": sub_items,
             })
 
-    return results
+    if results:
+        return results
+
+    # PDF/OCR 转出的清单常常没有【工作表】标记，而是 HTML table / Markdown table
+    # 直接按全文逐行解析，保持工程名称【专业】上下文。
+    return _parse_loose_boq_text(text)
 
 
 _UNITS_RE = "|".join(re.escape(u) for u in sorted(VALID_UNITS, key=len, reverse=True))
@@ -144,6 +150,127 @@ def _parse_table_items(text: str) -> list[dict]:
             "code": m.group("code"),
         })
     return items
+
+
+def _strip_cell(s: str) -> str:
+    s = html.unescape(s or "")
+    s = re.sub(r"<br\s*/?>", " ", s, flags=re.I)
+    s = re.sub(r"<[^>]+>", "", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip(" \t\r\n|")
+
+
+def _parse_html_rows(line: str) -> list[list[str]]:
+    rows = []
+    for rm in re.finditer(r"<tr\b[^>]*>(.*?)</tr>", line, flags=re.I | re.S):
+        row_html = rm.group(1)
+        cells = [
+            _strip_cell(cm.group(1))
+            for cm in re.finditer(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", row_html, flags=re.I | re.S)
+        ]
+        if cells:
+            rows.append(cells)
+    return rows
+
+
+def _parse_markdown_row(line: str) -> list[str] | None:
+    if "|" not in line:
+        return None
+    raw = line.strip()
+    if not raw.startswith("|"):
+        return None
+    cells = [_strip_cell(c) for c in raw.strip("|").split("|")]
+    if len(cells) < 4:
+        return None
+    if all(re.fullmatch(r":?-{2,}:?", c or "") for c in cells):
+        return None
+    return cells
+
+
+def _number(s: str) -> float | None:
+    s = (s or "").replace(",", "").strip()
+    if re.fullmatch(r"\d+(?:\.\d+)?", s):
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    return None
+
+
+def _category_from_heading(line: str) -> str | None:
+    m = re.search(r"工程名称[:：].*?【([^】]{2,20})】", line)
+    if m:
+        return _strip_cell(m.group(1))
+    return None
+
+
+def _item_from_cells(cells: list[str], current_section: str | None) -> tuple[dict | None, str | None]:
+    """解析一行清单。返回 (item, new_subsection)。"""
+    # 分部标题行: ['', '0101', '土石方工程', ...] 或 ['1.1', '绿化工程', ...]
+    if re.fullmatch(r"\d{2,6}(?:\.\d+)?", cells[1] if len(cells) > 1 else ""):
+        maybe_name = cells[2] if len(cells) > 2 else ""
+        if maybe_name and not re.fullmatch(r"\d{10,12}", cells[1]) and not cells[0].isdigit():
+            return None, maybe_name[:40]
+
+    if len(cells) < 6:
+        return None, None
+
+    if not cells[0].isdigit():
+        return None, None
+    code = cells[1] if len(cells) > 1 else ""
+    if not re.fullmatch(r"\d{9,12}(?:\d{3})?", code):
+        return None, None
+    name = cells[2] if len(cells) > 2 else ""
+    unit = cells[4] if len(cells) > 4 else ""
+    qty = _number(cells[5] if len(cells) > 5 else "")
+    if not name or unit not in VALID_UNITS or qty is None or qty <= 0:
+        return None, None
+
+    return {
+        "name": name[:80],
+        "qty": qty,
+        "unit": unit,
+        "code": code,
+        "section": current_section,
+    }, None
+
+
+def _parse_loose_boq_text(text: str) -> list[dict]:
+    """解析无工作表标记的 HTML/Markdown 清单全文。"""
+    grouped: dict[str, list[dict]] = {}
+    current_section = "未分类"
+    current_subsection = ""
+
+    def add_item(item: dict) -> None:
+        category = current_section
+        if current_subsection and current_subsection not in category:
+            category = f"{category}-{current_subsection}"
+        item.pop("section", None)
+        grouped.setdefault(category, []).append(item)
+
+    for line in text.splitlines():
+        heading = _category_from_heading(line)
+        if heading:
+            current_section = heading
+            current_subsection = ""
+
+        rows = _parse_html_rows(line)
+        md_row = _parse_markdown_row(line)
+        if md_row:
+            rows.append(md_row)
+
+        for cells in rows:
+            item, subsection = _item_from_cells(cells, current_section)
+            if subsection:
+                current_subsection = subsection
+            if item:
+                add_item(item)
+
+    return [
+        {"category": cat, "items": items}
+        for cat, items in grouped.items()
+        if items
+    ]
 
 
 def _split_by_subsection(items: list[dict], section_name: str | None) -> dict[str, list[dict]]:

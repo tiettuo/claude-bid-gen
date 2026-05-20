@@ -30,6 +30,7 @@ import argparse
 import importlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -88,6 +89,26 @@ def mark_step(state: dict, step: str, status: str, **extra) -> None:
     if status in ("ok", "fail"):
         s["finished_at"] = datetime.now().isoformat(timespec="seconds")
     s.update(extra)
+
+
+def repair_stale_running_steps(state: dict, max_age_hours: float = 2.0) -> list[str]:
+    """把上次异常中断遗留的 running 标记修成 interrupted。"""
+    repaired = []
+    now = datetime.now()
+    for step, info in state.get("steps", {}).items():
+        if info.get("status") != "running":
+            continue
+        started = info.get("started_at")
+        try:
+            started_at = datetime.fromisoformat(started) if started else None
+        except ValueError:
+            started_at = None
+        if not started_at or (now - started_at).total_seconds() >= max_age_hours * 3600:
+            info["status"] = "interrupted"
+            info["finished_at"] = now.isoformat(timespec="seconds")
+            info["error"] = "stale running state repaired"
+            repaired.append(step)
+    return repaired
 
 
 # ─── subprocess runner ─────────────────────────────────────────────────
@@ -185,6 +206,56 @@ def check_step2_ready(tender_dir: Path) -> tuple[bool, list[str]]:
     if code == 1:
         return (True, ["有警告（未标注来源的废标条款），详见终端输出"])
     return (False, ["硬性失败（总分不符或结构缺失），详见终端输出"])
+
+
+_BAD_PROJECT_NAME_RE = re.compile(
+    r"^(?:见)?(?:投标人须知前附表|须知前附表|前附表|项目名称|工程名称|本项目|本工程|/|无)$"
+)
+_STALE_ORG_WORDS = ("棚圈", "牧道", "桥涵", "暖棚")
+
+
+def generation_input_gate(tender_dir: Path) -> tuple[bool, list[str]]:
+    """生成前硬门禁：拦住会显著污染正文的前置数据问题。"""
+    ext = tender_dir / "extracted"
+    output = tender_dir / "output"
+    issues: list[str] = []
+
+    facts_path = ext / "project_facts.json"
+    if facts_path.exists():
+        try:
+            facts_payload = json.loads(facts_path.read_text(encoding="utf-8"))
+            facts = facts_payload.get("facts", facts_payload)
+            project_name = str((facts.get("project_name") or {}).get("value") or "").strip()
+            if _BAD_PROJECT_NAME_RE.search(project_name) or "见投标人须知" in project_name:
+                issues.append("项目名称仍是模板占位值，请重跑 facts（建议加 --force）")
+        except Exception as e:  # noqa: BLE001
+            issues.append(f"project_facts.json 读取失败: {e}")
+    else:
+        issues.append("缺少 project_facts.json")
+
+    has_boq_txt = any(ext.glob("*清单*.txt")) or any(ext.glob("*工程量*.txt")) or any(ext.glob("*BoQ*.txt"))
+    boq_path = ext / "boq.json"
+    if has_boq_txt:
+        if not boq_path.exists():
+            issues.append("存在清单文本但缺少 boq.json")
+        else:
+            try:
+                boq = json.loads(boq_path.read_text(encoding="utf-8"))
+                total_items = sum(len(c.get("items", []) or []) for c in boq.get("categories", []) or [])
+                if total_items == 0:
+                    issues.append("存在清单文本但 boq.json 未解析出工程量，需修复清单抽取后再生成")
+            except Exception as e:  # noqa: BLE001
+                issues.append(f"boq.json 读取失败: {e}")
+
+    for assign_path in output.glob("V*/chart_assignment.json"):
+        try:
+            text = assign_path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if any(w in text for w in _STALE_ORG_WORDS):
+            issues.append(f"{assign_path.relative_to(tender_dir)} 存在非本项目作业队模板残留")
+
+    return (not issues, issues)
 
 
 # ─── 质量门禁 ─────────────────────────────────────────────────────────
@@ -694,6 +765,10 @@ def run_pipeline(tender_dir: Path, args, log) -> int:
     output.mkdir(exist_ok=True)
     state_path = output / ".bid_run.state.json"
     state = load_state(state_path)
+    repaired = repair_stale_running_steps(state)
+    if repaired:
+        log.warning(f"已修复上次异常遗留的 running 状态: {', '.join(repaired)}")
+        save_state(state_path, state)
 
     # ★ v3: 项目指纹校验 — 防跨项目数据串用
     try:
@@ -989,6 +1064,13 @@ def run_pipeline(tender_dir: Path, args, log) -> int:
             elif step == "write":
                 if not ensure_step2():
                     mark_step(state, step, "fail", error="step2 not ready")
+                    save_state(state_path, state)
+                    return 2
+                gate_ok, gate_issues = generation_input_gate(tender_dir)
+                if not gate_ok:
+                    for issue in gate_issues:
+                        log.error(f"生成前门禁失败: {issue}")
+                    mark_step(state, step, "fail", error="generation input gate failed", issues=gate_issues)
                     save_state(state_path, state)
                     return 2
                 # writer 强制要 variants.json;single 模式自动生成 1 家默认

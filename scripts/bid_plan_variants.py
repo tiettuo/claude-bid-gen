@@ -9,6 +9,8 @@
 用法: python bid_plan_variants.py <tender_dir>
 """
 
+from __future__ import annotations
+
 import json
 import re
 import sys
@@ -62,16 +64,10 @@ def _rewrite_subitems_for_chapter(
     """调用 LLM 为一个章节生成 n_variants 个不同的子标题方案。"""
     base_count = len(subitems)
     total_chars = sum(s.get("chars", 0) for s in subitems)
-    lo, hi = max(3, base_count - 2), base_count + 2
-
-    # 为每个方案指定不同的子项数量，确保有差异
-    count_targets = []
-    for i in range(n_variants):
-        # 循环使用 base-2, base-1, base, base+1, base+2
-        offsets = [-2, -1, 0, 1, 2]
-        offset = offsets[i % len(offsets)]
-        target_count = max(3, min(base_count + 2, base_count + offset))
-        count_targets.append(f"方案{i+1}={target_count}个")
+    count_targets = [
+        f"方案{i+1}={count}个"
+        for i, count in enumerate(_variant_subitem_counts(base_count, n_variants))
+    ]
     count_targets_str = "，".join(count_targets)
 
     subitems_text = "\n".join(
@@ -133,6 +129,21 @@ def _fallback_plans(subitems: list[dict], n: int) -> list[list[dict]]:
     return plans
 
 
+def _variant_subitem_counts(base_count: int, n_variants: int) -> list[int]:
+    """变体数量围绕基础规划微调，避免 V01/V02/V03 机械地全都压成同一档。"""
+    if n_variants <= 0:
+        return []
+    counts = [base_count]
+    offsets = [-1, 1, -2, 2]
+    for offset in offsets:
+        if len(counts) >= n_variants:
+            break
+        counts.append(max(3, min(base_count + 1, base_count + offset)))
+    while len(counts) < n_variants:
+        counts.append(base_count)
+    return counts[:n_variants]
+
+
 # ── 图表分配 ──────────────────────────────────────────────────────
 
 def _assign_charts_for_variant(
@@ -140,6 +151,7 @@ def _assign_charts_for_variant(
     base_chart_specs,
     org_templates: dict,
     chapters: list[dict],
+    work_labels: list[str] | None = None,
 ) -> dict:
     """为单个变体生成图表分配（确定性，基于 section_order_seed）。"""
     seed = variant.get("section_order_seed", 0)
@@ -165,16 +177,19 @@ def _assign_charts_for_variant(
     else:
         tree = template["children"]
 
+    tree = _projectize_org_tree(tree, work_labels or [])
+
+    org_chapter = _find_org_chapter(chapters)
     assignment["org_template"] = {
-        "chapter": "04",
+        "chapter": org_chapter,
         "template_id": chosen_key,
         "template_label": template["label"],
         "root": template["root"],
         "children": tree,
     }
 
-    # 2. 管理体系章节图表类型（08/10/11）
-    mgmt_chapters = ["08", "10", "11"]
+    # 2. 管理体系章节图表类型：按当前 chapter_plan 动态定位，不能写死旧 15 章结构
+    mgmt_chapters = _find_management_chapters(chapters)
     combos = org_templates["management_chart_types"]["combinations"]
     chosen_combo = combos[rng.randint(0, len(combos) - 1)]
     assignment["management_chart_types"] = {
@@ -216,6 +231,82 @@ def _assign_charts_for_variant(
                 assignment["chart_overrides"][ch_num_str] = overrides
 
     return assignment
+
+
+def _find_org_chapter(chapters: list[dict]) -> str:
+    for ch in chapters:
+        title = ch.get("title", "")
+        if any(k in title for k in ("施工方案", "技术措施", "施工部署", "组织")):
+            return str(ch["num"]).zfill(2)
+    return str(chapters[0]["num"]).zfill(2) if chapters else "01"
+
+
+def _find_management_chapters(chapters: list[dict]) -> list[str]:
+    found = []
+    for ch in chapters:
+        title = ch.get("title", "")
+        if any(k in title for k in ("质量", "安全", "环保", "环境")):
+            found.append(str(ch["num"]).zfill(2))
+    return found[:3]
+
+
+_STALE_WORK_WORDS = ("棚圈", "牧道", "桥涵", "暖棚", "装配安装")
+
+
+def _load_work_labels(extracted: Path) -> list[str]:
+    """从 boq.json 生成项目专属作业队标签。"""
+    boq_path = extracted / "boq.json"
+    if not boq_path.exists():
+        return []
+    try:
+        boq = json.loads(boq_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    labels = []
+    for cat in boq.get("categories", []):
+        name = cat.get("name") or cat.get("category") or ""
+        name = re.sub(r"^未分类-?", "", name).strip("- ")
+        if not name:
+            continue
+        # 细分项太碎时取专业大类；保留“附属工程-土石方工程”这种有辨识度的标签
+        labels.append(f"{name}施工队")
+    # 稳定去重，避免组织图过长
+    seen = set()
+    uniq = []
+    for label in labels:
+        if label not in seen:
+            seen.add(label)
+            uniq.append(label)
+    return uniq[:6]
+
+
+def _projectize_org_tree(children: list[dict], work_labels: list[str]) -> list[dict]:
+    """把组织模板里的行业残留作业队替换成本项目清单工程构成。"""
+    if not work_labels:
+        return children
+    labels_iter = iter(work_labels)
+
+    def next_label(default: str) -> str:
+        try:
+            return next(labels_iter)
+        except StopIteration:
+            return default
+
+    def walk(nodes: list[dict]) -> list[dict]:
+        out = []
+        for node in nodes:
+            n = dict(node)
+            label = str(n.get("label", ""))
+            if any(w in label for w in _STALE_WORK_WORDS):
+                n["label"] = next_label(label)
+            elif label.endswith(("工区", "施工队", "作业队")) and n.get("children"):
+                # 工区制里优先替换工区名称，让组织架构贴近本项目专业划分。
+                n["label"] = next_label(label)
+            n["children"] = walk(n.get("children", []))
+            out.append(n)
+        return out
+
+    return walk(children)
 
 
 # ── 写入变体大纲文件 ──────────────────────────────────────────────
@@ -304,7 +395,11 @@ def main():
     base_chart_specs = {}
     if chart_specs_path.exists():
         raw = json.loads(chart_specs_path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            raw = raw.get("specs", [])
         for spec in raw:
+            if not isinstance(spec, dict):
+                continue
             ch_key = str(spec.get("chapter", "")).zfill(2)
             base_chart_specs.setdefault(ch_key, []).append(spec)
 
@@ -312,6 +407,9 @@ def main():
     org_templates = {"templates": {}, "management_chart_types": {"combinations": []}}
     if org_templates_path.exists():
         org_templates = json.loads(org_templates_path.read_text(encoding="utf-8"))
+    work_labels = _load_work_labels(extracted)
+    if work_labels:
+        log.info(f"清单驱动作业队标签: {work_labels}")
 
     # LLM 客户端
     llm_cfg = {}
@@ -382,7 +480,7 @@ def main():
 
         # 图表分配
         chart_assign = _assign_charts_for_variant(
-            variant, base_chart_specs, org_templates, chapters
+            variant, base_chart_specs, org_templates, chapters, work_labels
         )
         assign_path = output / vid / "chart_assignment.json"
         assign_path.write_text(

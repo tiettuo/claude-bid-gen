@@ -6,7 +6,7 @@ bid_vision.py - 视觉大模型 OCR 调度模块
 1. load_config()            读取 $BID_GEN_HOME/configs/bid_vision_config.json
 2. classify_page(text)      按关键词分类页面，返回命中的类别集合
 3. should_use_vision(...)   判定某页是否应走视觉模型（强制类 / 扫描页+弱类）
-4. vision_extract(img,...)  调用视觉模型抽取该页，主力 qwen-vl → 兜底 glm-ocr
+4. vision_extract(img,...)  调用视觉模型抽取该页，支持并行/串行两种模式
 
 调用规范与 bid_llm_client 保持一致：从 bid_vision_config.json 读模型池，
 API Key 从环境变量获取，失败按 fallback_order 降级。
@@ -238,6 +238,51 @@ def pick_preferred_model(
     return None
 
 
+def _call_model_with_retries(
+    model_key: str,
+    image_bytes: bytes,
+    vision_prompt: str,
+    models: dict,
+    cfg: dict,
+    log: logging.Logger,
+) -> tuple[str, str]:
+    """单模型重试包装，返回 (text, model_key)。失败返回 ("", model_key)。"""
+    model_cfg = models.get(model_key)
+    if not model_cfg:
+        return "", model_key
+    dispatcher = _DISPATCH.get(model_key)
+    if not dispatcher:
+        log.warning(f"  未知视觉模型类型: {model_key}，跳过")
+        return "", model_key
+    api_key = _get_api_key(model_cfg)
+    if not api_key:
+        log.warning(f"  {model_cfg.get('display_name')} 未配置 API Key，跳过")
+        return "", model_key
+
+    retry = cfg.get("retry", {})
+    max_attempts = int(retry.get("max_attempts", 2))
+    backoff = float(retry.get("backoff_seconds", 3))
+    timeout = int(retry.get("timeout_seconds", 120))
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            text = dispatcher(image_bytes, vision_prompt, model_cfg, log, timeout)
+            if text and text.strip():
+                log.info(
+                    f"  视觉识别成功 [{model_cfg.get('display_name')}] "
+                    f"({len(text)} 字符)"
+                )
+                return text, model_key
+        except Exception as e:
+            log.warning(
+                f"  视觉模型 {model_key} 第 {attempt}/{max_attempts} 次失败: {e}"
+            )
+        if attempt < max_attempts:
+            time.sleep(backoff)
+    log.warning(f"  视觉模型 {model_key} 全部重试失败")
+    return "", model_key
+
+
 def vision_extract(
     image_bytes: bytes,
     log: logging.Logger,
@@ -251,6 +296,7 @@ def vision_extract(
     prefer: 显式指定优先模型别名（覆盖一切）
     categories: 该页命中的关键词类别集合，用于按 Tier 自动选主力模型
                 （表格密集 → glm_ocr，文字段 → qwen_vl）
+    config 中 parallel=true 时并行调用所有模型，否则串行降级。
     失败返回 ("", "")
     """
     cfg = config or load_config()
@@ -265,40 +311,97 @@ def vision_extract(
         if auto_prefer and not prefer:
             log.debug(f"  [route] categories={categories} → 主力 {auto_prefer}")
 
-    retry = cfg.get("retry", {})
-    max_attempts = int(retry.get("max_attempts", 2))
-    backoff = float(retry.get("backoff_seconds", 3))
-    timeout = int(retry.get("timeout_seconds", 120))
-
     vision_prompt = prompt or cfg.get("vision_prompt", "请将这一页识别为 Markdown。")
 
+    # 串行降级
     for model_key in order:
-        model_cfg = models.get(model_key)
-        if not model_cfg:
-            continue
-        dispatcher = _DISPATCH.get(model_key)
-        if not dispatcher:
-            log.warning(f"  未知视觉模型类型: {model_key}，跳过")
-            continue
-
-        for attempt in range(1, max_attempts + 1):
-            try:
-                text = dispatcher(image_bytes, vision_prompt, model_cfg, log, timeout)
-                if text and text.strip():
-                    log.info(
-                        f"  视觉识别成功 [{model_cfg.get('display_name')}] "
-                        f"({len(text)} 字符)"
-                    )
-                    return text, model_key
-            except Exception as e:
-                log.warning(
-                    f"  视觉模型 {model_key} 第 {attempt}/{max_attempts} 次失败: {e}"
-                )
-            if attempt < max_attempts:
-                time.sleep(backoff)
+        text, _ = _call_model_with_retries(
+            model_key, image_bytes, vision_prompt, models, cfg, log
+        )
+        if text:
+            return text, model_key
         log.warning(f"  视觉模型 {model_key} 全部重试失败，降级下一家")
-
     return "", ""
+
+
+def vision_extract_batch(
+    pages: list[tuple[int, bytes, set[str] | None]],
+    log: logging.Logger,
+    config: dict | None = None,
+) -> dict[int, tuple[str, str]]:
+    """批量视觉 OCR：页面交替分配给多个模型，各模型并行处理各自那批页。
+
+    pages: [(page_index, image_bytes, categories), ...]
+    返回: {page_index: (markdown_text, model_used)}
+
+    例：20 页 + 2 模型 → 模型 A 处理第 0,2,4... 页，模型 B 处理第 1,3,5... 页，
+    两组同时跑，总耗时 ≈ max(模型A, 模型B) 而非 sum。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    cfg = config or load_config()
+    models = cfg.get("models", {})
+    order = list(cfg.get("fallback_order", ["qwen_vl", "glm_ocr"]))
+    vision_prompt = cfg.get("vision_prompt", "请将这一页识别为 Markdown。")
+
+    if not pages:
+        return {}
+
+    available = [
+        k for k in order
+        if models.get(k) and _get_api_key(models[k])
+    ]
+    if not available:
+        log.warning("  [batch] 无可用模型（API Key 均未配置）")
+        return {}
+
+    # 交替分配
+    assignments: dict[str, list[tuple[int, bytes, set[str] | None]]] = {
+        m: [] for m in available
+    }
+    for i, page_info in enumerate(pages):
+        assignments[available[i % len(available)]].append(page_info)
+
+    for model_key in available:
+        n = len(assignments[model_key])
+        display = models[model_key].get("display_name", model_key)
+        log.info(f"  [batch] {display}: {n} 页")
+
+    def _worker(model_key, page_list):
+        local = {}
+        for idx, img_bytes, _cats in page_list:
+            text, key = _call_model_with_retries(
+                model_key, img_bytes, vision_prompt, models, cfg, log
+            )
+            local[idx] = (text, key)
+        return local
+
+    retry_cfg = cfg.get("retry", {})
+    timeout = int(retry_cfg.get("timeout_seconds", 120))
+    max_attempts = int(retry_cfg.get("max_attempts", 2))
+    backoff = float(retry_cfg.get("backoff_seconds", 3))
+    max_pages_per_model = max(len(assignments[m]) for m in available)
+    overall_timeout = (
+        (timeout * max_attempts + backoff * max_attempts) * max_pages_per_model + 60
+    )
+
+    results: dict[int, tuple[str, str]] = {}
+    with ThreadPoolExecutor(max_workers=len(available)) as pool:
+        futures = {
+            pool.submit(_worker, m, assignments[m]): m for m in available
+        }
+        try:
+            for future in as_completed(futures, timeout=overall_timeout):
+                try:
+                    results.update(future.result())
+                except Exception as e:
+                    log.warning(f"  [batch] {futures[future]} 异常: {e}")
+        except TimeoutError:
+            log.warning(f"  [batch] 整体超时 ({overall_timeout}s)")
+
+    ok = sum(1 for text, _ in results.values() if text)
+    log.info(f"  [batch] 完成 {ok}/{len(pages)} 页")
+    return results
 
 
 # ---------- 辅助：类别聚合 ----------
