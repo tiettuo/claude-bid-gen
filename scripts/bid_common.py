@@ -19,7 +19,6 @@ bid_writer / bid_reviewer / bid_similarity / bid_variants 中的重复实现。
 - collect_chapter_files 按数字前缀排序的章节 md 列表
 - extract_keywords    从文本抽取 2~6 字中文关键词
 - read_project_name   从 project_brain.md 读取项目名
-- vary_chapter_title  per-variant H1 标题微变化（反结构收敛）
 - derive_variant_skeleton  生成 per-variant H2/H3 章节骨架（反结构收敛）
 - extract_headings    Markdown 标题保序抽取（reviewer / similarity 共用）
 - strip_prompt_leaks  清除 LLM 回显的 prompt 指令词（如"数据指纹"）
@@ -887,53 +886,6 @@ def read_project_name(extracted_dir: Path, fallback: str = "施工组织设计")
     # 去掉值末尾可能残留的 markdown 加粗符号
     name = re.sub(r"\*{1,2}$", "", name).strip()
     return name or fallback
-
-
-# ─── H1 标题 per-variant 微变化 ───────────────────────────────────────
-
-_H1_CONJ_SWAP = {"与": ["与", "及", "和"], "及": ["与", "及", "和"], "和": ["与", "及", "和"]}
-
-
-def vary_chapter_title(base_title: str, variant: dict | None) -> str:
-    """per-variant 章节 H1 标题微变化，避免 6 份方案完全一致的结构指纹。
-
-    变换规则（确定性，同 variant+title → 同结果）：
-    1. 连词互换：与 ↔ 及 ↔ 和
-    2. 可选前缀：加"工程"或"施工"
-    3. "措施"后缀变体：措施 / 保障措施 / 保证措施
-    约 30% 概率保持原标题不变。
-    """
-    if variant is None or "section_order_seed" not in variant:
-        return base_title
-
-    title_hash = sum(ord(c) * (i + 1) for i, c in enumerate(base_title)) & 0xFFFFFFFF
-    seed = int(variant["section_order_seed"]) ^ title_hash ^ 0x48314449
-    rng = random.Random(seed)
-
-    if rng.random() < 0.3:
-        return base_title
-
-    title = base_title
-
-    for old_conj, alternatives in _H1_CONJ_SWAP.items():
-        if old_conj in title:
-            title = title.replace(old_conj, rng.choice(alternatives), 1)
-            break
-
-    prefix = rng.choice([None, None, None, "工程", "施工"])
-    if prefix and not title.startswith(prefix) and prefix not in title:
-        title = prefix + title
-
-    if title.endswith("与措施") or title.endswith("及措施") or title.endswith("和措施"):
-        suffix = rng.choice(["措施", "措施", "保障措施", "保证措施"])
-        if suffix != "措施":
-            title = title[:-2] + suffix
-    elif title.endswith("体系措施"):
-        conj = rng.choice(["与", "及", "和", ""])
-        if conj:
-            title = title[:-2] + conj + "措施"
-
-    return title
 
 
 # ─── 章节骨架 per-variant 多样化（反结构收敛）────────────────────────

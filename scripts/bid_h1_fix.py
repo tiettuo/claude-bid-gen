@@ -90,27 +90,33 @@ def fix_directory(out_dir: Path, plan_titles: dict[str, str],
 def fix(tender_dir: Path, dry_run: bool = False, log=None) -> int:
     """主入口。"""
     ext = tender_dir / "extracted"
-    plan_path = ext / "chapter_plan.md"
-    plan_titles = parse_chapter_plan_titles(plan_path)
-    if not plan_titles:
-        log.error(f"  chapter_plan.md 未找到章节标题(路径: {plan_path})")
-        return 2
-    log.info(f"  chapter_plan 解析到 {len(plan_titles)} 章")
+    base_titles = parse_chapter_plan_titles(ext / "chapter_plan.md")
 
     output = tender_dir / "output"
     if not output.is_dir():
-        log.warning(f"  output/ 不存在,跳过")
+        log.warning("  output/ 不存在,跳过")
         return 0
 
     total_changed = 0
-    # 批量模式: output/V*/
     variant_dirs = sorted(output.glob("V[0-9][0-9]"))
     if variant_dirs:
+        # 批量模式:每个变体优先用自己的 chapter_plan_variant.md。变体结构独立,
+        # 章节标题已按反串标改写,用基准 chapter_plan.md 会把它改回去、毁掉差异。
         for vd in variant_dirs:
-            total_changed += fix_directory(vd, plan_titles, dry_run, log)
+            v_plan = vd / "chapter_plan_variant.md"
+            titles = (parse_chapter_plan_titles(v_plan) if v_plan.exists() else {}) or base_titles
+            if not titles:
+                log.error(f"  {vd.name}: 无章节标题来源(变体计划与 chapter_plan.md 均缺),跳过")
+                continue
+            src = "变体计划" if v_plan.exists() and parse_chapter_plan_titles(v_plan) else "chapter_plan.md(基准)"
+            log.info(f"  {vd.name}: H1 校验基准 = {src}({len(titles)} 章)")
+            total_changed += fix_directory(vd, titles, dry_run, log)
     else:
         # 单份模式: output/
-        total_changed += fix_directory(output, plan_titles, dry_run, log)
+        if not base_titles:
+            log.error("  chapter_plan.md 未找到章节标题")
+            return 2
+        total_changed += fix_directory(output, base_titles, dry_run, log)
 
     return 0
 

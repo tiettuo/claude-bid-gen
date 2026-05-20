@@ -37,7 +37,6 @@ from bid_common import (  # noqa: E402
     parse_plan_subitems,
     needs_blind_scan,
     extract_keywords,
-    vary_chapter_title,
     derive_variant_skeleton,
     extract_headings,
     chapter_chars_floor,
@@ -201,7 +200,9 @@ def review_chapter(
     if log is None:
         log = logging.getLogger("bid_reviewer")
 
-    expected_title = vary_chapter_title(chapter["title"], variant)
+    # 变体计划已 owns 章节标题(反串标差异在 chapter_plan_variant.md 里),
+    # 直接以其为期望标题,不再叠加旧的 vary_chapter_title 微变化。
+    expected_title = chapter["title"]
     result = {
         "file": md_path.name,
         "chapter_num": chapter["num"],
@@ -561,8 +562,15 @@ def main() -> int:
             if not v_dir.is_dir():
                 log.warning(f"跳过 {v['id']}：目录不存在")
                 continue
-            log.info(f"\n━━━ 审校 {v['id']} ({v['company_name']}) model={v['model']} ━━━")
-            r = review_variant(v_dir, v, chapters, disq, log, subitems_map)
+            # 每个变体优先用自己的 chapter_plan_variant.md(结构独立);
+            # 用基准会把变体改过的章节数/标题误判为缺章/标题不符。
+            v_plan = v_dir / "chapter_plan_variant.md"
+            v_chapters = (parse_chapter_plan(v_plan) if v_plan.exists() else []) or chapters
+            v_subitems = (parse_plan_subitems(v_plan) if v_plan.exists() else {}) or subitems_map
+            src = "变体计划" if v_plan.exists() and parse_chapter_plan(v_plan) else "chapter_plan.md(基准)"
+            log.info(f"\n━━━ 审校 {v['id']} ({v['company_name']}) model={v['model']} "
+                     f"章节源={src}/{len(v_chapters)}章 ━━━")
+            r = review_variant(v_dir, v, v_chapters, disq, log, v_subitems)
             write_variant_report(v_dir, r)
             all_results.append(r)
 

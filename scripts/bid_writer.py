@@ -38,7 +38,6 @@ from bid_common import (  # noqa: E402
     parse_chapter_plan as _parse_chapter_plan,
     parse_plan_subitems,
     extract_keywords,
-    vary_chapter_title,
     derive_variant_skeleton,
     render_skeleton_for_prompt,
     _split_notes,
@@ -814,7 +813,7 @@ def _build_4block_user_prompt(
     chapter: dict, variant: dict, skeleton: list[dict], subitems: list[dict],
 ) -> str:
     """Phase 4 新结构：4 块整章 prompt。"""
-    h1_title = vary_chapter_title(chapter["title"], variant)
+    h1_title = chapter["title"]
     target = chapter["target_chars"]
     band_lo = int(target * 0.85)
     band_hi = int(target * 1.15)
@@ -877,7 +876,7 @@ def _legacy_build_user_prompt(
     else:
         company_blind = ""
 
-    h1_title = vary_chapter_title(chapter["title"], variant)
+    h1_title = chapter["title"]
 
     skeleton_block = render_skeleton_for_prompt(skeleton)
     coverage_keywords = _split_notes(chapter.get("notes", ""))
@@ -1137,7 +1136,7 @@ def build_polish_user_prompt(chapter: dict, variant: dict, draft_markdown: str) 
         f"  - 二级编号：{ns.get('level2', '(1)  (2)  (3)')}\n"
         f"  - 三级编号：{ns.get('level3', '①  ②  ③')}"
     )
-    h1_title = vary_chapter_title(chapter["title"], variant)
+    h1_title = chapter["title"]
     chart_spec_block = build_chart_spec_block(get_chart_specs_for_chapter(chapter["num"]))
     _org_template_block = ""  # polish 阶段不需要注入组织架构模板
     return f"""【章节标题】
@@ -1236,7 +1235,7 @@ def _generate_one_cross(
         )
 
     # 拼整章草稿
-    h1_title = vary_chapter_title(chapter["title"], variant)
+    h1_title = chapter["title"]
     draft = f"# {h1_title}\n\n" + "\n\n".join(sub_texts)
     draft_chars = count_chinese_chars(draft)
 
@@ -1391,7 +1390,7 @@ def _generate_one_single(
         return False
 
     text = resp.text.strip()
-    h1_title = vary_chapter_title(chapter["title"], variant)
+    h1_title = chapter["title"]
     if not text.startswith("# "):
         text = f"# {h1_title}\n\n{text}"
 
@@ -1526,29 +1525,39 @@ def main() -> int:
             log.error(f"未找到 variant: {args.variant}")
             return 2
 
-    target_chapters = chapters
-    if args.chapter:
-        target_chapters = [c for c in chapters if c["num"] == args.chapter.zfill(2)]
-        if not target_chapters:
-            log.error(f"未找到章节: {args.chapter}")
-            return 2
-
-    log.info(f"待生成: {len(target_variants)} variant × {len(target_chapters)} 章 = {len(target_variants) * len(target_chapters)} 次调用")
-
     ok_count = fail_count = skip_count = 0
 
-    # 构造任务列表
+    # 章节结构:每个变体优先用自己的 chapter_plan_variant.md(结构独立,反串标),
+    # 缺失时回退共享 chapter_plan.md。
+    def _variant_chapters(v: dict) -> list[dict]:
+        vp = output / v["id"] / "chapter_plan_variant.md"
+        v_chs = parse_chapter_plan(vp) if vp.exists() else []
+        if not v_chs:
+            v_chs = chapters
+        if args.chapter:
+            v_chs = [c for c in v_chs if c["num"] == args.chapter.zfill(2)]
+        return v_chs
+
+    # 构造任务列表(逐变体取各自的章节结构)
     tasks = []
     for v in target_variants:
         v_dir = output / v["id"]
         v_dir.mkdir(exist_ok=True)
-        for ch in target_chapters:
+        v_chapters = _variant_chapters(v)
+        if not v_chapters:
+            log.error(f"[{v['id']}] 未解析到章节"
+                      + (f"(指定的 --chapter {args.chapter} 不在该变体中)" if args.chapter else ""))
+            continue
+        for ch in v_chapters:
             out_path = v_dir / ch["filename"]
             if out_path.exists() and not args.force:
                 log.info(f"[{v['id']}] 章 {ch['num']} 已存在，跳过（用 --force 覆盖）")
                 skip_count += 1
                 continue
             tasks.append((v, ch, out_path))
+
+    log.info(f"待生成: {len(target_variants)} 个变体, 共 {len(tasks)} 个章节任务"
+             + (f"(另跳过 {skip_count})" if skip_count else ""))
 
     # 每模型限流锁
     model_semaphores: dict[str, threading.Semaphore] = defaultdict(
