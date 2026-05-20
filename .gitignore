@@ -5,3 +5,4 @@ __pycache__/
 output/
 extracted/
 logs/
+.DS_Store

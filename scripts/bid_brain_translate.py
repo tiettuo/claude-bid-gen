@@ -28,7 +28,7 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
-from bid_common import make_script_logger  # noqa: E402
+from bid_common import make_script_logger, repair_technical_criteria_alignment  # noqa: E402
 
 OK = "✓"
 WARN = "⚠"
@@ -331,7 +331,7 @@ def section_6_disqualification(disq: dict, source_file: str) -> str:
         cat = c.get("category") or "其他"
         by_cat.setdefault(cat, []).append(c)
 
-    cat_order = ["报价", "资格", "形式", "格式", "评审", "其他"]
+    cat_order = ["报价", "资格", "形式", "格式", "硬约束", "评审", "其他"]
     for cat in cat_order:
         if cat not in by_cat:
             continue
@@ -377,12 +377,17 @@ def section_7_outline(outline: dict, source_file: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def assemble_brain(ext: Path) -> str:
+def assemble_brain(ext: Path, log=None) -> str:
     """组装新 brain.md。"""
     facts_d = (_load(ext / "project_facts.json") or {}).get("facts", {})
     derived = _load(ext / "project_derived.json")
     template = _load(ext / "template_match.json")
     eval_p = _load(ext / "evaluation_method.json") or {}
+    # 评分表纯文本错位修复:与 plan_synthesize 同源,保证 brain 第5节(writer 看到的
+    # 评分要点)与 chapter_plan 子项分配对同一份修正结果,不写回 evaluation_method.json。
+    if eval_p.get("scoring_items"):
+        eval_p["scoring_items"] = repair_technical_criteria_alignment(
+            eval_p["scoring_items"], log)
     disq = _load(ext / "disqualification.json") or {}
     outline = _load(ext / "mandatory_outline.json") or {}
     special = _load(ext / "special_clauses.json")
@@ -444,7 +449,7 @@ def main() -> int:
         log.info(f"  project_brain.md 已存在,需用 --force 覆盖")
         return 1
 
-    brain = assemble_brain(ext)
+    brain = assemble_brain(ext, log)
     out_path.write_text(brain, encoding="utf-8")
     log.info(f"  ✓ 写入 {out_path.name} ({len(brain):,} 字符)")
     log.info("=" * 60)

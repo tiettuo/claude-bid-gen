@@ -23,10 +23,12 @@ bid_writer / bid_reviewer / bid_similarity / bid_variants 中的重复实现。
 - derive_variant_skeleton  生成 per-variant H2/H3 章节骨架（反结构收敛）
 - extract_headings    Markdown 标题保序抽取（reviewer / similarity 共用）
 - strip_prompt_leaks  清除 LLM 回显的 prompt 指令词（如"数据指纹"）
+- repair_technical_criteria_alignment  按语义重配技术评分项错位（plan_synthesize / brain_translate 共用）
 """
 
 from __future__ import annotations
 
+import itertools
 import logging
 import random
 import re
@@ -410,6 +412,95 @@ def check_boq_chapter_coverage(ext_dir: "Path", chapter_titles: list[str]) -> di
         if not n: continue
         (cov if any(n in (t or"") or (t or"") in n for t in chapter_titles) else mis).append(n)
     return {"covered":cov,"missing":mis,"ratio":round(len(cov)/len(cats),3) if cats else 1.0}
+
+
+# ─── 技术评分项错位修复 ────────────────────────────────────────────────
+# 招标文件评分表是二维表格,转纯文本后"标题列"与"评分描述列"会逐行错位。
+# evaluation_method.json 保存原始抽取结果(可能错位),由消费方按语义重配。
+# plan_synthesize(生成 chapter_plan)与 brain_translate(生成 brain 第5节)共用。
+
+def _criteria_match_score(title: str, criteria: str) -> int:
+    """衡量评分描述与标题语义是否匹配，用于修正文档转文本后的表格错位。"""
+    groups = [
+        (("施工方案", "技术措施", "重难点"), ["重点", "难点", "解决方案", "关键技术", "工艺", "施工关键", "技术路线"]),
+        (("质量",), ["质量", "质量标准", "材料", "检验", "验收", "隐蔽", "成品保护"]),
+        (("安全", "文明"), ["安全", "文明施工", "消防", "临边", "用电", "关键地点", "关键工序"]),
+        (("环保", "环境", "绿色"), ["环保", "环境", "扬尘", "噪声", "污水", "固废", "水土", "绿色施工", "植被"]),
+        (("进度", "工期"), ["进度", "工期", "关键线路", "关键节点", "节点控制", "延误"]),
+        (("劳动力", "机械", "资源"), ["劳动力", "机械", "材料", "投入", "调配", "设备"]),
+        (("保修",), ["保修", "回访", "维修", "响应"]),
+    ]
+    score = 0
+    for title_keys, criteria_keys in groups:
+        if any(k in title for k in title_keys):
+            score += sum(2 for k in criteria_keys if k in criteria)
+            score += sum(1 for k in title_keys if k in criteria)
+    return score
+
+
+def repair_technical_criteria_alignment(items: list[dict], log=None) -> list[dict]:
+    """按语义重配技术评分项的评分描述，修正文档表格抽成纯文本后的行错位。"""
+    tech = [i for i in items if i.get("section") == "技术"]
+    if len(tech) < 3:
+        return items
+
+    criteria_pool = [
+        (idx, item.get("criteria_original", "") or "")
+        for idx, item in enumerate(tech)
+        if item.get("criteria_original")
+    ]
+    if len(criteria_pool) < 3:
+        return items
+
+    if len(tech) > 8 or len(criteria_pool) < len(tech):
+        return items
+
+    pool_indices = [idx for idx, _ in criteria_pool]
+    criteria_by_idx = dict(criteria_pool)
+    current_by_item = {
+        pos: next(
+            (idx for idx, criteria in criteria_pool if criteria == (item.get("criteria_original", "") or "")),
+            None,
+        )
+        for pos, item in enumerate(tech)
+    }
+
+    best_perm = tuple(pool_indices[:len(tech)])
+    best_key = (-1.0, -1)
+    for perm in itertools.permutations(pool_indices, len(tech)):
+        total = 0.0
+        kept_current = 0
+        for pos, pool_idx in enumerate(perm):
+            title = tech[pos].get("title_original", "") or ""
+            score = _criteria_match_score(title, criteria_by_idx[pool_idx])
+            if current_by_item[pos] == pool_idx:
+                kept_current += 1
+                if score > 0:
+                    score += 0.25
+            total += score
+        key = (total, kept_current)
+        if key > best_key:
+            best_key = key
+            best_perm = perm
+
+    repaired_by_id: dict[int, dict] = {}
+    changes = 0
+    for pos, item in enumerate(tech):
+        current = item.get("criteria_original", "") or ""
+        chosen = criteria_by_idx[best_perm[pos]]
+        if chosen != current:
+            new_item = dict(item)
+            new_item["criteria_original"] = chosen
+            new_item["criteria_repaired"] = True
+            repaired_by_id[id(item)] = new_item
+            changes += 1
+
+    if not changes:
+        return items
+    if log:
+        log.warning(f"  检测到技术评分描述疑似错位,已按标题语义重配 {changes} 项")
+    return [repaired_by_id.get(id(item), item) for item in items]
+
 
 def count_chinese_chars(text: str) -> int:
     """仅汉字字数（不含标点/空格/ASCII/markdown 符号）。

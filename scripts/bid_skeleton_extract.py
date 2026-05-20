@@ -29,6 +29,10 @@ brain.md / chapter_plan.md / disqualification_rules.md 的源头依据。
   python bid_skeleton_extract.py /path/to/tender/
   python bid_skeleton_extract.py /path/to/tender/ --model glm
   python bid_skeleton_extract.py /path/to/tender/ --only b2  # 只跑某一项
+
+默认模型:
+  骨架抽取(B1 评分表 / B2 必含大纲 / B3 废标条款)固定优先使用 deepseek,
+  不再跟随全局 default_model。可用 --model 临时覆盖。
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -50,6 +55,7 @@ from bid_llm_client import LLMClient  # noqa: E402
 OK = "✓"
 WARN = "⚠"
 FAIL = "✗"
+SKELETON_DEFAULT_MODEL = "deepseek"
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -282,6 +288,11 @@ def _parse_json_with_retry(client: LLMClient, model: str, system: str, user: str
     return None
 
 
+def choose_skeleton_model(args_model: str | None, client_config: dict) -> str:
+    """骨架抽取默认使用 DeepSeek；命令行 --model 优先。"""
+    return args_model or SKELETON_DEFAULT_MODEL
+
+
 # ----- B1: 评标办法 -----
 
 B1_USER_TEMPLATE = """以下是某招标文件的全文(每页用 [第N页] 标记开头),请抽取「评标办法」骨架。
@@ -454,6 +465,10 @@ def _validate_scoring_sections(payload: dict, log) -> tuple[bool, list[str]]:
     """C 方案:编号规则核验 LLM 的 section 归类。
 
     评分表条目编号通常是固定格式:
+      - 2.2.4(1)-x → 技术
+      - 2.2.4(2)-x → 项目管理
+      - 2.2.4(3)-x → 投标报价
+      - 2.2.4(4)-x → 其他因素
       - 1.x → 技术
       - 2.x → 项目管理
       - 3.x → 投标报价
@@ -463,7 +478,26 @@ def _validate_scoring_sections(payload: dict, log) -> tuple[bool, list[str]]:
     任何 section 字段缺失的条目自动补填编号规则值。
     返回 (has_conflict, messages)。
     """
+    import re
+
+    SECTION_BY_GROUP = {"1": "技术", "2": "项目管理", "3": "投标报价", "4": "其他因素"}
     SECTION_BY_PREFIX = {"1": "技术", "2": "项目管理", "3": "投标报价", "4": "其他因素"}
+
+    def _expected_section(item_id: str) -> str | None:
+        """从评分项编号推断 section。
+
+        西藏范本常用 `2.2.4(1)-1` 这类编号,真正的分组在括号内,
+        不能拿开头的 `2` 当作项目管理。旧逻辑正是在这里把技术 20 分误归类。
+        """
+        m = re.search(r"2\.2\.4\s*[\(（]\s*([1-4])\s*[\)）]", item_id)
+        if m:
+            return SECTION_BY_GROUP.get(m.group(1))
+
+        # 兼容 `2.2.4(3)` 无尾号、全角括号等已经由上方覆盖。
+        # 其他常见简表才按首段 1/2/3/4 解释。
+        prefix = item_id.split(".")[0]
+        return SECTION_BY_PREFIX.get(prefix)
+
     messages: list[str] = []
     has_conflict = False
     items = payload.get("scoring_items") or []
@@ -474,9 +508,7 @@ def _validate_scoring_sections(payload: dict, log) -> tuple[bool, list[str]]:
         item_id = (item.get("id") or "").strip()
         if not item_id:
             continue
-        # 取编号前缀:如 "1.1" → "1", "2.3.4" → "2"
-        prefix = item_id.split(".")[0]
-        expected = SECTION_BY_PREFIX.get(prefix)
+        expected = _expected_section(item_id)
         if not expected:
             continue  # 无法按编号规则判断,信任 LLM
 
@@ -867,6 +899,105 @@ def _grep_implicit_constraints(tender_text: str, existing_keys: set[str], log) -
     return found
 
 
+# ----- B3 结果性废标 grep fallback(类一双保险:LLM 漏抽结果词条款时补回)-----
+
+# 结果性废标关键词:只收"废标作为结果动作"的短语,不收把"废标"当名词的句子
+# (如"废标条件""判断是否为废标"是元描述,不是真条款)。
+_RESULT_DISQ_KEYWORDS = (
+    "否决投标", "否决其投标", "予以否决", "直接否决", "一票否决",
+    "投标作废", "作废标处理", "按废标处理",
+    "投标无效", "投标文件无效", "视为无效投标",
+    "不予受理", "视为不响应", "视为撤销",
+)
+
+# 元描述/章节标题噪声标记:命中则跳过(描述废标制度本身,而非具体废标条件)。
+_META_NOISE_MARKERS = ("处理后", "组成部分", "集中列示", "是否为废标", "总结和重申")
+
+_SENT_SPLIT_RE = re.compile(r"[。；;！\n]")
+
+
+def _norm_clause(s: str) -> str:
+    """归一化条款文本用于模糊去重:只保留汉字。"""
+    return re.sub(r"[^一-鿿]", "", s or "")
+
+
+def _is_duplicate_clause(sent: str, reference_norms: list[str]) -> bool:
+    """grep 抓到的句子是否与已有条款重复(归一化后子串包含 / 高相似度)。"""
+    sn = _norm_clause(sent)
+    if len(sn) < 8:
+        return True  # 太短,无实质内容,丢弃
+    for rn in reference_norms:
+        if not rn:
+            continue
+        if sn in rn or rn in sn:
+            return True
+        if SequenceMatcher(None, sn, rn).ratio() > 0.82:
+            return True
+    return False
+
+
+def _result_consequence(text: str) -> str:
+    if "不予受理" in text:
+        return "不予受理"
+    if "限制参加" in text:
+        return "限制投标"
+    if "无效" in text:
+        return "无效"
+    return "废标"
+
+
+def _grep_result_disqualifications(
+    tender_text: str, reference_clauses: list[dict], log
+) -> list[dict]:
+    """从原文逐行抓结果性废标条款(类一),返回 LLM 漏抽的条款。
+
+    与 _grep_implicit_constraints(类二)对称:类二有 30+ 正则兜底,类一原先全靠
+    LLM 单次调用,recall 波动会静默丢条款。命中结果词即抓所在整句,再按归一化
+    文本对已有 clauses 做模糊去重,只保留 LLM 漏抽的残差。
+    """
+    found: list[dict] = []
+    seen_norms = [_norm_clause(c.get("text_original", "")) for c in reference_clauses]
+    cur_page: int | None = None
+    cur_method: str = "text"
+    page_re = re.compile(r"\[第(\d+)页\](?:\s*-\s*视觉OCR)?", re.UNICODE)
+    for raw_line in tender_text.splitlines():
+        m = page_re.search(raw_line)
+        if m:
+            cur_page = int(m.group(1))
+            cur_method = "ocr" if "视觉OCR" in raw_line else "text"
+            continue
+        line = raw_line.strip()
+        if not line or not any(kw in line for kw in _RESULT_DISQ_KEYWORDS):
+            continue
+        for sent in _SENT_SPLIT_RE.split(line):
+            sent = sent.strip(" \t\r　、")
+            if len(sent) < 10:
+                continue
+            if not any(kw in sent for kw in _RESULT_DISQ_KEYWORDS):
+                continue
+            if any(noise in sent for noise in _META_NOISE_MARKERS):
+                continue
+            if _is_duplicate_clause(sent, seen_norms):
+                continue
+            seen_norms.append(_norm_clause(sent))  # 防 grep 结果内部互相重复
+            found.append({
+                "category": "评审",
+                "constraint_type": None,
+                "text_original": sent[:240],
+                "consequence": _result_consequence(sent),
+                "source_file_hint": None,
+                "source_page": cur_page,
+                "source_page_method": cur_method,
+                "_grep_fallback": True,
+                "_grep_pattern_desc": "结果性废标条款",
+            })
+    if found and log:
+        log.info(f"[B3] grep fallback 补抽 {len(found)} 条结果性废标条款")
+        for c in found[:10]:
+            log.info(f"    + [结果性废标] p{c['source_page']}: {c['text_original'][:60]}")
+    return found
+
+
 def extract_b3_disqualification(tender_text: str, client: LLMClient, model: str, log) -> dict:
     log.info("[B3] 抽取废标条款...")
     user = B3_USER_TEMPLATE.format(tender_text=tender_text)
@@ -874,16 +1005,27 @@ def extract_b3_disqualification(tender_text: str, client: LLMClient, model: str,
     if not payload:
         raise RuntimeError("B3 废标条款抽取失败")
 
-    # grep fallback:补充 LLM 漏抽的隐含硬约束(R3 双保险)
     clauses = payload.setdefault("clauses", [])
+    grep_count = 0
+
+    # 类二 grep fallback:补充 LLM 漏抽的隐含硬约束(R3 双保险)
     existing_keys = {
         _dedup_key(c.get("text_original", ""), c.get("source_page"))
         for c in clauses
     }
-    supplements = _grep_implicit_constraints(tender_text, existing_keys, log)
-    if supplements:
-        clauses.extend(supplements)
-        # 同步更新 summary
+    implicit = _grep_implicit_constraints(tender_text, existing_keys, log)
+    if implicit:
+        clauses.extend(implicit)
+        grep_count += len(implicit)
+
+    # 类一 grep fallback:补充 LLM 漏抽的结果性废标条款(与类二对称,对已有条款模糊去重)
+    result_disq = _grep_result_disqualifications(tender_text, clauses, log)
+    if result_disq:
+        clauses.extend(result_disq)
+        grep_count += len(result_disq)
+
+    # 同步 summary
+    if grep_count:
         summary = payload.setdefault("summary", {})
         summary["total_count"] = len(clauses)
         by_cat: dict[str, int] = {}
@@ -891,7 +1033,7 @@ def extract_b3_disqualification(tender_text: str, client: LLMClient, model: str,
             cat = c.get("category") or "其他"
             by_cat[cat] = by_cat.get(cat, 0) + 1
         summary["by_category"] = by_cat
-        payload["_grep_fallback_count"] = len(supplements)
+        payload["_grep_fallback_count"] = grep_count
 
     return payload
 
@@ -1000,11 +1142,11 @@ def main() -> int:
         log.error("提示:首次使用请运行 python bid_llm_client.py --init")
         return 2
 
-    default_model = client.config.get("default_model", "glm")
-    model = args.model or default_model
+    model = choose_skeleton_model(args.model, client.config)
     if model not in client.models:
         log.error(f"未知模型 {model!r},可选: {list(client.models.keys())}")
         return 2
+    log.info(f"骨架抽取模型: {model} (默认 {SKELETON_DEFAULT_MODEL},可用 --model 覆盖)")
 
     only = set(args.only) if args.only else set(JOBS.keys())
 

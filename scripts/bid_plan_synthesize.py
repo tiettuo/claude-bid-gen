@@ -21,13 +21,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
-from bid_common import make_script_logger  # noqa: E402
+from bid_common import make_script_logger, repair_technical_criteria_alignment  # noqa: E402
 from bid_derive import recommend_target_chars, size_class  # noqa: E402
 from bid_llm_client import LLMClient  # noqa: E402
 
@@ -367,6 +368,154 @@ def llm_plan_subitems(
     return items
 
 
+def score_item_subitems(
+    item: dict,
+    target_chars: int,
+    chapter_num: int,
+    project_brief: str,
+    work_complexity: int = 0,
+) -> list[dict]:
+    """评分制章节按评分细则拆子项，确保章节规划 1:1 对齐评分表。"""
+    title = item.get("title_original", "")
+    criteria = item.get("criteria_original", "") or ""
+    score = item.get("score") or 0
+
+    target_count = _score_item_subitem_count(title, criteria, score, work_complexity)
+
+    if "施工方案" in title or "技术措施" in title:
+        candidates = [
+            "工程特点、重难点及总体技术路线",
+            "施工部署、作业区划分及工序衔接",
+            "附属工程、铺装及景观节点施工方法",
+            "木栈道、台阶、围墙及标识小品施工措施",
+            "园林绿化、给排水及电气工程技术措施",
+            "高海拔、抗冻及村庄施工专项控制",
+            "质量标准、责任分解及违约承诺",
+        ]
+    elif "质量" in title:
+        candidates = [
+            "质量目标、责任体系及岗位分工",
+            "材料设备进场验收与样板引路",
+            "关键工序质量控制与检验批验收",
+            "隐蔽工程、成品保护及资料闭环",
+            "质量违约责任承诺",
+        ]
+    elif "安全" in title:
+        candidates = [
+            "安全文明施工目标与责任体系",
+            "关键地点、关键工序安全控制",
+            "机械用电、临边作业及消防管理",
+            "高原健康保障与应急处置",
+            "安全文明施工标准及违约承诺",
+        ]
+    elif "环保" in title or "环境" in title:
+        candidates = [
+            "环保目标、责任体系及现场分区",
+            "扬尘、噪声、污水及固废控制",
+            "水土保持、既有设施与植被保护",
+            "绿色施工、节能降耗及村民协调",
+            "环保违约责任承诺",
+        ]
+    elif "进度" in title:
+        candidates = [
+            "总工期安排与施工阶段划分",
+            "关键线路、关键节点及横道计划",
+            "劳动力、材料、机械与进度协同",
+            "高原气候、运输条件下的纠偏措施",
+            "工期违约责任承诺",
+        ]
+    elif "劳动力" in title or "机械" in title:
+        candidates = [
+            "劳动力投入计划及专业班组配置",
+            "机械设备投入计划及高原降效配置",
+            "材料供应、运输组织及储备计划",
+            "劳动力与机械动态调配措施",
+            "资源投入保证措施",
+        ]
+    elif "保修" in title:
+        candidates = [
+            "保修范围、期限及响应机制",
+            "绿化养护、给排水及电气保修措施",
+            "回访巡检、问题闭环与资料移交",
+            "保修责任及违约承诺",
+        ]
+    else:
+        # 兜底仍从评分描述取词，但不生成 0 分通用章。
+        candidates = [
+            "评分要求识别与响应目标",
+            "实施内容与控制措施",
+            "责任分工与资源保障",
+            "检查验收与违约承诺",
+        ]
+
+    names = candidates[:max(3, min(target_count, len(candidates)))]
+
+    each = target_chars // len(names)
+    remainder = target_chars - each * len(names)
+    out = []
+    for i, name in enumerate(names, 1):
+        chars = each + (remainder if i == len(names) else 0)
+        out.append({
+            "title": f"{chapter_num}.{i} {name}",
+            "chars": chars,
+            "covers": [criteria[:60]] if criteria else [],
+        })
+    return out
+
+
+def _score_item_subitem_count(title: str, criteria: str, score: float, work_complexity: int = 0) -> int:
+    """根据分值、评分描述复杂度、工程构成复杂度决定子项数量。"""
+    if score <= 2:
+        count = 3
+    elif score <= 3:
+        count = 4
+    elif score <= 5:
+        count = 5
+    else:
+        count = 6
+
+    # 评分描述里并列要求越多，子项越多；短句不强行展开。
+    separators = len(__import__("re").findall(r"[、；;，,]|以及|并|且|是否", criteria or ""))
+    if separators >= 8:
+        count += 1
+    elif separators <= 2 and score <= 3:
+        count -= 1
+
+    # 施工方案承载工程构成，工程类别多时应展开更多。
+    if any(k in title for k in ("施工方案", "技术措施")) and work_complexity >= 4:
+        count += 2
+    elif any(k in title for k in ("施工方案", "技术措施")):
+        count += 1
+
+    # 资源章节通常同时覆盖劳动力、机械、材料、调配、保证措施。
+    if "劳动力" in title or "机械" in title:
+        count = max(count, 5)
+
+    # 进度章节至少要有计划、关键线路、资源协同、纠偏/承诺。
+    if "进度" in title:
+        count = max(count, 4)
+
+    return max(3, min(count, 8))
+
+
+def _boq_work_complexity(ext: Path) -> int:
+    """用清单专业类目数量估算工程构成复杂度。"""
+    boq_path = ext / "boq.json"
+    if not boq_path.exists():
+        return 0
+    try:
+        boq = json.loads(boq_path.read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    roots = set()
+    for cat in boq.get("categories", []) or []:
+        name = cat.get("name") or cat.get("category") or ""
+        if not name:
+            continue
+        roots.add(name.split("-", 1)[0])
+    return len(roots)
+
+
 # ─── 渲染 ──────────────────────────────────────────────────────────────
 
 def render_chapter_plan(
@@ -396,6 +545,8 @@ def render_chapter_plan(
     parts.append(f"- 工期:{duration_days} 日历天" if duration_days else "- 工期:未明示")
     parts.append(f"- 工程类型:{project_type}")
     parts.append(f"- 评标方式:{eval_method}")
+    if eval_method == "score":
+        parts.append("- 章节锚点:技术评分项 1:1 成章；非评分项只能并入相关章节子项，不单列 0 分大章")
     parts.append(f"- 章节数:{len(topic_chapters)}")
     parts.append("")
     parts.append(f"**目标页数:** {target_pages} 页 (文字 {text_pages} 页 + 图表 {figure_pages} 页)")
@@ -435,7 +586,7 @@ def render_chapter_plan(
         total_subitems += len(subs)
         total_figs += figs
         total_pages_calc += pages
-        ref = f"合格制 #{idx}" if eval_method == "passfail" else f"第{idx}项"
+        ref = f"合格制 #{idx}" if eval_method == "passfail" else f"技术评分项 #{idx}"
         parts.append(
             f"| {num} | {fname} | {title} | {ref} | {weight} | {len(subs)} | "
             f"{chars:,} | {lo:,}-{hi:,} | {figs} | {pages:.1f} |"
@@ -541,11 +692,14 @@ def synthesize(tender_dir: Path, target_pages: int | None = None,
     # 工程类型识别
     outline_topics = outline_data.get("topics", [])
     project_type = detect_project_type(facts, outline_topics)
+    work_complexity = _boq_work_complexity(ext)
     fig_ratio = PROJECT_TYPE_FIG_RATIO.get(project_type, 0.25)
 
     # 目标页数:用户给 / 自动判档
     if target_pages is None:
         target_pages = SIZE_TO_PAGES.get(project_size, SIZE_TO_PAGES["unknown"])["default"]
+        if eval_method == "score" and total_tech_score and total_tech_score <= 20:
+            target_pages = min(target_pages, 45)
     log.info(f"  规模={project_size}  类型={project_type}  目标页数={target_pages}")
 
     # 字数密度(从 rules.md 读字号/行距,无则默认 12pt+1.5)
@@ -611,9 +765,10 @@ def synthesize(tender_dir: Path, target_pages: int | None = None,
             })
     else:
         # C 方案:评分制下仅取 section="技术" 的项生成章节(商务标项不写进施组)
-        tech_items = [i for i in eval_data.get("scoring_items", []) if i.get("section") == "技术"]
+        scoring_items = repair_technical_criteria_alignment(eval_data.get("scoring_items", []), log)
+        tech_items = [i for i in scoring_items if i.get("section") == "技术"]
         if not tech_items:
-            tech_items = eval_data.get("scoring_items", [])  # 旧数据无 section 字段时回退全量
+            tech_items = scoring_items  # 旧数据无 section 字段时回退全量
             log.warning("  scoring_items 无 section 字段,回退到全量(建议重跑 skeleton 抽取)")
         # 计算技术标实际总分(从过滤后的项加权)
         tech_total = sum(i.get("score", 0) for i in tech_items) or total_tech_score
@@ -627,17 +782,28 @@ def synthesize(tender_dir: Path, target_pages: int | None = None,
                 "target_chars": ch_target_chars,
                 "outline_subs": outline_subs_map.get(title, []),
                 "chapter_num": ch_idx,
+                "score_item": item,
             })
 
     def _run_one(pt: dict) -> dict:
-        subitems = llm_plan_subitems(
-            topic=pt["title"],
-            subsections_original=pt["outline_subs"],
-            target_chars=pt["target_chars"],
-            chapter_num=pt["chapter_num"],
-            project_brief=project_brief,
-            log=log,
-        )
+        if eval_method == "score" and pt.get("score_item"):
+            subitems = score_item_subitems(
+                item=pt["score_item"],
+                target_chars=pt["target_chars"],
+                chapter_num=pt["chapter_num"],
+                project_brief=project_brief,
+                work_complexity=work_complexity,
+            )
+            log.info(f"  章 {pt['chapter_num']} 按评分表拆分: {pt['title']} → {len(subitems)} 子项")
+        else:
+            subitems = llm_plan_subitems(
+                topic=pt["title"],
+                subsections_original=pt["outline_subs"],
+                target_chars=pt["target_chars"],
+                chapter_num=pt["chapter_num"],
+                project_brief=project_brief,
+                log=log,
+            )
         return {
             "title": pt["title"],
             "weight": pt["weight"],

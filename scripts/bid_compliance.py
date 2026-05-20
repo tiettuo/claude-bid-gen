@@ -58,6 +58,25 @@ def load_standards_truth(config_dir: Path) -> dict:
         return data.get("standards", {})
     return {}
 
+
+def normalize_standard_key(prefix: str, num: str) -> str:
+    """归一化标准编号键:去空格后拼接前缀与编号。如 ("GB / T","50502")→"GB/T50502"。"""
+    return f"{(prefix or '').replace(' ', '')}{(num or '').strip()}"
+
+
+def standard_lookup_candidates(prefix: str, num: str) -> list[str]:
+    """返回标准在真值表中的候选键:精确写法优先,再补 GB↔GB/T 变体。
+
+    招标方案常把 GB/T 标准误写成 GB(或反之),真值表只存一种写法,
+    故两种写法都要查。
+    """
+    key = normalize_standard_key(prefix, num)
+    if "/T" in key:
+        return [key, key.replace("/T", "")]
+    variant = re.sub(r"^(GB|JGJ|CJJ|DB54)", r"\1/T", key)
+    return [key, variant] if variant != key else [key]
+
+
 def check_standards_fabrication(md_files: list[Path], truth: dict, log: logging.Logger) -> dict:
     """扫描章节文件中的标准引用，检测编造的年份版本。
     
@@ -70,43 +89,28 @@ def check_standards_fabrication(md_files: list[Path], truth: dict, log: logging.
     for f in md_files:
         text = f.read_text(encoding="utf-8")
         for m in _STANDARD_RE.finditer(text):
-            prefix = m.group(1).replace(" ", "").replace("/T", "/T")
+            prefix = m.group(1)
             num = m.group(2)
             year = m.group(3)
             total += 1
-            
-            # Build lookup key
-            std_key = f"{prefix}{num}"
-            # Normalize: GB/T50502 or GB50502
-            if "/T" in std_key:
-                lookup_keys = [std_key]
-            else:
-                # Also try with /T variant
-                parts = std_key.split("/", maxsplit=1) if "/" in std_key else [std_key]
-                base = std_key.replace("/", "")
-                lookup_keys = [base]
-            
+
             true_year = None
-            for k in lookup_keys:
+            matched_key = None
+            for k in standard_lookup_candidates(prefix, num):
                 if k in truth:
                     true_year = truth[k]
+                    matched_key = k
                     break
-                # Try inserting /T
-                k2 = re.sub(r'^(GB|JGJ|DB54)', r'/T', k)
-                if k2 in truth:
-                    true_year = truth[k2]
-                    break
-            
+
             if true_year and year and year != true_year:
                 fabricated += 1
                 details.append({
                     "file": f.name,
-                    "standard": f"{prefix}{num}",
+                    "standard": matched_key,
                     "cited_year": year,
                     "true_year": true_year,
-                    "text": m.group(0)
+                    "text": m.group(0),
                 })
-    
     result = {"total": total, "fabricated": fabricated, "details": details}
     if fabricated:
         log.warning(f"标准编造检测: {fabricated}/{total} 条年份编造")
