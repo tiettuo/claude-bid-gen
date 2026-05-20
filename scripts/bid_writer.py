@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import sys
 import threading
@@ -1443,6 +1444,45 @@ def generate_one(
     )
 
 
+def _usable_models(client: LLMClient) -> list[str]:
+    """当前 config 下真正可用的模型:存在 + 未停用 + API key 已配置。"""
+    usable = []
+    for key, m in client.models.items():
+        if m.get("disabled"):
+            continue
+        if not os.environ.get(m.get("api_key_env", "")):
+            continue
+        usable.append(key)
+    return usable
+
+
+def _validate_variant_models(variants: list[dict], client: LLMClient,
+                             log: logging.Logger) -> bool:
+    """校验每个变体的模型在当前 config 下可用,不可用则就地自动替换。
+
+    variants.json 在生成时定死模型,若此后 config 改了(模型停用/换 key/删除),
+    writer 不复查会导致该变体整批章节白跑。启动即校验:不可用的变体换成一个
+    可用且尽量不与其他变体重复的模型(保持变体间文风相异)。
+    返回 False 表示无任何可用模型(致命)。
+    """
+    usable = _usable_models(client)
+    if not usable:
+        log.error("当前 config 无任何可用模型(检查 API key 与 disabled 标记)")
+        return False
+    for v in variants:
+        if v.get("model") in usable:
+            continue
+        old = v.get("model")
+        taken = {tv.get("model") for tv in variants if tv is not v}
+        candidates = ([k for k in client.fallback_order if k in usable and k not in taken]
+                      or [k for k in usable if k not in taken]
+                      or usable)
+        v["model"] = candidates[0]
+        log.warning(f"[{v['id']}] 模型 {old!r} 当前不可用(停用/缺 key/不存在),"
+                    f"自动替换为 {v['model']!r}")
+    return True
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="多模型章节生成工作器")
     p.add_argument("tender_dir", help="投标根目录")
@@ -1524,6 +1564,10 @@ def main() -> int:
         if not target_variants:
             log.error(f"未找到 variant: {args.variant}")
             return 2
+
+    # 校验变体模型在当前 config 下可用(不可用则就地替换,避免整批章节白跑)
+    if not _validate_variant_models(target_variants, client, log):
+        return 2
 
     ok_count = fail_count = skip_count = 0
 
