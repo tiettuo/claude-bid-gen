@@ -35,7 +35,8 @@ from bid_common import (  # noqa: E402
 
 # ─── 默认配置 ────────────────────────────────────────────────────────
 
-DEFAULT_MODEL_POOL = ["glm", "deepseek", "qwen", "kimi", "minimax"]
+# 仅在读不到 bid_llm_config.json 时的兜底池(正常走 build_model_pool 动态构建)
+DEFAULT_MODEL_POOL = ["glm", "deepseek_chat", "kimi"]
 DEFAULT_TEMPERATURES = [0.5, 0.7, 0.9]
 DEFAULT_SIMILARITY = {"overall": 0.40, "paragraph": 0.50}
 
@@ -71,16 +72,56 @@ def _load_companies(arg_companies: str, companies_file: Path) -> list[str]:
     return unique
 
 
+# 模型家族(用于变体间最大化文风差异:同家族文风相近,排序时打散)
+_MODEL_FAMILIES = ["deepseek", "qwen", "glm", "kimi", "minimax", "doubao", "llama", "yi", "baichuan"]
+
+
+def _model_family(key: str, cfg: dict) -> str:
+    blob = (key + " " + str(cfg.get("model_name", ""))).lower()
+    for fam in _MODEL_FAMILIES:
+        if fam in blob:
+            return fam
+    return "other"
+
+
+def build_model_pool(models_cfg: dict) -> list[str]:
+    """从 LLM config 动态构建变体主模型池,按家族轮转排序。
+
+    纳入条件:未停用(disabled) + 非纯兜底(writer_role != system_only,
+    那些模型只做兜底不当主写手)。
+    排序:家族轮转 —— 前 N 个变体尽量覆盖 N 个不同家族,文风差异最大化。
+    """
+    usable = [
+        k for k, v in models_cfg.items()
+        if not v.get("disabled") and v.get("writer_role") != "system_only"
+    ]
+    by_fam: dict[str, list[str]] = {}
+    for k in usable:
+        by_fam.setdefault(_model_family(k, models_cfg[k]), []).append(k)
+    ordered: list[str] = []
+    groups = list(by_fam.values())
+    while any(groups):
+        for grp in groups:
+            if grp:
+                ordered.append(grp.pop(0))
+    return ordered
+
+
 def _assign_model(idx: int, total: int, pool: list[str],
                   models_cfg=None) -> tuple[str, float]:
-    """按批量规模选择模型与 temperature。
-    若选中的模型在 models_cfg 中设置了 force_temperature（如 kimi-k2.5 固定 0.6），
-    则直接用该强制值覆盖，避免后续 API 调用被拒。
+    """为第 idx 家分配模型与 temperature。
+
+    idx < 模型池大小 → 每家一个不同模型(N 份 N 模型,文风各异);
+    超出模型池 → 循环复用,用 temperature 区分。
+    force_temperature 模型(如 kimi-k2.5 固定 0.6)用其强制值。
     """
-    model = pool[idx % len(pool)]
-    if total <= 6:
+    if not pool:
+        raise ValueError("模型池为空")
+    if idx < len(pool):
+        model = pool[idx]
         temp = 0.6
     else:
+        model = pool[idx % len(pool)]
         temp = DEFAULT_TEMPERATURES[(idx // len(pool)) % len(DEFAULT_TEMPERATURES)]
     if models_cfg and "force_temperature" in models_cfg.get(model, {}):
         temp = float(models_cfg[model]["force_temperature"])
@@ -422,9 +463,30 @@ def main() -> int:
 
     project_name = args.project_name or read_project_name(extracted_dir, fallback=tender_dir.name)
 
-    pool = DEFAULT_MODEL_POOL
+    # 加载 LLM 配置(模型池来源)
+    from bid_common import get_bid_gen_home as _ggh
+    llm_config_path = _ggh() / "configs" / "bid_llm_config.json"
+    models_cfg: dict = {}
+    if llm_config_path.is_file():
+        try:
+            models_cfg = json.loads(llm_config_path.read_text(encoding="utf-8")).get("models", {})
+        except Exception as e:
+            print(f"⚠ bid_llm_config.json 读取失败: {e}")
+
+    # 模型池:显式 --model-pool 优先;否则从 config 动态构建(家族轮转,
+    # 前 N 份尽量分到 N 个不同模型 → 份数即模型数)
     if args.model_pool:
         pool = [x.strip() for x in args.model_pool.split(",") if x.strip()]
+    elif models_cfg:
+        pool = build_model_pool(models_cfg)
+    else:
+        pool = DEFAULT_MODEL_POOL
+    print(f"模型池({len(pool)} 个,家族轮转): {', '.join(pool)}")
+    if len(companies) <= len(pool):
+        print(f"  → {len(companies)} 份各分一个不同模型")
+    else:
+        print(f"  ⚠ 份数 {len(companies)} > 模型池 {len(pool)},超出部分复用模型"
+              f"(靠章节结构差异化兜底)")
 
     blind = needs_blind_scan(extracted_dir)
     if blind:
@@ -433,29 +495,25 @@ def main() -> int:
     # 模式选择:--cross-model 才走旧 4 子项并行+主笔润色;默认走单作者整章模式
     chapters = None
     subitems_map = None
-    models_cfg = None
     if args.cross_model:
         chapter_plan_path = extracted_dir / "chapter_plan.md"
-        from bid_common import get_bid_gen_home as _ggh
-        llm_config_path = _ggh() / "configs" / "bid_llm_config.json"
-        if chapter_plan_path.is_file() and llm_config_path.is_file():
+        if chapter_plan_path.is_file() and models_cfg:
             try:
                 chapters = parse_chapter_plan(chapter_plan_path)
                 subitems_map = parse_plan_subitems(chapter_plan_path)
-                models_cfg = json.loads(llm_config_path.read_text(encoding="utf-8")).get("models", {})
-                if chapters and subitems_map and models_cfg:
+                if chapters and subitems_map:
                     n_sub = sum(len(v) for v in subitems_map.values())
                     print(f"★ --cross-model 启用:{len(chapters)} 章 × {n_sub} 子项并行 + 主笔润色")
                 else:
                     print("⚠ --cross-model 已要求但 chapter_plan 无子项,退化为单作者模式")
-                    chapters = subitems_map = models_cfg = None
+                    chapters = subitems_map = None
             except Exception as e:
                 print(f"⚠ --cross-model 上下文加载失败,退化为单作者模式: {e}")
-                chapters = subitems_map = models_cfg = None
+                chapters = subitems_map = None
         else:
             print("⚠ --cross-model 已要求但 chapter_plan.md / bid_llm_config.json 不存在,退化为单作者模式")
     else:
-        print(f"★ 单作者模式(1 模型 = 1 写手 = {len(companies)} 家 × 16 章 × 1 次 = {len(companies) * 16} 次调用,无主笔润色)")
+        print(f"★ 单作者模式(1 模型 = 1 写手,{len(companies)} 家各一个模型)")
 
     payload = build_variants(
         companies, project_name, pool,

@@ -114,6 +114,113 @@
       "supports_openai_compat": true,
       "disabled": true,
       "notes": "未充值停用；保留配置以便日后恢复；disabled=true 时不进入分配池"
+    },
+    "sf_deepseek": {
+      "display_name": "硅基流动 DeepSeek-V3.2",
+      "endpoint": "https://api.siliconflow.cn/v1",
+      "model_name": "deepseek-ai/DeepSeek-V3.2",
+      "api_key_env": "SILICONFLOW_API_KEY",
+      "max_tokens": 8000,
+      "output_char_cap": 5500,
+      "supports_openai_compat": true,
+      "notes": "硅基流动托管 DeepSeek-V3.2，非推理，中文写作"
+    },
+    "sf_qwen": {
+      "display_name": "硅基流动 Qwen3.5-122B",
+      "endpoint": "https://api.siliconflow.cn/v1",
+      "model_name": "Qwen/Qwen3.5-122B-A10B",
+      "api_key_env": "SILICONFLOW_API_KEY",
+      "max_tokens": 8000,
+      "output_char_cap": 5500,
+      "supports_openai_compat": true,
+      "extra_body": {
+        "enable_thinking": false
+      },
+      "notes": "硅基流动托管 Qwen3.5-122B MoE；enable_thinking=false 关推理"
+    },
+    "sf_glm": {
+      "display_name": "硅基流动 GLM-4.5-Air",
+      "endpoint": "https://api.siliconflow.cn/v1",
+      "model_name": "zai-org/GLM-4.5-Air",
+      "api_key_env": "SILICONFLOW_API_KEY",
+      "max_tokens": 8000,
+      "output_char_cap": 5500,
+      "supports_openai_compat": true,
+      "extra_body": {
+        "thinking": {
+          "type": "disabled"
+        }
+      },
+      "notes": "硅基流动托管 GLM-4.5-Air，轻量低价"
+    },
+    "sf_kimi": {
+      "display_name": "硅基流动 Kimi-K2.5",
+      "endpoint": "https://api.siliconflow.cn/v1",
+      "model_name": "Pro/moonshotai/Kimi-K2.5",
+      "api_key_env": "SILICONFLOW_API_KEY",
+      "max_tokens": 8000,
+      "output_char_cap": 5500,
+      "supports_openai_compat": true,
+      "notes": "硅基流动托管 Kimi-K2.5(Pro)，长文一致性好"
+    },
+    "sf_minimax": {
+      "display_name": "硅基流动 MiniMax-M2.5",
+      "endpoint": "https://api.siliconflow.cn/v1",
+      "model_name": "MiniMaxAI/MiniMax-M2.5",
+      "api_key_env": "SILICONFLOW_API_KEY",
+      "max_tokens": 8000,
+      "output_char_cap": 5500,
+      "supports_openai_compat": true,
+      "strip_think_tag": true,
+      "notes": "硅基流动托管 MiniMax-M2.5；strip_think_tag 兜底剥离思考标签"
+    },
+    "sf_qwen_max": {
+      "display_name": "硅基流动 Qwen3.5-397B",
+      "endpoint": "https://api.siliconflow.cn/v1",
+      "model_name": "Qwen/Qwen3.5-397B-A17B",
+      "api_key_env": "SILICONFLOW_API_KEY",
+      "max_tokens": 8000,
+      "output_char_cap": 5500,
+      "supports_openai_compat": true,
+      "extra_body": {
+        "enable_thinking": false
+      },
+      "notes": "硅基流动托管 Qwen3.5-397B 旗舰 MoE；enable_thinking=false 关推理"
+    },
+    "sf_glm47": {
+      "display_name": "硅基流动 GLM-4.7",
+      "endpoint": "https://api.siliconflow.cn/v1",
+      "model_name": "Pro/zai-org/GLM-4.7",
+      "api_key_env": "SILICONFLOW_API_KEY",
+      "max_tokens": 8000,
+      "output_char_cap": 5500,
+      "supports_openai_compat": true,
+      "extra_body": {
+        "thinking": {
+          "type": "disabled"
+        }
+      },
+      "notes": "硅基流动托管 GLM-4.7(Pro)，强于 GLM-4.5-Air"
+    },
+    "sf_deepseek31": {
+      "display_name": "硅基流动 DeepSeek-V3.1-Terminus",
+      "endpoint": "https://api.siliconflow.cn/v1",
+      "model_name": "deepseek-ai/DeepSeek-V3.1-Terminus",
+      "api_key_env": "SILICONFLOW_API_KEY",
+      "max_tokens": 8000,
+      "output_char_cap": 5500,
+      "supports_openai_compat": true,
+      "notes": "硅基流动托管 DeepSeek-V3.1-Terminus，与 V3.2 文风略异"
+    },
+    "sf_kimi26": {
+      "display_name": "硅基流动 Kimi-K2.6",
+      "endpoint": "https://api.siliconflow.cn/v1",
+      "model_name": "Pro/moonshotai/Kimi-K2.6",
+      "api_key_env": "SILICONFLOW_API_KEY",
+      "max_tokens": 8000,
+      "output_char_cap": 5500,
+      "supports_openai_compat": true,
+      "notes": "硅基流动托管 Kimi-K2.6(Pro)，比 K2.5 更新"
     }
   },
   "retry": {
