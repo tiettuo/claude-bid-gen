@@ -243,10 +243,12 @@
     0.7,
     0.9
   ],
+  "_max_concurrency_note": "按厂商(endpoint 派生)分闸,非模型名。zhipu=智谱GLM dashscope=阿里Qwen siliconflow=硅基流动 moonshot=Kimi",
   "max_concurrency": {
     "default": 3,
-    "glm": 1,
-    "qwen": 1,
+    "siliconflow": 6,
+    "zhipu": 1,
+    "dashscope": 1,
     "minimax": 2
   }
 }

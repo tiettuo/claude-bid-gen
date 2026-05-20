@@ -111,6 +111,30 @@ class LLMStats:
         }
 
 
+def _provider_key(endpoint: str) -> str:
+    """从 endpoint 域名派生厂商标识,用于按厂商(而非按模型)限并发。
+
+    硅基流动等聚合厂商下挂多个 model key,必须按厂商账户共用一道并发闸,
+    否则每个 model key 各占一道,拦不住对单一账户的总并发 → 易触发 429。
+    """
+    host = (endpoint or "").lower()
+    for kw, prov in (
+        ("siliconflow", "siliconflow"),
+        ("bigmodel", "zhipu"),
+        ("deepseek", "deepseek"),
+        ("dashscope", "dashscope"),
+        ("aliyuncs", "dashscope"),
+        ("moonshot", "moonshot"),
+        ("minimaxi", "minimax"),
+        ("minimax", "minimax"),
+        ("volces", "volces"),
+    ):
+        if kw in host:
+            return prov
+    m = re.search(r"//([^/]+)", host)
+    return (m.group(1) if m else host) or "default"
+
+
 # ─── 客户端 ───────────────────────────────────────────────────────────
 
 class LLMClient:
@@ -124,8 +148,9 @@ class LLMClient:
         self.log = log or logging.getLogger("bid_llm")
         self.stats = LLMStats()
         self._clients_cache: dict[str, object] = {}
-        # 每家 provider 并发闸：避免批量投标把单家 API 压爆触发 429/529/超时
-        # 配置 max_concurrency: {"default": 3, "glm": 4, "minimax": 2, ...}
+        # 每家 provider 并发闸：避免批量投标把单家 API 压爆触发 429/529/超时。
+        # 按厂商(endpoint 派生)分闸,聚合厂商(硅基流动)下多个 model key 共用一道。
+        # 配置 max_concurrency 用厂商名: {"default": 3, "siliconflow": 6, "zhipu": 1, ...}
         mc_cfg = config.get("max_concurrency") or {}
         default_mc = int(mc_cfg.get("default", 3)) if isinstance(mc_cfg, dict) else int(mc_cfg or 3)
         self._provider_sems: dict[str, threading.Semaphore] = defaultdict(
@@ -223,7 +248,7 @@ class LLMClient:
         extra_body = m.get("extra_body") or None
         strip_think = bool(m.get("strip_think_tag"))
 
-        sem = self._provider_sems[model_key]
+        sem = self._provider_sems[_provider_key(m.get("endpoint", ""))]
         for attempt in range(1, max_attempts + 1):
             start = time.time()
             try:
@@ -301,7 +326,7 @@ _CONFIG_TEMPLATE = {
     "default_model": "glm",
     "fallback_order": ["glm", "deepseek", "qwen", "kimi", "minimax"],
     "retry": {"max_attempts": 3, "backoff_seconds": 5, "timeout_seconds": 180},
-    "max_concurrency": {"default": 3, "minimax": 2},
+    "max_concurrency": {"default": 3, "siliconflow": 6, "zhipu": 1, "minimax": 2},
     "default_temperature": 0.6,
     "temperature_variants": [0.5, 0.7, 0.9],
     "models": {
