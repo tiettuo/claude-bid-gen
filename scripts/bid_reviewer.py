@@ -131,14 +131,33 @@ def _load_standards_truth() -> dict:
 
 _STANDARDS_TRUTH = _load_standards_truth()
 
+# 项目专有词全局表(由 main() 从 project_brain.md 前三节填充)。
+# 旧实现仅取章节标题词作项目词,分母却是全工程通用词,P/G 结构性趋零,
+# 导致任何章节都被误判"全是套话"。改由项目级专有名词作项目词来源。
+_PROJECT_KEYWORDS: set[str] = set()
+
+
+def _load_project_keywords(extracted_dir: Path) -> set[str]:
+    """从 project_brain.md 前三节(基本信息/工程构成/重点难点)抽取项目专有词。"""
+    brain = extracted_dir / "project_brain.md"
+    if not brain.exists():
+        return set()
+    text = brain.read_text(encoding="utf-8")
+    m = re.search(r"##\s*一[、,].*?(?=\n##\s*四[、,]|\Z)", text, re.S)
+    scope = m.group(0) if m else text[:4000]
+    return {
+        k for kw in extract_keywords(scope)
+        if len((k := kw.strip())) >= 2 and k not in _GENERIC_MGMT_TERMS
+    }
+
 
 def _check_pg_ratio(text: str, chapter: dict) -> dict:
     """检测项目专用词 vs 通用管理词的密度比（P/G 比）。
 
-    项目专用词来源：章节标题中的关键词 + notes 中的关键词。
+    项目专用词来源：项目级专有名词(_PROJECT_KEYWORDS) + 章节标题/notes 关键词。
     """
-    # 项目专用词：从章节标题和 notes 提取
-    proj_kws = set()
+    # 项目专用词：项目级专有词 + 章节标题和 notes 提取
+    proj_kws = set(_PROJECT_KEYWORDS)
     for src in [chapter.get("title", ""), chapter.get("notes", "")]:
         for kw in extract_keywords(str(src)):
             kw_clean = kw.strip()
@@ -186,6 +205,34 @@ def _check_standards_in_text(text: str) -> dict:
                     details.append({"standard": key, "cited_year": year, "true_year": true_year})
                 break
     return {"total": total, "fabricated": fabricated, "details": details}
+
+
+# ─── 占位符检测（组装前必清）─────────────────────────────────────────
+# 下游模型常留占位内容:占位人名(张三/李四)、占位电话(13xxxxx)、XX、
+# 把填写指令泄漏进正文(按实际…填写)、模板括号。组装前必须查出来清掉。
+_PLACEHOLDER_RULES = [
+    ("占位人名", re.compile(
+        r"张三|李四|王五|赵六|钱七|孙七|孙八|周八|周九|吴九|吴十|郑十"
+        r"|某某|[张李王赵钱孙周吴郑刘陈杨黄徐马]某(?![一-鿿])")),
+    ("XX/电话占位", re.compile(r"[xXＸｘ×]{2,}")),
+    ("指令泄漏", re.compile(
+        r"按实际[^，。）\n]{0,12}填|此处[^，。）\n]{0,10}(?:填写?|响应|替换|修改|补充)"
+        r"|待[填补]入|自行(?:填写|补充|确定)|占位符?")),
+    ("模板括号", re.compile(r"【[^】\n]{0,16}(?:填|待定|示例|占位|XXX)[^】\n]{0,6}】")),
+]
+
+
+def scan_placeholders(text: str) -> list[str]:
+    """扫描组装前必须清除的占位内容,返回 [类型] 片段 列表(去重)。"""
+    hits, seen = [], set()
+    for kind, rx in _PLACEHOLDER_RULES:
+        for m in rx.finditer(text):
+            frag = m.group(0).strip()
+            if (kind, frag) in seen:
+                continue
+            seen.add((kind, frag))
+            hits.append(f"[{kind}] {frag[:24]}")
+    return hits
 
 
 # ─── 单章审校 ────────────────────────────────────────────────────────
@@ -404,6 +451,17 @@ def review_chapter(
             "severity": "minor",
         })
 
+    # 7.5 占位符检测（组装前必清:占位人名/电话、XX、指令泄漏、模板括号）
+    ph_hits = scan_placeholders(text)
+    result["placeholders"] = ph_hits
+    if ph_hits:
+        result["issues"].append({
+            "type": "placeholder",
+            "severity": "major",
+            "detail": f"残留 {len(ph_hits)} 处占位/伪造内容(组装前必须清除): "
+                      + "; ".join(ph_hits[:6]),
+        })
+
     # 8. 严重性分级
     types_present = {i["type"] for i in result["issues"]}
     sk_sev = next((i.get("severity") for i in result["issues"] if i["type"] == "skeleton_mismatch"), None)
@@ -412,6 +470,7 @@ def review_chapter(
     pg_sev = next((i.get("severity") for i in result["issues"] if i["type"] == "pg_low"), None)
     std_sev = next((i.get("severity") for i in result["issues"] if i["type"] == "std_fabrication"), None)
     if "blind_violation" in types_present or "missing" in types_present \
+            or "placeholder" in types_present \
             or sk_sev == "major" or sub_sev == "major" or bp_sev == "moderate" \
             or pg_sev == "major" or std_sev == "moderate":
         result["severity"] = "major"
@@ -521,6 +580,9 @@ def main() -> int:
     log = make_script_logger("bid_reviewer", output / "reviewer.log")
     log.info("=" * 60)
     log.info(f"bid_reviewer 启动  目录: {tender_dir}")
+
+    _PROJECT_KEYWORDS.update(_load_project_keywords(extracted))
+    log.info(f"P/G 检测项目词表: {len(_PROJECT_KEYWORDS)} 个(来自 project_brain.md 前三节)")
 
     chapters = parse_chapter_plan(extracted / "chapter_plan.md")
     if not chapters:

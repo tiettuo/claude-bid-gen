@@ -78,6 +78,8 @@ DEFAULT_FORMAT = {
     "header_disabled": False,            # 暗标常见：禁止页眉
     "footer_page_number": False,         # 显式"页脚仅页码"才置 True
     "page_number_restart_after_toc": False,  # "从目录后第1页起编"
+    "page_number_position": "center",    # center / right —— 变体反串标可改
+    "page_number_format": "{n}",         # 页码模板,{n} 为页号占位(如 "第 {n} 页")
     "max_pages": 0,             # 0 表示不限
     "force_portrait": True,     # 禁止自动切横版
     "company_name": "",
@@ -443,6 +445,12 @@ def _apply_format_set(fmt: dict, fs: dict, log) -> dict:
             fmt[key] = float(val)
         elif key in ("font_name_cn","font_name_h1","page_size","bold_h1","align_h1","first_line_indent_chars"):
             fmt[key] = val
+        elif key == "page_number_position":
+            v = str(val).strip().lower()
+            if v in ("center", "right"):
+                fmt["page_number_position"] = v
+        elif key == "page_number_format":
+            fmt["page_number_format"] = str(val)
         elif key == "paper":
             ps = str(val).upper().strip()
             if ps in PAGE_SIZE_CM:
@@ -1762,7 +1770,9 @@ def postprocess_docx(docx_path: Path, fmt: dict, project_name: str,
 
     # ─── 6. 页码 ─────────────────────────
     if not fmt["no_page_numbers"]:
-        _set_page_numbers(doc, log, restart_after_toc=fmt["page_number_restart_after_toc"])
+        _set_page_numbers(doc, log, restart_after_toc=fmt["page_number_restart_after_toc"],
+                          position=fmt.get("page_number_position", "center"),
+                          number_format=fmt.get("page_number_format", "{n}"))
     else:
         log.info("  跳过页码 (no_page_numbers=True)")
 
@@ -2033,16 +2043,36 @@ def _disable_headers(doc, log):
     log.info(f"  页眉已禁止：清空 {cleared} 个 section 的 header")
 
 
-def _set_page_numbers(doc, log, restart_after_toc: bool = False):
-    """页脚居中页码。
+def _set_page_numbers(doc, log, restart_after_toc: bool = False,
+                      position: str = "center", number_format: str = "{n}"):
+    """页脚页码。位置(center/right)与格式模板({n} 为页号)按变体可变,用于反串标。
+
+    number_format 例: "{n}" → 1 / "第 {n} 页" → 第 1 页 / "— {n} —" → — 1 —
 
     restart_after_toc=True 且文档有 ≥2 个 section 时：
       - section 0（TOC/前置）：footer 留空，不显示页码
-      - section 1+（正文）：阿拉伯数字居中，pgNumType start=1 重起编号
+      - section 1+（正文）：阿拉伯数字，pgNumType start=1 重起编号
     """
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    align = (WD_ALIGN_PARAGRAPH.RIGHT if str(position).lower() == "right"
+             else WD_ALIGN_PARAGRAPH.CENTER)
+    tpl = number_format if "{n}" in (number_format or "") else "{n}"
+    prefix, suffix = tpl.split("{n}", 1)
+
+    def _affix_run(p, text):
+        """添加前/后缀文本 run,并设中文字体,避免页码缀字渲染异常。"""
+        if not text:
+            return
+        run = p.add_run(text)
+        rpr = run._r.get_or_add_rPr()
+        rfonts = rpr.find(qn("w:rFonts"))
+        if rfonts is None:
+            rfonts = OxmlElement("w:rFonts")
+            rpr.append(rfonts)
+        rfonts.set(qn("w:eastAsia"), "宋体")
 
     sections = list(doc.sections)
     multi_section_restart = restart_after_toc and len(sections) >= 2
@@ -2057,7 +2087,8 @@ def _set_page_numbers(doc, log, restart_after_toc: bool = False):
         if multi_section_restart and idx == 0:
             continue
 
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.alignment = align
+        _affix_run(p, prefix)
         r1 = p.add_run()
         fld1 = OxmlElement("w:fldChar"); fld1.set(qn("w:fldCharType"), "begin")
         r1._r.append(fld1)
@@ -2068,6 +2099,7 @@ def _set_page_numbers(doc, log, restart_after_toc: bool = False):
         r3 = p.add_run()
         fld2 = OxmlElement("w:fldChar"); fld2.set(qn("w:fldCharType"), "end")
         r3._r.append(fld2)
+        _affix_run(p, suffix)
 
         # 正文 section（idx>=1）：start=1 重起；同时显式声明阿拉伯数字
         if multi_section_restart and idx >= 1:
@@ -2079,7 +2111,8 @@ def _set_page_numbers(doc, log, restart_after_toc: bool = False):
             pgNum.set(qn("w:fmt"), "decimal")
             sectPr.append(pgNum)
     note = "（TOC 不编号，正文从1起）" if multi_section_restart else ""
-    log.info(f"  页码已设置（页脚居中{note}），section 数={len(sections)}")
+    pos_cn = "右对齐" if align == WD_ALIGN_PARAGRAPH.RIGHT else "居中"
+    log.info(f"  页码已设置（页脚{pos_cn},格式「{tpl}」{note}），section 数={len(sections)}")
 
 
 def _reapply_heading_fonts(doc: "Document", fmt: dict, log: logging.Logger) -> None:
@@ -2272,94 +2305,98 @@ def _strip_docx_fingerprints(docx_path: Path, log: logging.Logger) -> None:
         log.warning(f"  指纹清理失败（非致命）: {e}")
 
 
-_WORD_PAGE_COUNT_APPLESCRIPT = r'''
-tell application "Microsoft Word"
-    activate
-    delay 1
-    open file name (POSIX file "{path}" as string)
-    delay 3
-    set theDoc to active document
-    set page_count to compute statistics theDoc statistic statistic pages
-    close theDoc saving no
-    return page_count
+# 用户传 --no-word 时置 True,完全跳过 Word 自动化(目录预渲染 + 页数检查)。
+_SKIP_WORD = False
+
+# 探测 Word 是否被占用:不经 application tell 直接问 System Events,不会启动 Word。
+# 返回 "notrunning"(未运行,可放心新开) / 整数字符串(已打开的文档数) / 出错。
+_WORD_BUSY_APPLESCRIPT = r'''
+tell application "System Events"
+    if not (exists process "Microsoft Word") then return "notrunning"
 end tell
+tell application "Microsoft Word" to return (count of documents) as string
 '''
 
-
-_WORD_UPDATE_TOC_APPLESCRIPT = r'''
+# 合并:一次开关完成「更新字段(含 TOC)+ 保存 + 读页数」,避免开关 Word 两遍。
+_WORD_RENDER_COUNT_APPLESCRIPT = r'''
 tell application "Microsoft Word"
-    activate
-    delay 1
-    open file name (POSIX file "{path}" as string)
+    set d to open file name (POSIX file "{path}" as string)
     delay 3
-    set theDoc to active document
     try
-        update field of every field of theDoc
+        update field of every field of d
     end try
     delay 1
-    save theDoc
-    delay 1
-    close theDoc saving no
-    return "ok"
+    save d
+    set pg to (compute statistics d statistic (statistic pages))
+    close d saving no
+    return (pg as string)
 end tell
 '''
 
 
-def _word_update_toc(docx_path: Path, log: logging.Logger,
-                     timeout: int = 90) -> bool:
-    """打开 docx → 更新所有字段（含 TOC）→ 保存 → 关闭。
+def _word_busy_state(log: logging.Logger, timeout: int = 8) -> str:
+    """快速探测 Word 可用性。返回 'free'(可用) 或 'skip'(占用/无响应,应跳过)。
 
-    解决：Mac Word 不支持 settings.xml updateFields 标志，TOC 缓存里只有占位符
-    "（请在 Word 中按 F9 更新目录）"，需要预渲染一次把真实条目写入缓存。
+    Word 已开着文档时,AppleScript 自动化会与用户抢占连接,旧实现因此每份 docx
+    干等到 90s 超时。这里先 8s 内问清状态,占用就立即跳过,不再硬等。
     """
-    if sys.platform != "darwin":
-        log.info("  目录预渲染: 跳过(仅 macOS 支持 Word AppleScript)")
-        return False
-    if not Path("/Applications/Microsoft Word.app").exists():
-        log.info("  目录预渲染: 跳过(未找到 /Applications/Microsoft Word.app)")
-        return False
-
-    script = _WORD_UPDATE_TOC_APPLESCRIPT.format(path=str(docx_path))
     try:
         result = subprocess.run(
-            ["osascript", "-e", script],
+            ["osascript", "-e", _WORD_BUSY_APPLESCRIPT],
             capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        log.warning(f"  目录预渲染: Word 超时(>{timeout}s)")
-        return False
-    if result.returncode != 0:
-        log.warning(f"  目录预渲染: 失败 — {result.stderr.strip()[:120]}")
-        return False
-    log.info("  ✓ 目录预渲染完成 (Word 中按 F9 不再需要)")
-    return True
+        log.warning("  Word 探测: 无响应(>8s),跳过目录预渲染与页数检查")
+        return "skip"
+    out = result.stdout.strip()
+    if result.returncode != 0 or not out:
+        log.warning(f"  Word 探测: 失败({result.stderr.strip()[:80]}),跳过 Word 步骤")
+        return "skip"
+    if out == "notrunning":
+        return "free"   # 未运行 → 自动化会新开一个干净实例,无抢占
+    try:
+        ndocs = int(out)
+    except ValueError:
+        return "skip"
+    if ndocs > 0:
+        log.info(f"  Word 有 {ndocs} 个文档打开 → 跳过目录预渲染与页数检查"
+                 "(docx 已保存;打开后按 F9 更新目录页码)")
+        return "skip"
+    return "free"
 
 
-def _word_page_count(docx_path: Path, log: logging.Logger,
-                     timeout: int = 90) -> int | None:
-    """通过 Microsoft Word.app 的 AppleScript `compute statistics` 直接拿页数。
+def _check_page_count(docx_path: Path, fmt: dict, log: logging.Logger) -> int | None:
+    """用 Microsoft Word 一次性完成目录预渲染 + 真实页数读取,与 max_pages 比对。
 
-    Word 渲染 = 评委实际看到的页数(精度唯一可靠的口径)。
-    macOS 专用。Windows/Linux 暂跳过。
+    Word 渲染 = 评委实际看到的页数。三道快速短路,避免旧实现的 90s×2 干等:
+      1. --no-word / 非 macOS / 未装 Word → 跳过
+      2. Word 已开着文档(被用户占用)→ 跳过(8s 内探明)
+      3. 合并为一次开关,超时 45s
+    跳过不影响 docx 可用:文档已带 updateFields,用户打开按 F9 即更新目录。
     """
+    if _SKIP_WORD:
+        log.info("  页数检查: 跳过(--no-word)")
+        return None
     if sys.platform != "darwin":
         log.info("  页数检查: 跳过(仅 macOS 支持 Word AppleScript)")
         return None
     if not Path("/Applications/Microsoft Word.app").exists():
-        log.warning("  页数检查: 跳过(未找到 /Applications/Microsoft Word.app)")
+        log.info("  页数检查: 跳过(未找到 Microsoft Word.app)")
+        return None
+    if _word_busy_state(log) == "skip":
         return None
 
-    script = _WORD_PAGE_COUNT_APPLESCRIPT.format(path=str(docx_path))
+    script = _WORD_RENDER_COUNT_APPLESCRIPT.format(path=str(docx_path))
     try:
         result = subprocess.run(
             ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, timeout=45,
         )
     except subprocess.TimeoutExpired:
-        log.warning(f"  页数检查: Word 超时(>{timeout}s)")
+        log.warning("  页数检查: Word 超时(>45s),跳过(docx 已保存,不影响交付)")
         return None
     if result.returncode != 0:
-        log.warning(f"  页数检查: Word AppleScript 失败 — {result.stderr.strip()[:120]}")
+        log.warning(f"  页数检查: Word 失败 — {result.stderr.strip()[:120]}")
         return None
     out = result.stdout.strip()
     try:
@@ -2368,23 +2405,10 @@ def _word_page_count(docx_path: Path, log: logging.Logger,
         log.warning(f"  页数检查: Word 返回非整数 — {out!r}")
         return None
     if pages <= 0:
-        log.warning(f"  页数检查: Word 返回 {pages} 页(可能未完成分页,稍后重试)")
-        return None
-    return pages
-
-
-def _check_page_count(docx_path: Path, fmt: dict, log: logging.Logger) -> int | None:
-    """用 Microsoft Word 直接读真实页数,与 max_pages 比对。
-
-    Word 渲染 = 评委实际看到的页数。依赖未满足或读取失败时直接跳过。
-    在拿页数前先做目录预渲染：让 Word 评估 TOC 字段并把真实条目写入缓存,
-    之后用户打开 docx 不再需要按 F9。
-    """
-    _word_update_toc(docx_path, log)
-    pages = _word_page_count(docx_path, log)
-    if pages is None:
+        log.warning(f"  页数检查: Word 返回 {pages} 页(分页未完成)")
         return None
 
+    log.info("  ✓ 目录预渲染完成 (Word 中无需再按 F9)")
     max_pages = fmt.get("max_pages", 0)
     if max_pages > 0:
         status = "✅" if pages <= max_pages else "❌ 超页"
@@ -2428,6 +2452,11 @@ def _make_chart_style(variant_id: str, variant: dict = None) -> dict:
         style["resource_hatches"] = cs.get("resource_hatches", ["", "//", "\\\\", "xx"])
         style["network_node_radius"] = cs.get("network_node_radius", 0.3)
         style["network_label_pos"] = cs.get("network_label_pos", "above")
+        # 流程图视觉主题（反串标：颜色/填充/形状/连线）
+        for k in ("chart_accent", "chart_node_fill", "chart_node_filled",
+                  "chart_node_rounded", "chart_edge_spline"):
+            if k in cs:
+                style[k] = cs[k]
         return style
 
     # 兜底：V01/V02/V03 硬编码
@@ -2597,7 +2626,13 @@ def main():
     parser.add_argument("output_dir", help="output 目录路径")
     parser.add_argument("--batch", action="store_true",
                         help="批量模式：扫描 output/V*/ 为每家单位生成独立 DOCX")
+    parser.add_argument("--no-word", action="store_true",
+                        help="跳过 Word 自动化(目录预渲染+页数检查);docx 仍正常生成,"
+                             "打开后按 F9 更新目录。Word 开着文档时本就会自动跳过。")
     args = parser.parse_args()
+
+    global _SKIP_WORD
+    _SKIP_WORD = args.no_word
 
     try:
         from docx import Document  # noqa: F401

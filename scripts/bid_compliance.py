@@ -327,6 +327,28 @@ def check_chart_coverage(
                     evidence = f"PNG: {png.name}"
                     break
 
+        # 4. required 图全变体兜底:chart_specs 用基准章号,变体章节数≠基准时
+        #    指定章号可能不存在,招标硬性图只要全文任一章命中即视为已落地。
+        if not present and required:
+            for any_md in md_files:
+                try:
+                    atext = any_md.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+                for blk in fence_re.findall(atext):
+                    try:
+                        data = json.loads(blk)
+                    except Exception:
+                        continue
+                    if isinstance(data, dict):
+                        declared = str(data.get("type", "")).lower()
+                        if ctype in declared or (classify and classify(data) == ctype):
+                            present = True
+                            evidence = f"全文扫描命中 {any_md.name} type={declared or ctype}"
+                            break
+                if present:
+                    break
+
         item = {
             "chapter": ch,
             "section": section,
@@ -555,6 +577,10 @@ def _run_single(root: Path, chapter_dir: Path, variant_id: str) -> int:
 
     log.info("章节-评分表对齐核查:")
     plan_path = extracted / "chapter_plan.md"
+    v_plan = chapter_dir / "chapter_plan_variant.md"
+    if variant_id and v_plan.exists() and parse_chapter_plan(v_plan):
+        plan_path = v_plan
+        log.info(f"批量模式:改用变体计划 {v_plan.name}(结构独立)")
     plan_rows = parse_chapter_plan(plan_path)
     if not plan_rows and not plan_path.exists():
         log.warning(f"chapter_plan.md 不存在: {plan_path}")

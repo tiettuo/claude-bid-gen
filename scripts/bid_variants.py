@@ -166,6 +166,34 @@ NUMBERING_SCHEMES = [
     {"name": "F", "level1": "1.  2.  3.", "level2": "1)  2)  3)", "level3": "(1)  (2)  (3)"},
 ]
 
+# ── 图表视觉主题（反串标）──────────────────────────────────────────────
+# 旧实现各变体流程图全是白底黑框,本质同源。按变体序号确定性派发独立主题,
+# 在彩印与黑白打印下都可区分(颜色 + 填充 + 形状 + 连线走线同时变)。
+# bid_charts._theme_from_style 读取这些键。
+CHART_THEMES = [
+    {  # A：黑白描边、直角、正交连线
+        "chart_accent": "#1A1A1A", "chart_node_fill": "#FFFFFF",
+        "chart_node_filled": False, "chart_node_rounded": False,
+        "chart_edge_spline": "ortho",
+        "flow_direction": "TB", "org_direction": "TB",
+    },
+    {  # B：深蓝填充、圆角、曲线连线、横向
+        "chart_accent": "#1F4E79", "chart_node_fill": "#DCE9F5",
+        "chart_node_filled": True, "chart_node_rounded": True,
+        "chart_edge_spline": "spline",
+        "flow_direction": "LR", "org_direction": "LR",
+    },
+    {  # C：墨绿填充、直角、折线连线
+        "chart_accent": "#375623", "chart_node_fill": "#E2EFDA",
+        "chart_node_filled": True, "chart_node_rounded": False,
+        "chart_edge_spline": "polyline",
+        "flow_direction": "TB", "org_direction": "TB",
+    },
+]
+
+# 排版套（对应 disqualification_rules.md 的 format_sets A/B/C）
+FORMAT_SET_KEYS = ["A", "B", "C"]
+
 
 def generate_variant_style(variant_id: str, seed: int = 0) -> dict:
     """用 variant_id 的 hash 确定性生成视觉风格参数（图表 + 文档软层）。"""
@@ -387,6 +415,9 @@ def build_variants(
 
         vid = f"V{idx + 1:02d}"
         vstyle = generate_variant_style(vid, seed=base_seed)
+        # 确定性派发图表主题(覆盖 generate_variant_style 的随机方向),保证 N 变体
+        # 拿到结构不同的主题而非随机撞色;format_set 同序派发。
+        vstyle.update(CHART_THEMES[idx % len(CHART_THEMES)])
 
         v_entry = {
             "id": vid,
@@ -394,6 +425,7 @@ def build_variants(
             "model": model,
             "temperature": temperature,
             "blind": blind,
+            "format_set": FORMAT_SET_KEYS[idx % len(FORMAT_SET_KEYS)],
             **fp,
             "metadata": md,
             "section_order_seed": base_seed + idx * 101,

@@ -346,22 +346,87 @@ def render_resource_curve(data: dict, out_png: Path, title: str,
     return True
 
 
+# ─── 图表视觉主题（反串标：变体间颜色/填充/连线差异化） ──────────────────
+
+def _theme_from_style(style: dict) -> dict:
+    """从变体 chart_style 解出图表视觉主题。
+
+    旧实现所有变体的流程图都白底黑框 SimHei,肉眼一个样。这里读出每变体专属的
+    描边/填充色、是否填充、是否圆角、连线走线方式,在渲染器里套用。
+    """
+    accent = style.get("chart_accent", "#1A1A1A")
+    fill = style.get("chart_node_fill", "white")
+    filled = bool(style.get("chart_node_filled", False))
+    rounded = bool(style.get("chart_node_rounded", False))
+    spline = str(style.get("chart_edge_spline", "") or "")
+    parts = []
+    if rounded:
+        parts.append("rounded")
+    if filled:
+        parts.append("filled")
+    return {"accent": accent, "fill": fill, "filled": filled,
+            "node_style": ",".join(parts), "spline": spline}
+
+
+def _wrap_cjk(text: str, width: int = 14) -> str:
+    """长标签每 width 字插入换行(graphviz \\n 转义),避免节点过宽把整图压扁。"""
+    text = str(text or "")
+    if len(text) <= width:
+        return text
+    return "\\n".join(text[i:i + width] for i in range(0, len(text), width))
+
+
+def _rotate_png_if_wide(out_png: "Path", log,
+                        lo: float = 2.0, hi: float = 5.5) -> None:
+    """真正二维的宽图(宽/高 ∈ [lo,hi])旋转 90° 转竖向。
+
+    竖排页面里宽图缩到页宽后会很矮很小、内容看不清;旋转成竖向后可用整页
+    高度铺满,内容放大约 1.5×(阅读时把文档转 90°)。
+    比值 > hi 的是单排链条/塌扁图,旋转只会变竖丝带,不旋转。
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return
+    try:
+        with Image.open(out_png) as im:
+            w, h = im.size
+            r = w / h if h else 0
+            if lo <= r <= hi:
+                im.rotate(-90, expand=True).save(out_png)  # 顺时针 90°
+                log.info(f"  ↻ 图过宽({w}x{h}),旋转 90° 转竖向: {out_png.name}")
+    except Exception as e:
+        log.warning(f"  图旋转失败(非致命): {e}")
+
+
 # ─── 组织机构图渲染 ───────────────────────────────────────────────────
 
 def _add_org_node(g, node: dict, parent_id: str | None, counter: list,
                   style: dict, shuffle_rng):
     nid = f"n{counter[0]}"
     counter[0] += 1
-    role = node.get("role", "")
-    name = node.get("name", "")
-    label = f"{role}\\n{name}" if name else role
+    # 节点文字:优先 label(实际数据用这个字段),回退 role/name/title/text。
+    # 旧实现只读 role/name → 数据用 label 时取不到 → 渲染成空框。
+    label = str(node.get("label") or node.get("title") or node.get("text") or "").strip()
+    if not label:
+        role = str(node.get("role", "") or "").strip()
+        name = str(node.get("name", "") or "").strip()
+        label = f"{role}\\n{name}" if (role and name) else (role or name)
+    label = _wrap_cjk(label, 12) or "（未命名）"
     shape = style.get("org_box_shape", "box")
+    theme = _theme_from_style(style)
+    sty = []
     if shape == "rounded":
-        g.node(nid, label=label, shape="box", style="rounded")
-    elif shape == "doubleframe":
-        g.node(nid, label=label, shape="box", peripheries="2")
-    else:
-        g.node(nid, label=label, shape="box")
+        sty.append("rounded")
+    if theme["filled"]:
+        sty.append("filled")
+    node_kw = {"shape": "box"}
+    if sty:
+        node_kw["style"] = ",".join(sty)
+        node_kw["fillcolor"] = theme["fill"]
+    if shape == "doubleframe":
+        node_kw["peripheries"] = "2"
+    g.node(nid, label=label, **node_kw)
     if parent_id is not None:
         g.edge(parent_id, nid)
     children = node.get("children") or []
@@ -398,16 +463,20 @@ def render_org_chart(data: dict, out_png: Path, title: str,
     shuffle_seed = style.get("sibling_shuffle_seed")
     shuffle_rng = _random.Random(shuffle_seed) if shuffle_seed else None
 
+    theme = _theme_from_style(style)
     gv_size = _graphviz_size_str(prefer_landscape=False)
     gdpi = max(100, int(_RENDER_DPI * style.get("chart_scale", 1.0)))
     g = graphviz.Digraph(format="png")
     g.attr(rankdir=direction, dpi=str(gdpi), bgcolor="white",
-           size=gv_size, ratio="compress",
+           size=gv_size,
            ranksep=str(round(0.6 * spacing, 2)),
            nodesep=str(round(0.4 * spacing, 2)))
+    if theme["spline"]:
+        g.attr(splines=theme["spline"])
     g.attr("node", fontname="SimHei", fontsize=fs,
-           penwidth=line_w, margin="0.15,0.08")
-    g.attr("edge", penwidth=line_w, arrowsize="0.7")
+           penwidth=line_w, margin="0.15,0.08",
+           color=theme["accent"], fontcolor=theme["accent"])
+    g.attr("edge", penwidth=line_w, arrowsize="0.7", color=theme["accent"])
 
     if title:
         g.attr(label=title, labelloc="t", fontname="SimHei", fontsize=str(int(fs) + 2))
@@ -418,6 +487,7 @@ def render_org_chart(data: dict, out_png: Path, title: str,
     out_png.parent.mkdir(parents=True, exist_ok=True)
     stem = str(out_png.with_suffix(""))
     g.render(stem, cleanup=True)
+    _rotate_png_if_wide(out_png, log)
     log.info(f"  ✓ 渲染组织机构图: {out_png.name}  节点={counter[0]}")
     return True
 
@@ -444,26 +514,33 @@ def render_hierarchy_flow(data: dict, out_png: Path, title: str,
     line_w = str(style.get("line_width", 0.8))
     fs = str(10 + style.get("font_size_offset", 0))
     spacing = style.get("spacing_factor", 1.0)
-    corner = style.get("flow_corner_radius", 0)
-    node_style = "rounded" if corner > 0 else ""
+    theme = _theme_from_style(style)
 
     gv_size = _graphviz_size_str(prefer_landscape=False)
     g = graphviz.Digraph(format="png")
     gdpi = max(100, int(_RENDER_DPI * style.get("chart_scale", 1.0)))
     g.attr(rankdir=direction, dpi=str(gdpi), bgcolor="white",
-           size=gv_size, ratio="compress",
+           size=gv_size,
            ranksep=str(round(0.7 * spacing, 2)),
            nodesep=str(round(0.5 * spacing, 2)))
-    g.attr("node", fontname="SimHei", fontsize=fs, shape="box",
-           penwidth=line_w, margin="0.15,0.08",
-           style=node_style if node_style else "")
-    g.attr("edge", penwidth=line_w, arrowsize="0.7")
+    if theme["spline"]:
+        g.attr(splines=theme["spline"])
+    node_kw = dict(fontname="SimHei", fontsize=fs, shape="box",
+                   penwidth=line_w, margin="0.15,0.08",
+                   color=theme["accent"], fontcolor=theme["accent"])
+    if theme["node_style"]:
+        node_kw["style"] = theme["node_style"]
+        node_kw["fillcolor"] = theme["fill"]
+    g.attr("node", **node_kw)
+    g.attr("edge", penwidth=line_w, arrowsize="0.7", color=theme["accent"])
 
     if title:
         g.attr(label=title, labelloc="t", fontname="SimHei", fontsize=str(int(fs) + 2))
 
     node_ids = {}
+    layer_first = []   # 每层一个代表节点,用于强制层间纵向排序
     for li, layer in enumerate(layers):
+        first_in_layer = None
         with g.subgraph() as s:
             s.attr(rank="same")
             layer_name = layer.get("name", "")
@@ -471,21 +548,50 @@ def render_hierarchy_flow(data: dict, out_png: Path, title: str,
                 invis_id = f"_layer_{li}"
                 s.node(invis_id, label=layer_name, shape="plaintext",
                        fontname="SimHei", fontsize=str(int(fs) - 1))
+                first_in_layer = invis_id
             for node_name in (layer.get("nodes") or []):
                 nid = f"L{li}_{node_name}"
-                s.node(nid, label=node_name)
+                s.node(nid, label=_wrap_cjk(node_name))
                 node_ids[node_name] = nid
+                if first_in_layer is None:
+                    first_in_layer = nid
+        layer_first.append(first_in_layer)
+
+    # 强制层间纵向堆叠:相邻层代表节点连不可见边。否则 connections 缺失或
+    # 格式不符时,各层 rank=same 子图会塌成一行(渲染出 929x20 的横丝带)。
+    for a, b in zip(layer_first, layer_first[1:]):
+        if a and b:
+            g.edge(a, b, style="invis")
+
+    def _resolve_node(name):
+        """连接端点名 → 节点 id;端点常用简称,支持精确 + 子串匹配。"""
+        name = str(name or "").strip()
+        if not name:
+            return None
+        if name in node_ids:
+            return node_ids[name]
+        for k, v in node_ids.items():
+            if name in k or k in name:
+                return v
+        return None
 
     for conn in connections:
-        f = node_ids.get(conn.get("from", ""))
-        t = node_ids.get(conn.get("to", ""))
+        # connections 兼容两种格式:{"from","to","label"} 或 ["from","to"]
+        if isinstance(conn, dict):
+            fn, tn, lbl = conn.get("from", ""), conn.get("to", ""), conn.get("label", "")
+        elif isinstance(conn, (list, tuple)) and len(conn) >= 2:
+            fn, tn = conn[0], conn[1]
+            lbl = conn[2] if len(conn) > 2 else ""
+        else:
+            continue
+        f, t = _resolve_node(fn), _resolve_node(tn)
         if f and t:
-            label = conn.get("label", "")
-            g.edge(f, t, label=label, fontname="SimHei", fontsize=str(int(fs) - 2))
+            g.edge(f, t, label=str(lbl), fontname="SimHei", fontsize=str(int(fs) - 2))
 
     out_png.parent.mkdir(parents=True, exist_ok=True)
     stem = str(out_png.with_suffix(""))
     g.render(stem, cleanup=True)
+    _rotate_png_if_wide(out_png, log)
     log.info(f"  ✓ 渲染层级体系图: {out_png.name}  层数={len(layers)}")
     return True
 
@@ -518,16 +624,26 @@ def render_process_flow(data: dict, out_png: Path, title: str,
                  "start": "ellipse", "end": "ellipse", "process": "box",
                  "decision": "diamond"}
 
+    theme = _theme_from_style(style)
     prefer_land = direction == "LR"
     gv_size = _graphviz_size_str(prefer_landscape=prefer_land)
     g = graphviz.Digraph(format="png")
     gdpi = max(100, int(_RENDER_DPI * style.get("chart_scale", 1.0)))
     g.attr(rankdir=direction, dpi=str(gdpi), bgcolor="white",
-           size=gv_size, ratio="compress",
+           size=gv_size,
            ranksep=str(round(0.6 * spacing, 2)),
            nodesep=str(round(0.4 * spacing, 2)))
-    g.attr("node", fontname="SimHei", fontsize=fs, penwidth=line_w, margin="0.12,0.06")
-    g.attr("edge", fontname="SimHei", fontsize=str(int(fs) - 2), penwidth=line_w, arrowsize="0.7")
+    if theme["spline"]:
+        g.attr(splines=theme["spline"])
+    node_kw = dict(fontname="SimHei", fontsize=fs, penwidth=line_w,
+                   margin="0.12,0.06",
+                   color=theme["accent"], fontcolor=theme["accent"])
+    if theme["node_style"]:
+        node_kw["style"] = theme["node_style"]
+        node_kw["fillcolor"] = theme["fill"]
+    g.attr("node", **node_kw)
+    g.attr("edge", fontname="SimHei", fontsize=str(int(fs) - 2),
+           penwidth=line_w, arrowsize="0.7", color=theme["accent"])
 
     if title:
         g.attr(label=title, labelloc="t", fontname="SimHei", fontsize=str(int(fs) + 2))
@@ -536,7 +652,7 @@ def render_process_flow(data: dict, out_png: Path, title: str,
         nid = str(nd.get("id", ""))
         label = str(nd.get("label", nid))
         shape = shape_map.get(nd.get("shape", "box"), "box")
-        g.node(nid, label=label, shape=shape)
+        g.node(nid, label=_wrap_cjk(label, 16), shape=shape)
 
     for ed in edges:
         g.edge(str(ed.get("from", "")), str(ed.get("to", "")), label=str(ed.get("label", "")))
@@ -544,6 +660,7 @@ def render_process_flow(data: dict, out_png: Path, title: str,
     out_png.parent.mkdir(parents=True, exist_ok=True)
     stem = str(out_png.with_suffix(""))
     g.render(stem, cleanup=True)
+    _rotate_png_if_wide(out_png, log)
     log.info(f"  ✓ 渲染工艺流程图: {out_png.name}  节点={len(nodes)}")
     return True
 
@@ -1971,17 +2088,17 @@ _HEADING_STYLES = {
           lambda c, h2, h3, h4: f"{_cn_num(h2)}、",
           lambda c, h2, h3, h4: f"（{_cn_num(h3)}）",
           lambda c, h2, h3, h4: f"{h4}."),
-    "F": ("纯数字",
+    "F": ("纯数字嵌套",
           lambda c, h2, h3, h4: f"{h2}.",
-          lambda c, h2, h3, h4: f"{h3}.",
-          lambda c, h2, h3, h4: f"{h4}."),
+          lambda c, h2, h3, h4: f"{h2}.{h3}",
+          lambda c, h2, h3, h4: f"{h2}.{h3}.{h4}"),
     "G": ("数字+括号",
           lambda c, h2, h3, h4: f"{h2}.",
           lambda c, h2, h3, h4: f"（{h3}）",
           lambda c, h2, h3, h4: f"{'①②③④⑤⑥⑦⑧⑨⑩'[h4-1]}" if h4 <= 10 else f"({h4})"),
-    "H": ("圆圈数字",
-          lambda c, h2, h3, h4: f"{'①②③④⑤⑥⑦⑧⑨⑩'[h2-1]}" if h2 <= 10 else f"({h2})",
-          lambda c, h2, h3, h4: f"{'①②③④⑤⑥⑦⑧⑨⑩'[h3-1]}" if h3 <= 10 else f"({h3})",
+    "H": ("公文圆圈",
+          lambda c, h2, h3, h4: f"{_cn_num(h2)}、",
+          lambda c, h2, h3, h4: f"{h3}.",
           lambda c, h2, h3, h4: f"{'①②③④⑤⑥⑦⑧⑨⑩'[h4-1]}" if h4 <= 10 else f"({h4})"),
     "I": ("章节式",
           lambda c, h2, h3, h4: f"第{_cn_num(h2)}节",
@@ -2002,11 +2119,17 @@ _HEADING_STYLES = {
 }
 
 
-def assign_heading_style(variant_seed: int) -> str:
-    """基于 variant seed 随机分配一种编号风格。"""
-    keys = list(_HEADING_STYLES.keys())
-    rng = random.Random(variant_seed ^ 0xBEEF)
-    return rng.choice(keys)
+# 编号风格按变体序号轮转(反串标):确定性派发,保证 N 个变体两两不同。
+# 旧实现按 seed 随机挑,会出现两变体撞同一风格;且不分层级可读性。
+# 全部 12 种均层级可区分(F/H 已修),排在前面的为更常见的工程文件风格。
+_VARIANT_HEADING_STYLES = ["B", "C", "L", "D", "A", "I", "G", "K", "E", "F", "H", "J"]
+
+
+def assign_heading_style(variant_index: int) -> str:
+    """按变体序号(0,1,2,...)确定性分配编号风格,N 变体互不相同。"""
+    if not _VARIANT_HEADING_STYLES:
+        return "B"
+    return _VARIANT_HEADING_STYLES[int(variant_index) % len(_VARIANT_HEADING_STYLES)]
 
 
 def _normalize_heading_numbers(text: str, chapter_idx: int,
@@ -2673,6 +2796,48 @@ _CHART_RENDERERS = {
 }
 
 
+_BULLET_RE = re.compile(r'^[ \t]*([*+\-])[ \t]+(\S.*)$')
+
+
+def _normalize_md_lists(text: str) -> str:
+    """规整无序列表,确保 pandoc 正确解析为列表 —— 否则 `**`/`*` 字面残留进 docx。
+
+    下游模型两个常见毛病会让 pandoc 解析失败:
+      1. bullet 带 4+ 空格缩进(`    *   **要点**`)→ 被当代码块,块内标记不解析;
+      2. 列表紧贴上一段落、中间无空行 → pandoc 把 bullet 行并进段落,行首 `*` 变字面。
+    本函数:所有 bullet 拉到行首并归一为 `- `;列表前缺空行时补一个空行;
+    另剥离 `---`/`***`/`___` 整行分隔符(写手拿它当分节,pandoc 会渲染成横线)。
+    (下游 assemble 仍会去掉项目符号,故拉平缩进不影响最终观感。)
+    """
+    out = []
+    in_fence = False
+    for line in text.split("\n"):
+        s = line.lstrip()
+        if s.startswith("```"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if in_fence:
+            out.append(line)
+            continue
+        # 整行分隔符(thematic break)→ 丢弃,避免 docx 里出现突兀横线
+        if re.match(r'^[ \t]*([-*_])\1{2,}[ \t]*$', line):
+            continue
+        m = _BULLET_RE.match(line)
+        if m:
+            content = m.group(2)
+            if not content.strip(" \t*　"):
+                continue  # 空 bullet / 只剩残缺 ** 标记,整行丢弃
+            prev = out[-1] if out else ""
+            # 列表紧贴段落(上一行非空且不是 bullet)→ 补空行,否则 pandoc 并入段落
+            if prev.strip() and not _BULLET_RE.match(prev):
+                out.append("")
+            out.append(f"- {content}")
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
 def preprocess_md(
     src_md: Path,
     tmp_dir: Path,
@@ -2689,6 +2854,7 @@ def preprocess_md(
     原文件保持不变；所有剥离/替换发生在临时副本上。
     """
     text = src_md.read_text(encoding="utf-8")
+    text = _normalize_md_lists(text)
     text = _prepend_chapter_number(text, chapter_idx)
     text = _normalize_heading_numbers(text, chapter_idx, heading_style)
     blocks = list(iter_fences(text))
@@ -2828,10 +2994,10 @@ def preprocess_chapter_dir(
     charts_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    # 编号风格：指定或随机分配
+    # 编号风格：指定则用指定值,否则按变体序号确定性派发(N 变体互不相同)
     if not heading_style:
-        seed = hash(variant_id) & 0xFFFFFFFF
-        heading_style = assign_heading_style(seed)
+        _vm = re.match(r"[Vv](\d+)", variant_id or "")
+        heading_style = assign_heading_style((int(_vm.group(1)) - 1) if _vm else 0)
     style_name = _HEADING_STYLES.get(heading_style, _HEADING_STYLES["B"])[0]
     log.info(f"标题编号风格: {heading_style}({style_name})  variant={variant_id}")
 

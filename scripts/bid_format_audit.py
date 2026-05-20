@@ -154,6 +154,27 @@ def audit(tender_dir: Path, docx_path: Path):
     log.addHandler(logging.NullHandler())
     fmt = bid_assemble.parse_format_rules(rules_md, log)
 
+    # 变体感知:docx 属某变体时套用其 format_set,使审计期望 = 该变体实际排版。
+    # 否则三变体各用独立字体(宋体/仿宋/楷体)会被单一期望误判为海量违规。
+    import re as _re, json as _json
+    _vm = _re.search(r"V(\d+)", docx_path.name)
+    if _vm:
+        _vj = tender_dir / "extracted" / "variants.json"
+        _dq = tender_dir / "extracted" / "disqualification_rules.md"
+        if _vj.exists() and _dq.exists():
+            try:
+                _vdata = _json.loads(_vj.read_text(encoding="utf-8"))
+                _vlist = _vdata.get("variants", _vdata) if isinstance(_vdata, dict) else _vdata
+                _vid = f"V{int(_vm.group(1)):02d}"
+                _vrec = next((v for v in _vlist if v.get("id") == _vid), None)
+                _fskey = (_vrec or {}).get("format_set")
+                if _fskey:
+                    _fsets = bid_assemble._parse_format_sets(_dq.read_text(encoding="utf-8"))
+                    if str(_fskey).upper() in _fsets:
+                        fmt = bid_assemble._apply_format_set(fmt, _fsets[str(_fskey).upper()], log)
+            except Exception:
+                pass
+
     # 补 default cover sizes（与 bid_assemble 同款 fallback，保证审计期望与组装期望一致）
     body = fmt.get("font_size_body", 14)
     fmt.setdefault("font_size_cover_title", body)
@@ -214,7 +235,9 @@ def audit(tender_dir: Path, docx_path: Path):
 
         # 字体检查
         actual_cn = r["east_asia"]
-        if actual_cn and expected_cn_font and actual_cn != expected_cn_font:
+        # H1 区域按 H1 字体期望(标题惯用黑体),其余区域按正文字体
+        exp_font = fmt.get("font_name_h1") if region == "h1" else expected_cn_font
+        if actual_cn and exp_font and actual_cn != exp_font:
             violations.append({
                 "kind": "font",
                 "region": region,
@@ -222,7 +245,7 @@ def audit(tender_dir: Path, docx_path: Path):
                 "style": r["style"],
                 "snippet": r["snippet"],
                 "actual": actual_cn,
-                "expected": expected_cn_font,
+                "expected": exp_font,
             })
 
     # 样式表层面的检查（Normal / Heading 1 / Table Grid 等）
@@ -245,9 +268,11 @@ def audit(tender_dir: Path, docx_path: Path):
             style_violations.append({
                 "style": sname, "actual": info["size_pt"], "expected": exp,
             })
-        if info["east_asia"] and expected_cn_font and info["east_asia"] != expected_cn_font:
+        exp_sfont = (fmt.get("font_name_h1") if sname in ("Heading 1", "Title")
+                     else expected_cn_font)
+        if info["east_asia"] and exp_sfont and info["east_asia"] != exp_sfont:
             style_violations.append({
-                "style": sname, "actual_font": info["east_asia"], "expected_font": expected_cn_font,
+                "style": sname, "actual_font": info["east_asia"], "expected_font": exp_sfont,
             })
 
     # 决定退出码
