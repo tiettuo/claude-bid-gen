@@ -1843,13 +1843,23 @@ def _prepend_cover(doc, project_name: str, company_name: str, fmt: dict, log):
             first_child = child
             break
 
-    def _insert_para(text, size_pt, bold=False, cn_font=None, center=True):
+    def _insert_para(text="", size_pt=None, bold=False, cn_font=None,
+                     align="center", underline=False, rule=False):
+        size_pt = size_pt if size_pt is not None else fmt["font_size_cover_meta"]
         p = OxmlElement("w:p")
         pPr = OxmlElement("w:pPr")
-        if center:
-            jc = OxmlElement("w:jc")
-            jc.set(qn("w:val"), "center")
-            pPr.append(jc)
+        jc = OxmlElement("w:jc")
+        jc.set(qn("w:val"), align)
+        pPr.append(jc)
+        if rule:  # 段落下边框 = 一条横线
+            pBdr = OxmlElement("w:pBdr")
+            bottom = OxmlElement("w:bottom")
+            bottom.set(qn("w:val"), "single")
+            bottom.set(qn("w:sz"), "6")
+            bottom.set(qn("w:space"), "1")
+            bottom.set(qn("w:color"), "000000")
+            pBdr.append(bottom)
+            pPr.append(pBdr)
         p.append(pPr)
         if text:
             r = OxmlElement("w:r")
@@ -1867,8 +1877,11 @@ def _prepend_cover(doc, project_name: str, company_name: str, fmt: dict, log):
             szCs.set(qn("w:val"), str(int(size_pt * 2)))
             rPr.append(szCs)
             if bold:
-                b = OxmlElement("w:b"); rPr.append(b)
-                bCs = OxmlElement("w:bCs"); rPr.append(bCs)
+                rPr.append(OxmlElement("w:b"))
+                rPr.append(OxmlElement("w:bCs"))
+            if underline:
+                u = OxmlElement("w:u"); u.set(qn("w:val"), "single")
+                rPr.append(u)
             r.append(rPr)
             t = OxmlElement("w:t")
             t.text = text
@@ -1881,24 +1894,42 @@ def _prepend_cover(doc, project_name: str, company_name: str, fmt: dict, log):
             body.append(p)
         return p
 
-    # 8 行空白 + 大标题 + 项目名 + 6 行空白 + 公司(非暗标) + 日期 + 分页
-    # 字号一律读 fmt（默认回落到 font_size_body）；招标文件硬约束"全文统一字号"时
-    # cover_* 三项 = body_size，避免封面字号违规导致格式废标
-    cover_title_font = fmt.get("font_name_cover_title") or fmt["font_name_cn"]
-    title_size = fmt["font_size_cover_title"]
-    project_size = fmt["font_size_cover_project"]
-    meta_size = fmt["font_size_cover_meta"]
+    # 字号一律读 fmt（默认回落到 font_size_body），不改字号避免封面字号审计违规;
+    # 三变体封面靠版式（留白/横线/对齐/加粗）+ 字体（format_set 已差异化）区分。
+    tf = fmt.get("font_name_cover_title") or fmt["font_name_cn"]
+    ts = fmt["font_size_cover_title"]
+    ps = fmt["font_size_cover_project"]
+    ms = fmt["font_size_cover_meta"]
+    style = str(fmt.get("cover_style") or "A").upper()
+    bidder = "投 标 人：" + "_" * 22          # 占位公司名去掉,留填写下划线
+    date_line = f"编 制 日 期：{datetime.now().strftime('%Y 年 %m 月')}"
 
-    for _ in range(8):
-        _insert_para("", meta_size)
-    _insert_para("施  工  组  织  设  计", title_size, bold=True, cn_font=cover_title_font)
-    _insert_para("", meta_size)
-    _insert_para(project_name, project_size)
-    for _ in range(6):
-        _insert_para("", meta_size)
-    if not fmt["blind_bid"] and company_name:
-        _insert_para(f"投 标 人：{company_name}", meta_size)
-    _insert_para(f"编制日期：{datetime.now().strftime('%Y年%m月')}", meta_size)
+    if style == "B":   # 横线分隔式
+        for _ in range(7): _insert_para()
+        _insert_para(rule=True)
+        _insert_para("施 工 组 织 设 计", ts, bold=True, cn_font=tf)
+        _insert_para(rule=True)
+        for _ in range(3): _insert_para()
+        _insert_para(project_name, ps)
+        for _ in range(7): _insert_para()
+        _insert_para(bidder, ms)
+        _insert_para(date_line, ms)
+    elif style == "C":  # 项目名突出 + 左对齐落款
+        for _ in range(5): _insert_para()
+        _insert_para("施工组织设计", ts, cn_font=tf)
+        for _ in range(4): _insert_para()
+        _insert_para(project_name, ps, bold=True)
+        for _ in range(9): _insert_para()
+        _insert_para(bidder, ms, align="left")
+        _insert_para(date_line, ms, align="left")
+    else:               # A 居中经典
+        for _ in range(8): _insert_para()
+        _insert_para("施  工  组  织  设  计", ts, bold=True, cn_font=tf)
+        _insert_para()
+        _insert_para(project_name, ps)
+        for _ in range(6): _insert_para()
+        _insert_para(bidder, ms)
+        _insert_para(date_line, ms)
 
     # 分页符
     p_break = OxmlElement("w:p")
@@ -1912,7 +1943,7 @@ def _prepend_cover(doc, project_name: str, company_name: str, fmt: dict, log):
     else:
         body.append(p_break)
 
-    log.info(f"  封面已插入：{project_name}")
+    log.info(f"  封面已插入(样式 {style})：{project_name}")
 
 
 def _find_toc_anchor(body):
@@ -2534,6 +2565,7 @@ def _assemble_one(
             fs = format_sets[fs_key]
             log.info(f"  [format_set] 应用 {fs_key}: {fs.get('description', '')}")
             fmt = _apply_format_set(fmt, fs, log)
+            fmt["cover_style"] = fs_key   # 封面版式按变体区分(反串标)
         else:
             log.warning(f"  [format_set] {fs_key} 在 disqualification_rules.md 中未定义")
 
@@ -2576,8 +2608,10 @@ def _assemble_one(
 
     safe_name = re.sub(r'[\\/:*?"<>|]', "_", info["project_name"])[:30]
     if variant:
-        safe_company = re.sub(r'[\\/:*?"<>|]', "_", variant["company_name"])[:20]
-        out_path = output_dir / f"{variant['id']}_{safe_company}_{safe_name}_施工组织设计.docx"
+        # 占位公司名已去除,文件名用 variant id + 项目名区分三份
+        safe_company = re.sub(r'[\\/:*?"<>|]', "_", variant.get("company_name", "") or "")[:20]
+        seg = f"{safe_company}_" if safe_company else ""
+        out_path = output_dir / f"{variant['id']}_{seg}{safe_name}_施工组织设计.docx"
     else:
         out_path = output_dir / f"{safe_name}_施工组织设计.docx"
 
