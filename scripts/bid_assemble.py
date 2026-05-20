@@ -2421,10 +2421,10 @@ def _check_page_count(docx_path: Path, fmt: dict, log: logging.Logger) -> int | 
     try:
         result = subprocess.run(
             ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=45,
+            capture_output=True, text=True, timeout=60,
         )
     except subprocess.TimeoutExpired:
-        log.warning("  页数检查: Word 超时(>45s),跳过(docx 已保存,不影响交付)")
+        log.warning("  页数检查: Word 超时(>60s),跳过(docx 已保存;目录可在 Word 中按 F9 更新)")
         return None
     if result.returncode != 0:
         log.warning(f"  页数检查: Word 失败 — {result.stderr.strip()[:120]}")
