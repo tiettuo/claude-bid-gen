@@ -2057,6 +2057,39 @@ _CHART_ADAPTERS = {
 }
 
 
+# 各图表类型经 adapter 规范化后,renderer 真正画得出内容所需的最小字段。
+_CHART_REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
+    "schedule": ("tasks",),
+    "org_chart": ("root",),
+    "process_flow": ("nodes",),
+    "hierarchy_flow": ("layers",),
+    "resource_curve": ("series",),
+    "aoa_network": ("activities",),
+    # site_layout 的 zones 是 dict,单独判,见下。
+}
+
+
+def validate_chart_data(ctype: str, data: dict) -> tuple[bool, str]:
+    """检查(经 adapter 规范化后的)图表数据是否含可渲染内容。
+
+    返回 (ok, reason)。ok=False 表示按当前数据渲染只会得到空图/通用兜底图
+    —— 调用方应据此明确告警,而非静默出一张空图(养殖类项目 site_layout 踩过)。
+    """
+    d = data if isinstance(data, dict) else {}
+    if ctype == "site_layout":
+        zones = d.get("zones") or {}
+        n = sum(len(v) for v in zones.values() if isinstance(v, list))
+        if n == 0 and not d.get("elements"):
+            return False, "zones 全空且无 elements(无任何设施)"
+        return True, ""
+    required = _CHART_REQUIRED_KEYS.get(ctype)
+    if not required:
+        return True, ""  # 未登记类型不拦
+    if any(d.get(k) for k in required):
+        return True, ""
+    return False, f"缺 {'/'.join(required)}(无可渲染内容)"
+
+
 # ─── ASCII 字符画检测 ─────────────────────────────────────────────────
 
 _BOXART_CHARS = set("█░▓▒│─┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬━┃┏┓┗┛")
@@ -2961,6 +2994,10 @@ def preprocess_md(
                 # 图表：适配数据格式 → 渲染 PNG
                 adapter = _CHART_ADAPTERS.get(ctype)
                 render_data = adapter(data) if adapter else data
+                _data_ok, _data_why = validate_chart_data(ctype, render_data)
+                if not _data_ok:
+                    log.warning(f"  [{src_md.name}] {ctype} 数据不足"
+                                f"(渲染将为空图): {_data_why}")
                 renderer = _CHART_RENDERERS.get(ctype)
                 if renderer:
                     ci = type_counters.get(ctype, 0)
