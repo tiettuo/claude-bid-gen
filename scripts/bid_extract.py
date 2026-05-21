@@ -8,6 +8,8 @@ bid_extract.py - 投标文件全量提取工具
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 import logging
 from pathlib import Path
@@ -16,6 +18,18 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent))
 from bid_common import make_script_logger  # noqa: E402
 import bid_vision  # noqa: E402
+
+# 增量提取缓存版本。提取逻辑(OCR/解析)有实质改动时 +1,使旧缓存失效。
+_EXTRACT_CACHE_VERSION = 1
+
+
+def _file_md5(path: Path) -> str:
+    """文件内容 md5(分块读,大 PDF 也快)。"""
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _load_env():
@@ -948,6 +962,20 @@ def main():
 
     log.info(f"找到 {len(all_files)} 个文件，开始提取...")
 
+    # 增量提取缓存:源文件 md5 未变且 txt 已在 → 跳过重提取(--force 全量重提)
+    force = "--force" in sys.argv
+    cache_path = extracted_dir / ".extract_cache.json"
+    cache_files: dict[str, str] = {}
+    if not force and cache_path.exists():
+        try:
+            cdata = json.loads(cache_path.read_text(encoding="utf-8"))
+            if cdata.get("_version") == _EXTRACT_CACHE_VERSION:
+                cache_files = cdata.get("files", {})
+        except Exception:
+            cache_files = {}
+    new_cache_files: dict[str, str] = {}
+    skipped_count = 0
+
     used_names = set()
     for file_path in all_files:
         suffix = file_path.suffix.lower()
@@ -968,12 +996,27 @@ def main():
             n += 1
             out_stem = f"{flat_stem}_{n}"
         used_names.add(out_stem)
+        out_path = extracted_dir / f"{out_stem}.txt"
+
+        # 增量:源文件未变且 txt 仍在 → 复用,跳过重提取
+        cur_md5 = _file_md5(file_path)
+        if (not force and cache_files.get(str(rel)) == cur_md5
+                and out_path.exists()):
+            char_count = len(out_path.read_text(encoding="utf-8", errors="ignore"))
+            manifest_lines.append(f"- **{rel}** → `{out_path.name}`(增量复用,源未变更)")
+            manifest_lines.append(f"  - 字符数: {char_count:,}")
+            manifest_lines.append("")
+            new_cache_files[str(rel)] = cur_md5
+            extracted_count += 1
+            skipped_count += 1
+            log.info(f"  增量跳过(未变更): {rel}")
+            continue
 
         log.info(f"提取: {rel}")
         try:
             text = extractor(file_path)
-            out_path = extracted_dir / f"{out_stem}.txt"
             out_path.write_text(text, encoding="utf-8")
+            new_cache_files[str(rel)] = cur_md5
 
             char_count = len(text)
             brief = get_file_brief(text)
@@ -1003,6 +1046,19 @@ def main():
             manifest_lines.append(f"- **{rel}** ⚠ 提取失败: {e}")
             manifest_lines.append("")
             failed_count += 1
+
+    # 写增量缓存(仅含本轮成功处理的文件)
+    try:
+        cache_path.write_text(
+            json.dumps({"_version": _EXTRACT_CACHE_VERSION, "files": new_cache_files},
+                       ensure_ascii=False, indent=1),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        log.warning(f"  增量缓存写入失败: {e}")
+    if skipped_count:
+        log.info(f"  增量:{skipped_count}/{len(all_files)} 个文件未变更已跳过"
+                 f"(--force 可强制全量重提)")
 
     # === 提取图片文件（使用 Vision LLM） ===
     image_files = [

@@ -367,35 +367,52 @@ def vision_extract_batch(
         display = models[model_key].get("display_name", model_key)
         log.info(f"  [batch] {display}: {n} 页")
 
-    def _worker(model_key, page_list):
-        local = {}
-        for idx, img_bytes, _cats in page_list:
-            text, key = _call_model_with_retries(
-                model_key, img_bytes, vision_prompt, models, cfg, log
-            )
-            local[idx] = (text, key)
-        return local
-
     retry_cfg = cfg.get("retry", {})
     timeout = int(retry_cfg.get("timeout_seconds", 120))
     max_attempts = int(retry_cfg.get("max_attempts", 2))
     backoff = float(retry_cfg.get("backoff_seconds", 3))
+    # 每个模型的并发上限:旧实现每模型仅 1 线程(组内串行),大 PDF 慢。
+    # 现每模型可并发 N 路,总并发 = N × 模型数;受信号量约束不会压垮单模型。
+    per_model_conc = max(1, int(retry_cfg.get("per_model_concurrency", 4)))
+
+    import math
+    import threading
+
+    sems = {m: threading.Semaphore(per_model_conc) for m in available}
+
+    # 展平为逐页任务,每页带其指定模型(沿用上面的交替分配)
+    flat_tasks: list[tuple[int, bytes, str]] = []
+    for model_key, page_list in assignments.items():
+        for idx, img_bytes, _cats in page_list:
+            flat_tasks.append((idx, img_bytes, model_key))
+
+    def _ocr_one(idx: int, img_bytes: bytes, model_key: str):
+        with sems[model_key]:  # 限制单模型在途请求数
+            text, key = _call_model_with_retries(
+                model_key, img_bytes, vision_prompt, models, cfg, log
+            )
+        return idx, (text, key)
+
     max_pages_per_model = max(len(assignments[m]) for m in available)
+    # 并发后单模型有效串行深度 = ceil(页数 / 并发)
+    eff_depth = math.ceil(max_pages_per_model / per_model_conc)
     overall_timeout = (
-        (timeout * max_attempts + backoff * max_attempts) * max_pages_per_model + 60
+        (timeout * max_attempts + backoff * max_attempts) * eff_depth + 60
     )
+    log.info(f"  [batch] 并发:每模型 {per_model_conc} 路 × {len(available)} 模型 "
+             f"= {per_model_conc * len(available)} 路")
 
     results: dict[int, tuple[str, str]] = {}
-    with ThreadPoolExecutor(max_workers=len(available)) as pool:
-        futures = {
-            pool.submit(_worker, m, assignments[m]): m for m in available
-        }
+    with ThreadPoolExecutor(max_workers=per_model_conc * len(available)) as pool:
+        futures = [pool.submit(_ocr_one, idx, img, mk)
+                   for idx, img, mk in flat_tasks]
         try:
             for future in as_completed(futures, timeout=overall_timeout):
                 try:
-                    results.update(future.result())
+                    idx, res = future.result()
+                    results[idx] = res
                 except Exception as e:
-                    log.warning(f"  [batch] {futures[future]} 异常: {e}")
+                    log.warning(f"  [batch] 单页 OCR 异常: {e}")
         except TimeoutError:
             log.warning(f"  [batch] 整体超时 ({overall_timeout}s)")
 

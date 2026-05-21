@@ -32,7 +32,9 @@
   "retry": {
     "max_attempts": 2,
     "backoff_seconds": 3,
-    "timeout_seconds": 120
+    "timeout_seconds": 120,
+    "_per_model_concurrency_comment": "单个视觉模型的并发请求上限。总并发 = 本值 × 可用模型数。大 PDF(数百页)提速主要靠它;若触发限流(429)可调小。",
+    "per_model_concurrency": 4
   },
 
   "render_dpi": 300,
