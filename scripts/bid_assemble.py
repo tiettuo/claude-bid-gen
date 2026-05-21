@@ -459,26 +459,13 @@ def _apply_format_set(fmt: dict, fs: dict, log) -> dict:
     return fmt
 
 
-def parse_format_rules(rules_path: Path, log: logging.Logger) -> dict:
-    """从 disqualification_rules.md 解析格式要求
+def _normalize_rule_param_keys(params: dict, log: logging.Logger) -> None:
+    """把招标 yaml 的通俗键名/正向布尔归一到脚本内部键名(就地修改 params)。
 
-    优先级：结构化参数块（```key: value```）> 文本模糊匹配 > 默认值
+    ① 别名映射(font_family→font_name_cn 等);② 语义翻转(page_numbers:false
+    → no_page_numbers:true,脚本内部统一用 no_* 反向布尔)。
+    P3.3 从 parse_format_rules 抽出,行为不变。
     """
-    fmt = DEFAULT_FORMAT.copy()
-    specified = set()  # 由规则显式指定的 key，软层不得覆盖
-    if not rules_path.exists():
-        log.warning(f"废标条款文件不存在: {rules_path}，使用默认格式")
-        fmt["_specified_keys"] = specified
-        return fmt
-
-    log.info(f"读取废标条款: {rules_path}")
-    text = rules_path.read_text(encoding="utf-8")
-
-    # ─── 第一轮：结构化参数块（权威来源） ─────────────────────
-    params = _parse_structured_block(text)
-    if params:
-        log.info(f"  解析到结构化参数 {len(params)} 项: {list(params.keys())}")
-
     # YAML 别名映射：招标 rules 常用通俗键名，这里统一映射到脚本内部键
     _ALIASES = {
         "font_family": "font_name_cn",
@@ -542,6 +529,29 @@ def parse_format_rules(rules_path: Path, log: logging.Logger) -> dict:
         v = str(params["company_identity"]).strip().lower()
         if v in ("forbidden", "禁止", "no", "false"):
             params["no_company_info"] = True
+
+
+def parse_format_rules(rules_path: Path, log: logging.Logger) -> dict:
+    """从 disqualification_rules.md 解析格式要求
+
+    优先级：结构化参数块（```key: value```）> 文本模糊匹配 > 默认值
+    """
+    fmt = DEFAULT_FORMAT.copy()
+    specified = set()  # 由规则显式指定的 key，软层不得覆盖
+    if not rules_path.exists():
+        log.warning(f"废标条款文件不存在: {rules_path}，使用默认格式")
+        fmt["_specified_keys"] = specified
+        return fmt
+
+    log.info(f"读取废标条款: {rules_path}")
+    text = rules_path.read_text(encoding="utf-8")
+
+    # ─── 第一轮：结构化参数块（权威来源） ─────────────────────
+    params = _parse_structured_block(text)
+    if params:
+        log.info(f"  解析到结构化参数 {len(params)} 项: {list(params.keys())}")
+
+    _normalize_rule_param_keys(params, log)
 
     bool_keys = ("blind_bid", "no_color", "no_cover", "no_page_numbers", "no_company_info",
                  "header_disabled", "footer_page_number", "page_number_restart_after_toc",

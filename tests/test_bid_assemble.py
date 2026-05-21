@@ -89,3 +89,49 @@ def test_apply_format_set_overrides():
         {"font_name_cn": "仿宋", "keep": 1}, {"font_name_cn": "楷体"}, _LOG)
     assert out["font_name_cn"] == "楷体"
     assert out["keep"] == 1
+
+
+# ─── _normalize_rule_param_keys (P3.3 抽出) ─────────────────────
+def test_normalize_rule_param_keys_alias():
+    """通俗键名映射到脚本内部键名。"""
+    params = {"font_chinese": "仿宋", "heading_h1_size_pt": "16", "page_hard_cap": "400"}
+    A._normalize_rule_param_keys(params, _LOG)
+    assert params["font_name_cn"] == "仿宋"
+    assert params["font_size_h1"] == "16"
+    assert params["max_pages"] == "400"
+
+
+def test_normalize_rule_param_keys_semantic_flip():
+    """正向布尔翻转成脚本内部 no_* 反向布尔。"""
+    params = {"page_numbers": "false", "cover_page": "false", "color_allowed": "false"}
+    A._normalize_rule_param_keys(params, _LOG)
+    assert params["no_page_numbers"] is True
+    assert params["no_cover"] is True
+    assert params["no_color"] is True
+
+
+# ─── parse_format_rules 端到端(特征化)────────────────────────────
+def test_parse_format_rules_end_to_end(tmp_path):
+    rules = tmp_path / "disqualification_rules.md"
+    rules.write_text(
+        "## 排版格式硬约束\n```yaml\nformat:\n"
+        "  body_size_pt: 14\n  font_chinese: 仿宋\n  line_spacing_value: 1.5\n"
+        "  heading_h1_size_pt: 16\n  page_numbers: false\n  cover_page: false\n"
+        "  page_hard_cap: 400\n  blind_bid: false\n```\n",
+        encoding="utf-8")
+    fmt = A.parse_format_rules(rules, _LOG)
+    assert fmt["font_name_cn"] == "仿宋"
+    assert fmt["font_size_body"] == 14.0
+    assert fmt["font_size_h1"] == 16.0
+    assert fmt["line_spacing"] == 1.5
+    assert fmt["max_pages"] == 400
+    assert fmt["no_cover"] is True
+    assert fmt["no_page_numbers"] is True
+    assert fmt["blind_bid"] is False
+
+
+def test_parse_format_rules_missing_file_defaults(tmp_path):
+    """规则文件不存在 → 返回默认格式,不崩。"""
+    fmt = A.parse_format_rules(tmp_path / "不存在.md", _LOG)
+    assert isinstance(fmt, dict)
+    assert "font_size_body" in fmt

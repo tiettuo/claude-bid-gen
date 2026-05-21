@@ -914,24 +914,265 @@ def _wrap_text(text: str, max_chars: int) -> str:
     return "\n".join(text[i:i + max_chars] for i in range(0, len(text), max_chars))
 
 
+def _sl_draw_fence(ax, tpl, line_w):
+    """围墙。"""
+    fence_pts = tpl.get("fence", [])
+    if fence_pts:
+        xs = [p[0] for p in fence_pts]
+        ys = [p[1] for p in fence_pts]
+        ax.plot(xs, ys, color="black", linewidth=line_w + 1.0,
+                linestyle="-", solid_capstyle="round", zorder=2)
+
+
+def _sl_draw_zones(ax, tpl, zones_data, line_w, fs_off):
+    """各功能区设施格子。返回实际用到的 zone 名(供图例)。"""
+    from matplotlib.patches import Rectangle
+    used_zones: list[str] = []
+    for zone_name, zone_rect in tpl["zones"].items():
+        items = zones_data.get(zone_name, [])
+        if not items:
+            continue
+        used_zones.append(zone_name)
+        zx, zy, zw, zh = zone_rect["x"], zone_rect["y"], zone_rect["w"], zone_rect["h"]
+        n = len(items)
+        bg = Rectangle((zx, zy), zw, zh, linewidth=line_w * 0.8,
+                       edgecolor="#666666", facecolor="white",
+                       hatch=_ZONE_HATCHES.get(zone_name, ""),
+                       zorder=1)
+        ax.add_patch(bg)
+        sub_w = zw / max(n, 1)
+        for i, item_label in enumerate(items):
+            ix = zx + i * sub_w + 0.5
+            iw = sub_w - 1
+            iy = zy + 0.5
+            ih = zh - 1
+            r = Rectangle((ix, iy), iw, ih, linewidth=line_w,
+                          edgecolor="black", facecolor="white", zorder=2)
+            ax.add_patch(r)
+            wrap_chars = max(2, int(iw / 1.6))
+            wrapped = _wrap_text(str(item_label), wrap_chars)
+            ax.text(ix + iw / 2, iy + ih / 2, wrapped,
+                    ha="center", va="center", fontsize=7 + fs_off, zorder=3)
+    return used_zones
+
+
+def _sl_draw_main_building(ax, tpl, data, line_w, fs_off):
+    """主体建筑(名称 + 副信息)。"""
+    from matplotlib.patches import Rectangle
+    b = tpl["building"]
+    main_label = data.get("main_building", "主体建筑")
+    main_area = data.get("main_building_area") or data.get("main_area") or ""
+    main_type = data.get("main_building_type") or data.get("main_type") or ""
+    rect = Rectangle((b["x"], b["y"]), b["w"], b["h"], linewidth=line_w + 1.2,
+                     edgecolor="black", facecolor="#DDDDDD", zorder=4)
+    ax.add_patch(rect)
+    cy_text = b["y"] + b["h"] / 2
+    if main_type or main_area:
+        ax.text(b["x"] + b["w"] / 2, cy_text + 2.5, main_label,
+                ha="center", va="center", fontsize=10 + fs_off,
+                fontweight="bold", zorder=5)
+        sub = " ".join(s for s in (main_type, main_area) if s)
+        ax.text(b["x"] + b["w"] / 2, cy_text - 2.5, sub,
+                ha="center", va="center", fontsize=8 + fs_off, zorder=5)
+    else:
+        ax.text(b["x"] + b["w"] / 2, cy_text, main_label,
+                ha="center", va="center", fontsize=10 + fs_off,
+                fontweight="bold", zorder=5)
+
+
+def _sl_draw_road(ax, tpl, line_w):
+    """施工道路(双线硬化路面)。"""
+    road = tpl.get("road_spine", [])
+    if road:
+        rx = [p[0] for p in road]
+        ry = [p[1] for p in road]
+        ax.plot(rx, ry, color="black", linewidth=line_w * 4, alpha=0.15, zorder=1)
+        ax.plot(rx, ry, color="black", linewidth=line_w * 0.5,
+                linestyle="--", zorder=2, dashes=(4, 3))
+
+
+def _sl_draw_gate(ax, tpl, line_w, fs_off):
+    """大门(围墙缺口 + 门柱)。"""
+    from matplotlib.patches import Rectangle
+    gt = tpl.get("gate", {})
+    if gt:
+        gx, gy, gw, gh = gt["x"], gt["y"], gt["w"], gt["h"]
+        ax.add_patch(Rectangle((gx, gy - 0.3), gw, gh + 0.6,
+                               linewidth=0, edgecolor="none",
+                               facecolor="white", zorder=3))
+        ax.plot([gx, gx], [gy, gy + gh], color="black",
+                linewidth=line_w + 0.8, zorder=4)
+        ax.plot([gx + gw, gx + gw], [gy, gy + gh], color="black",
+                linewidth=line_w + 0.8, zorder=4)
+        ax.text(gx + gw / 2, gy + gh + 1.5, "施工大门",
+                ha="center", va="bottom", fontsize=7 + fs_off,
+                fontweight="bold", zorder=4)
+
+
+def _sl_draw_cranes(ax, tpl, cranes, line_w, fs_off):
+    """塔吊/汽车吊本体 + 回转半径警戒圈。"""
+    from matplotlib.patches import Circle
+    n_cranes = len(cranes)
+    for idx, cr in enumerate(cranes):
+        pos_hint = str(cr.get("position", "northeast_of_building"))
+        bld = tpl["building"]
+        cx = bld["x"] + bld["w"] * 0.75
+        cy = bld["y"] + bld["h"] * 0.65
+        if "northwest" in pos_hint:
+            cx = bld["x"] + bld["w"] * 0.25
+            cy = bld["y"] + bld["h"] * 0.65
+        elif "southeast" in pos_hint:
+            cx = bld["x"] + bld["w"] * 0.75
+            cy = bld["y"] + bld["h"] * 0.35
+        elif "southwest" in pos_hint:
+            cx = bld["x"] + bld["w"] * 0.25
+            cy = bld["y"] + bld["h"] * 0.35
+        elif "south" in pos_hint:
+            cy = bld["y"] + bld["h"] * 0.3
+        if n_cranes > 1:
+            cx += (idx - (n_cranes - 1) / 2) * 6
+        radius = cr.get("radius", 16)
+        circle = Circle((cx, cy), radius, fill=False, edgecolor="black",
+                        linewidth=line_w, linestyle="--", zorder=3)
+        ax.add_patch(circle)
+        ax.add_patch(Circle((cx, cy), 1.5, facecolor="black",
+                            edgecolor="black", zorder=5))
+        ax.plot([cx - 2.5, cx + 2.5], [cy, cy], color="black",
+                linewidth=line_w + 0.5, zorder=5)
+        ax.plot([cx, cx], [cy - 2.5, cy + 2.5], color="black",
+                linewidth=line_w + 0.5, zorder=5)
+        label = cr.get("label", "塔吊")
+        ax.text(cx + 3, cy - 1, label, ha="left", va="top",
+                fontsize=7 + fs_off, fontweight="bold", zorder=5)
+
+
+def _sl_draw_compass(ax, line_w, fs_off):
+    """指北针(右上角,带圆环)。"""
+    from matplotlib.patches import Circle, Polygon
+    n_cx, n_cy, n_r = 93, 80, 4
+    ax.add_patch(Circle((n_cx, n_cy), n_r, fill=False,
+                        edgecolor="black", linewidth=line_w + 0.3, zorder=4))
+    arrow = Polygon([(n_cx, n_cy + n_r - 0.5), (n_cx - 1.2, n_cy),
+                     (n_cx + 1.2, n_cy)],
+                    closed=True, facecolor="black", edgecolor="black", zorder=5)
+    ax.add_patch(arrow)
+    arrow_s = Polygon([(n_cx, n_cy - n_r + 0.5), (n_cx - 1.2, n_cy),
+                       (n_cx + 1.2, n_cy)],
+                      closed=True, facecolor="white", edgecolor="black", zorder=5)
+    ax.add_patch(arrow_s)
+    ax.text(n_cx, n_cy + n_r + 0.8, "N", ha="center", va="bottom",
+            fontsize=10 + fs_off, fontweight="bold", zorder=5)
+
+
+def _sl_draw_scale_bar(ax, scale_str, line_w, fs_off):
+    """比例尺(底部横向通道)。"""
+    from matplotlib.patches import Rectangle
+    sx0, sy0 = 38, -2.6
+    seg = 5
+    for i in range(4):
+        x0 = sx0 + i * seg
+        ax.add_patch(Rectangle((x0, sy0), seg, 0.7,
+                               linewidth=line_w * 0.8,
+                               edgecolor="black",
+                               facecolor="black" if i % 2 == 0 else "white",
+                               zorder=4))
+    for i in range(5):
+        x0 = sx0 + i * seg
+        ax.plot([x0, x0], [sy0 - 0.3, sy0 + 1.0], color="black",
+                linewidth=line_w * 0.6, zorder=5)
+    try:
+        ratio = int(str(scale_str).split(":")[1]) if ":" in scale_str else 200
+    except (ValueError, IndexError):
+        ratio = 200
+    step_m = max(1, int(seg * ratio / 100))
+    for i in range(5):
+        ax.text(sx0 + i * seg, sy0 + 1.2, f"{i * step_m}m",
+                ha="center", va="bottom", fontsize=6 + fs_off, zorder=5)
+    ax.text(sx0 - 1.5, sy0 + 0.35, f"比例尺  {scale_str}",
+            ha="right", va="center", fontsize=7 + fs_off,
+            fontweight="bold", zorder=5)
+
+
+def _sl_draw_legend(ax, used_zones, line_w, fs_off):
+    """图例框(左下)。"""
+    from matplotlib.patches import Rectangle
+    if not used_zones:
+        return
+    leg_x, leg_y = 2, -16
+    leg_w, leg_h = 32, 11
+    ax.add_patch(Rectangle((leg_x, leg_y), leg_w, leg_h,
+                           linewidth=line_w + 0.3,
+                           edgecolor="black",
+                           facecolor="white", zorder=3))
+    ax.text(leg_x + leg_w / 2, leg_y + leg_h - 0.8, "图  例",
+            ha="center", va="top", fontsize=8 + fs_off,
+            fontweight="bold", zorder=4)
+    item_h = (leg_h - 2.5) / max(len(used_zones), 1)
+    for i, zn in enumerate(used_zones):
+        ix = leg_x + 1.5
+        iy = leg_y + leg_h - 2.5 - (i + 0.7) * item_h
+        ax.add_patch(Rectangle((ix, iy), 4, item_h * 0.6,
+                               linewidth=line_w * 0.7,
+                               edgecolor="black", facecolor="white",
+                               hatch=_ZONE_HATCHES.get(zn, ""),
+                               zorder=4))
+        label = _ZONE_NAMES_CN.get(zn, zn)
+        ax.text(ix + 5, iy + item_h * 0.3, label,
+                ha="left", va="center", fontsize=7 + fs_off, zorder=4)
+
+
+def _sl_draw_title_block(ax, data, title, scale_str, line_w, fs_off):
+    """图签栏(右下:图名/比例/图号/日期)。"""
+    from matplotlib.patches import Rectangle
+    sig_x, sig_y = 60, -16
+    sig_w, sig_h = 38, 11
+    ax.add_patch(Rectangle((sig_x, sig_y), sig_w, sig_h,
+                           linewidth=line_w + 0.5,
+                           edgecolor="black", facecolor="white", zorder=3))
+    drawing_name = str(data.get("drawing_name")
+                       or data.get("title")
+                       or title
+                       or "施工总平面布置图")
+    drawing_no = str(data.get("drawing_no") or "PJ-S-01")
+    drawn_date = str(data.get("date")
+                     or data.get("drawn_date")
+                     or datetime.now().strftime("%Y-%m"))
+    rows = [
+        ("图  名", drawing_name),
+        ("比  例", scale_str),
+        ("图  号", drawing_no),
+        ("绘制日期", drawn_date),
+    ]
+    row_h = sig_h / len(rows)
+    for i, (k, v) in enumerate(rows):
+        y_top = sig_y + sig_h - i * row_h
+        if i > 0:
+            ax.plot([sig_x, sig_x + sig_w], [y_top, y_top],
+                    color="black", linewidth=line_w * 0.6, zorder=4)
+        col_split = sig_x + sig_w * 0.28
+        if i == 0:
+            ax.plot([col_split, col_split], [sig_y, sig_y + sig_h],
+                    color="black", linewidth=line_w * 0.6, zorder=4)
+        ax.text(sig_x + sig_w * 0.14, y_top - row_h / 2, k,
+                ha="center", va="center", fontsize=7 + fs_off, zorder=4)
+        max_chars = 18
+        v_show = v if len(v) <= max_chars else v[: max_chars - 1] + "…"
+        ax.text(col_split + (sig_x + sig_w - col_split) / 2,
+                y_top - row_h / 2, v_show,
+                ha="center", va="center", fontsize=7 + fs_off, zorder=4)
+
+
 def render_site_layout(data: dict, out_png: Path, title: str,
                        log: logging.Logger, style: dict | None = None) -> bool:
     """把 site_layout JSON 渲染成专业施工总平面布置图 PNG。
 
-    新版要素(2026-05-04 升级):
-    - 图签栏(右下):图名/比例/图号/日期
-    - 图例框(左下):4 种填充图案对应北/南/东/西区
-    - 比例尺(底部中央)
-    - 指北针(右上,带圆环)
-    - 主建筑显示名称 + 面积(若提供)
-    - 设施名按格子尺寸自动换行,不溢出
-    - 围墙加粗 + 大门用缺口标识
+    绘图按阶段拆到 _sl_draw_* helper(P3.3 重构,行为不变):
+    围墙→功能区→主建筑→道路→大门→塔吊→指北针→比例尺→图例→图签栏。
     """
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        from matplotlib.patches import Rectangle, Circle, Polygon
     except ImportError:
         log.error("matplotlib 未安装")
         return False
@@ -961,256 +1202,19 @@ def render_site_layout(data: dict, out_png: Path, title: str,
         ax.text(50, 94, title, ha="center", va="top",
                 fontsize=12 + fs_off, fontweight="bold")
 
-    # ── 围墙 ────────────────────────────────────────
-    fence_pts = tpl.get("fence", [])
-    if fence_pts:
-        xs = [p[0] for p in fence_pts]
-        ys = [p[1] for p in fence_pts]
-        ax.plot(xs, ys, color="black", linewidth=line_w + 1.0,
-                linestyle="-", solid_capstyle="round", zorder=2)
-
-    # ── 各功能区设施(先画区,再画建筑) ─────────────
-    zones_data = data.get("zones") or {}
-    used_zones: list[str] = []  # 用于图例,顺序保留
-
-    for zone_name, zone_rect in tpl["zones"].items():
-        items = zones_data.get(zone_name, [])
-        if not items:
-            continue
-        used_zones.append(zone_name)
-        zx, zy, zw, zh = zone_rect["x"], zone_rect["y"], zone_rect["w"], zone_rect["h"]
-        n = len(items)
-
-        # 整个 zone 用统一填充图案做背景(图例对应)
-        bg = Rectangle((zx, zy), zw, zh, linewidth=line_w * 0.8,
-                       edgecolor="#666666", facecolor="white",
-                       hatch=_ZONE_HATCHES.get(zone_name, ""),
-                       zorder=1)
-        ax.add_patch(bg)
-
-        # 切格子放设施名
-        sub_w = zw / max(n, 1)
-        for i, item_label in enumerate(items):
-            ix = zx + i * sub_w + 0.5
-            iw = sub_w - 1
-            iy = zy + 0.5
-            ih = zh - 1
-            r = Rectangle((ix, iy), iw, ih, linewidth=line_w,
-                          edgecolor="black", facecolor="white", zorder=2)
-            ax.add_patch(r)
-            # 文字按格子宽度自动换行(中文每字 ~1.0 单位宽)
-            wrap_chars = max(2, int(iw / 1.6))
-            wrapped = _wrap_text(str(item_label), wrap_chars)
-            ax.text(ix + iw / 2, iy + ih / 2, wrapped,
-                    ha="center", va="center", fontsize=7 + fs_off, zorder=3)
-
-    # ── 主体建筑 ────────────────────────────────────
-    b = tpl["building"]
-    main_label = data.get("main_building", "主体建筑")
-    main_area = data.get("main_building_area") or data.get("main_area") or ""
-    main_type = data.get("main_building_type") or data.get("main_type") or ""
-
-    rect = Rectangle((b["x"], b["y"]), b["w"], b["h"], linewidth=line_w + 1.2,
-                     edgecolor="black", facecolor="#DDDDDD", zorder=4)
-    ax.add_patch(rect)
-
-    # 主建筑文字(主名 + 副信息)
-    cy_text = b["y"] + b["h"] / 2
-    if main_type or main_area:
-        ax.text(b["x"] + b["w"] / 2, cy_text + 2.5, main_label,
-                ha="center", va="center", fontsize=10 + fs_off,
-                fontweight="bold", zorder=5)
-        sub = " ".join(s for s in (main_type, main_area) if s)
-        ax.text(b["x"] + b["w"] / 2, cy_text - 2.5, sub,
-                ha="center", va="center", fontsize=8 + fs_off, zorder=5)
-    else:
-        ax.text(b["x"] + b["w"] / 2, cy_text, main_label,
-                ha="center", va="center", fontsize=10 + fs_off,
-                fontweight="bold", zorder=5)
-
-    # ── 施工道路 ────────────────────────────────────
-    road = tpl.get("road_spine", [])
-    if road:
-        rx = [p[0] for p in road]
-        ry = [p[1] for p in road]
-        # 双线表达硬化路面
-        ax.plot(rx, ry, color="black", linewidth=line_w * 4, alpha=0.15, zorder=1)
-        ax.plot(rx, ry, color="black", linewidth=line_w * 0.5,
-                linestyle="--", zorder=2, dashes=(4, 3))
-
-    # ── 大门(用围墙缺口 + 折线表达) ────────────────
-    gt = tpl.get("gate", {})
-    if gt:
-        gx, gy, gw, gh = gt["x"], gt["y"], gt["w"], gt["h"]
-        # 用白色矩形遮挡围墙(模拟开口)
-        ax.add_patch(Rectangle((gx, gy - 0.3), gw, gh + 0.6,
-                               linewidth=0, edgecolor="none",
-                               facecolor="white", zorder=3))
-        # 两侧门柱
-        ax.plot([gx, gx], [gy, gy + gh], color="black",
-                linewidth=line_w + 0.8, zorder=4)
-        ax.plot([gx + gw, gx + gw], [gy, gy + gh], color="black",
-                linewidth=line_w + 0.8, zorder=4)
-        # 门标识
-        ax.text(gx + gw / 2, gy + gh + 1.5, "施工大门",
-                ha="center", va="bottom", fontsize=7 + fs_off,
-                fontweight="bold", zorder=4)
-
-    # ── 塔吊/汽车吊回转半径 ───────────────────────
-    cranes = data.get("cranes") or []
-    n_cranes = len(cranes)
-    for idx, cr in enumerate(cranes):
-        pos_hint = str(cr.get("position", "northeast_of_building"))
-        bld = tpl["building"]
-        # 默认放在主建筑内部偏上,这样回转圈不会冲出北区设施
-        cx = bld["x"] + bld["w"] * 0.75
-        cy = bld["y"] + bld["h"] * 0.65
-        if "northwest" in pos_hint:
-            cx = bld["x"] + bld["w"] * 0.25
-            cy = bld["y"] + bld["h"] * 0.65
-        elif "southeast" in pos_hint:
-            cx = bld["x"] + bld["w"] * 0.75
-            cy = bld["y"] + bld["h"] * 0.35
-        elif "southwest" in pos_hint:
-            cx = bld["x"] + bld["w"] * 0.25
-            cy = bld["y"] + bld["h"] * 0.35
-        elif "south" in pos_hint:
-            cy = bld["y"] + bld["h"] * 0.3
-        if n_cranes > 1:
-            cx += (idx - (n_cranes - 1) / 2) * 6
-        radius = cr.get("radius", 16)
-        # 回转半径警戒圈
-        circle = Circle((cx, cy), radius, fill=False, edgecolor="black",
-                        linewidth=line_w, linestyle="--", zorder=3)
-        ax.add_patch(circle)
-        # 塔吊本体(小圆+十字)
-        ax.add_patch(Circle((cx, cy), 1.5, facecolor="black",
-                            edgecolor="black", zorder=5))
-        ax.plot([cx - 2.5, cx + 2.5], [cy, cy], color="black",
-                linewidth=line_w + 0.5, zorder=5)
-        ax.plot([cx, cx], [cy - 2.5, cy + 2.5], color="black",
-                linewidth=line_w + 0.5, zorder=5)
-        # 标签放塔吊本体右下,贴近主建筑内,避免穿到北区
-        label = cr.get("label", "塔吊")
-        ax.text(cx + 3, cy - 1, label, ha="left", va="top",
-                fontsize=7 + fs_off, fontweight="bold", zorder=5)
-
-    # ── 指北针(右上角,带圆环) ───────────────────
-    n_cx, n_cy, n_r = 93, 80, 4
-    ax.add_patch(Circle((n_cx, n_cy), n_r, fill=False,
-                        edgecolor="black", linewidth=line_w + 0.3, zorder=4))
-    # N 箭头(实心三角)
-    arrow = Polygon([(n_cx, n_cy + n_r - 0.5), (n_cx - 1.2, n_cy),
-                     (n_cx + 1.2, n_cy)],
-                    closed=True, facecolor="black", edgecolor="black", zorder=5)
-    ax.add_patch(arrow)
-    # S 端用空心三角
-    arrow_s = Polygon([(n_cx, n_cy - n_r + 0.5), (n_cx - 1.2, n_cy),
-                       (n_cx + 1.2, n_cy)],
-                      closed=True, facecolor="white", edgecolor="black", zorder=5)
-    ax.add_patch(arrow_s)
-    ax.text(n_cx, n_cy + n_r + 0.8, "N", ha="center", va="bottom",
-            fontsize=10 + fs_off, fontweight="bold", zorder=5)
-
-    # ── 比例尺(图例与图签上方的横向通道 y=-4~-1) ─────────
     scale_str = str(data.get("scale") or "1:200")
-    sx0, sy0 = 38, -2.6  # 标尺主体 y=-2.6 高 0.7
-    seg = 5  # 单段图上长度
-    for i in range(4):
-        x0 = sx0 + i * seg
-        ax.add_patch(Rectangle((x0, sy0), seg, 0.7,
-                               linewidth=line_w * 0.8,
-                               edgecolor="black",
-                               facecolor="black" if i % 2 == 0 else "white",
-                               zorder=4))
-    # 比例尺刻度小竖线
-    for i in range(5):
-        x0 = sx0 + i * seg
-        ax.plot([x0, x0], [sy0 - 0.3, sy0 + 1.0], color="black",
-                linewidth=line_w * 0.6, zorder=5)
-    # 刻度值
-    try:
-        ratio = int(str(scale_str).split(":")[1]) if ":" in scale_str else 200
-    except (ValueError, IndexError):
-        ratio = 200
-    step_m = max(1, int(seg * ratio / 100))
-    for i in range(5):
-        ax.text(sx0 + i * seg, sy0 + 1.2, f"{i * step_m}m",
-                ha="center", va="bottom", fontsize=6 + fs_off, zorder=5)
-    # 比例尺标题放在标尺左侧(避免遮挡刻度数字)
-    ax.text(sx0 - 1.5, sy0 + 0.35, f"比例尺  {scale_str}",
-            ha="right", va="center", fontsize=7 + fs_off,
-            fontweight="bold", zorder=5)
+    cranes = data.get("cranes") or []
 
-    # ── 图例框(左下) ──────────────────────────
-    if used_zones:
-        leg_x, leg_y = 2, -16
-        leg_w, leg_h = 32, 11
-        ax.add_patch(Rectangle((leg_x, leg_y), leg_w, leg_h,
-                               linewidth=line_w + 0.3,
-                               edgecolor="black",
-                               facecolor="white", zorder=3))
-        ax.text(leg_x + leg_w / 2, leg_y + leg_h - 0.8, "图  例",
-                ha="center", va="top", fontsize=8 + fs_off,
-                fontweight="bold", zorder=4)
-        # 内部条目
-        item_h = (leg_h - 2.5) / max(len(used_zones), 1)
-        for i, zn in enumerate(used_zones):
-            ix = leg_x + 1.5
-            iy = leg_y + leg_h - 2.5 - (i + 0.7) * item_h
-            # 填充示意小方块
-            ax.add_patch(Rectangle((ix, iy), 4, item_h * 0.6,
-                                   linewidth=line_w * 0.7,
-                                   edgecolor="black", facecolor="white",
-                                   hatch=_ZONE_HATCHES.get(zn, ""),
-                                   zorder=4))
-            label = _ZONE_NAMES_CN.get(zn, zn)
-            ax.text(ix + 5, iy + item_h * 0.3, label,
-                    ha="left", va="center", fontsize=7 + fs_off, zorder=4)
-
-    # ── 图签栏(右下) ──────────────────────────
-    sig_x, sig_y = 60, -16
-    sig_w, sig_h = 38, 11
-    ax.add_patch(Rectangle((sig_x, sig_y), sig_w, sig_h,
-                           linewidth=line_w + 0.5,
-                           edgecolor="black", facecolor="white", zorder=3))
-
-    # 内部分行
-    drawing_name = str(data.get("drawing_name")
-                       or data.get("title")
-                       or title
-                       or "施工总平面布置图")
-    drawing_no = str(data.get("drawing_no") or "PJ-S-01")
-    drawn_date = str(data.get("date")
-                     or data.get("drawn_date")
-                     or datetime.now().strftime("%Y-%m"))
-    rows = [
-        ("图  名", drawing_name),
-        ("比  例", scale_str),
-        ("图  号", drawing_no),
-        ("绘制日期", drawn_date),
-    ]
-    row_h = sig_h / len(rows)
-    for i, (k, v) in enumerate(rows):
-        y_top = sig_y + sig_h - i * row_h
-        # 行分隔线
-        if i > 0:
-            ax.plot([sig_x, sig_x + sig_w], [y_top, y_top],
-                    color="black", linewidth=line_w * 0.6, zorder=4)
-        # 列分隔线(键|值约 1:3)
-        col_split = sig_x + sig_w * 0.28
-        if i == 0:
-            ax.plot([col_split, col_split], [sig_y, sig_y + sig_h],
-                    color="black", linewidth=line_w * 0.6, zorder=4)
-        # 键
-        ax.text(sig_x + sig_w * 0.14, y_top - row_h / 2, k,
-                ha="center", va="center", fontsize=7 + fs_off, zorder=4)
-        # 值
-        max_chars = 18
-        v_show = v if len(v) <= max_chars else v[: max_chars - 1] + "…"
-        ax.text(col_split + (sig_x + sig_w - col_split) / 2,
-                y_top - row_h / 2, v_show,
-                ha="center", va="center", fontsize=7 + fs_off, zorder=4)
+    _sl_draw_fence(ax, tpl, line_w)
+    used_zones = _sl_draw_zones(ax, tpl, data.get("zones") or {}, line_w, fs_off)
+    _sl_draw_main_building(ax, tpl, data, line_w, fs_off)
+    _sl_draw_road(ax, tpl, line_w)
+    _sl_draw_gate(ax, tpl, line_w, fs_off)
+    _sl_draw_cranes(ax, tpl, cranes, line_w, fs_off)
+    _sl_draw_compass(ax, line_w, fs_off)
+    _sl_draw_scale_bar(ax, scale_str, line_w, fs_off)
+    _sl_draw_legend(ax, used_zones, line_w, fs_off)
+    _sl_draw_title_block(ax, data, title, scale_str, line_w, fs_off)
 
     plt.tight_layout()
     out_png.parent.mkdir(parents=True, exist_ok=True)
