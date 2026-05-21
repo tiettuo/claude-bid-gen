@@ -15,10 +15,11 @@ type: reference
 ## 总病根
 **流水线某步半失败时仍"成功"产出,且无自动化验证产出是否正确。** warn 不 fail + 无 schema 校验 + 无验证门 + 无测试,四层防线全缺 → bug 滑到交付前由人肉发现。
 
-## 分期路线(按 ROI)
-- **P0 验证门:** bid_run 加 `verify` 步,组装后硬核对(封面/三家字体行距页边距是否真不同/图表md5/页数≤顶/WARNING);format_set 未定义改 ERROR。
-- **P1 端到端缺口:** .XZZ 自动解包;format_sets 自动生成;rules 双轨改单一真源;Step-2 合成链入 STEPS。
-- **P2 速度:** PDF 页级 OCR 并行;增量提取(hash 跳过)。
-- **P3 质量地基:** charts/assemble/writer 补测试;LLM-JSON 规范 schema+校验;拆 god 函数。
+## 分期路线与进度(2026-05-21 当天全部推进)
+- **P0 验证门 ✅已落地:** 新增 bid_verify.py(组装后硬核对封面/三家排版差异/图表md5/页数/危险日志),bid_run 加 verify 步;format_set 未定义改 ERROR;Word 页数检查超时修复。
+- **P1 端到端缺口 ✅已落地:** .XZZ 自动解包;bid_rules_synthesize 生成 format_sets A-F;canonical_rules_path 把格式/暗标读 disqualification_rules.md 单一真源。(Step-2 合成链经核实 bid_run 已内联,无需补。)
+- **P2 速度 ✅已落地:** vision OCR 由 2 路并行提到每模型 N 路(per_model_concurrency);bid_extract 按文件 md5 增量提取(--force 全量)。硅基流动视觉模型试过、因太慢已撤。
+- **P3 质量地基 — P3.1+P3.2 ✅已落地:** charts/assemble/writer 补 44 特征化测试(原本零测试);新增 validate_chart_data 图表数据校验。
+  - **P3.3 拆 god 函数 ⬜未做(刻意推迟):** render_site_layout 304行 / parse_format_rules 305 / postprocess_docx 219 函数级无单测,直接拆有回归风险;正确做法=先写特征化测试再逐个抽 helper,留作专门一轮。
 
-详细实施计划见对话记录(2026-05-21,P0+P1 逐文件改动点)。关联 [[project_mozhugongka_chicken_farm_retro]]、[[feedback_verify_assembled_artifact]]。
+测试 70→124 passed。关联 [[project_mozhugongka_chicken_farm_retro]]、[[feedback_verify_assembled_artifact]]。
