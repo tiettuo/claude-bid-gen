@@ -19,7 +19,9 @@ type: reference
 - **P0 验证门 ✅已落地:** 新增 bid_verify.py(组装后硬核对封面/三家排版差异/图表md5/页数/危险日志),bid_run 加 verify 步;format_set 未定义改 ERROR;Word 页数检查超时修复。
 - **P1 端到端缺口 ✅已落地:** .XZZ 自动解包;bid_rules_synthesize 生成 format_sets A-F;canonical_rules_path 把格式/暗标读 disqualification_rules.md 单一真源。(Step-2 合成链经核实 bid_run 已内联,无需补。)
 - **P2 速度 ✅已落地:** vision OCR 由 2 路并行提到每模型 N 路(per_model_concurrency);bid_extract 按文件 md5 增量提取(--force 全量)。硅基流动视觉模型试过、因太慢已撤。
-- **P3 质量地基 — P3.1+P3.2 ✅已落地:** charts/assemble/writer 补 44 特征化测试(原本零测试);新增 validate_chart_data 图表数据校验。
-  - **P3.3 拆 god 函数 ⬜未做(刻意推迟):** render_site_layout 304行 / parse_format_rules 305 / postprocess_docx 219 函数级无单测,直接拆有回归风险;正确做法=先写特征化测试再逐个抽 helper,留作专门一轮。
+- **P3 质量地基 ✅已落地:**
+  - P3.1 charts/assemble/writer 补特征化测试(原本零测试);P3.2 新增 validate_chart_data 图表数据校验。
+  - P3.3 拆了两个最大 god 函数:render_site_layout 304行→55行编排+10个 _sl_draw_* helper(PNG md5 逐字节验证不变)、parse_format_rules 抽出 _normalize_rule_param_keys(输出 dict 逐字段验证不变)。
+  - **P3.3 余留 ⬜:** postprocess_docx 219 / _fit_images 192 / _postproc_normalize_tables 177 / bid_writer.main 215 仍是 god 函数;改 docx 对象、特征化需真实 docx 夹具,留作真正改到时顺手拆。
 
-测试 70→124 passed。关联 [[project_mozhugongka_chicken_farm_retro]]、[[feedback_verify_assembled_artifact]]。
+测试 70→128 passed。关联 [[project_mozhugongka_chicken_farm_retro]]、[[feedback_verify_assembled_artifact]]。
