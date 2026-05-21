@@ -22,9 +22,9 @@
       "model_name": "deepseek-v4-flash",
       "api_key_env": "DEEPSEEK_API_KEY",
       "max_tokens": 16000,
-      "output_char_cap": 12000,
+      "output_char_cap": 8000,
       "supports_openai_compat": true,
-      "notes": "1M context(够装整本招标),非推理模式;输入 $0.14/1M tokens;输出 $0.28/1M。提取/翻译场景专用（需吞整本招标）。"
+      "notes": "1M context(够装整本招标),非推理模式;输入 $0.14/1M tokens;输出 $0.28/1M。提取/翻译场景专用（需吞整本招标）。 [2026-05-20实测]单次约8200中文字,output_char_cap由12000校准为8000。"
     },
     "deepseek_chat": {
       "display_name": "DeepSeek-V3-Chat",

@@ -1,21 +1,31 @@
 #!/usr/bin/env python3
-"""bid_plan_variants.py — 为每个变体生成结构上真正不同的章节规划 + 图表分配。
+"""bid_plan_variants.py — 为每个变体生成差异化的「二级标题(子项)」规划。
 
-在 variants 步骤之后、write 步骤之前运行。读取共享的 chapter_plan.md(基准),
-为每个变体生成一份**结构独立**的章节规划:章节数量、标题、顺序、字数预算、
-子项分解都因变体而异 —— 用于多家单位投同一标时的反串标。
+在 variants 步骤之后、write 步骤之前运行。读共享的 chapter_plan.md(基准),
+为每个变体派生一份 chapter_plan_variant.md。
 
-反串标设计(中等档):
-  - 章节分两层:Tier A 评分锚定章(必保留,可改标题/顺序/预算)、
-    Tier B 自由章(可合并/拆分)
-  - 每变体按 section_order_seed 做确定性结构变换:合并/拆分自由章 →
-    章节数不同;同义池改章节标题;jitter 字数预算;子项数打破固定 offset
-  - 生成后 _verify_scoring_coverage 校验每个评分项仍有章节覆盖,缺则报错
+★ 核心思想(2026-05-20 重构):
+  ── 一级标题(章标题)──
+    所有变体**逐字沿用基准 chapter_plan.md 的章标题**(= 评标表/大纲原文),
+    绝不改写、不加前缀、不换同义词、不合并、不拆分、不重排。
+    评分制下评委按评标表逐项定位章节,改字面 = 主题缺失 = 丢分
+    (见 feedback_writer_h1_drift / feedback_bid_pass_fail_anchor)。
+
+  ── 二级标题(子项)──
+    由 LLM 读懂每章「评分标准」原文后,按**每个变体不同的切分维度**重新拟定:
+      V01 按流程时序、V02 按管理职能、V03 按对象/专业维度 …(维度池见 _DECOMP_STRATEGIES)
+    子项数量可不同,但每套都必须完整覆盖该章评分标准的全部要点。
+    这样 N 份方案二级结构天然不同,而一级标题全部对齐评标表、不丢分。
+
+  ── 反串标分工 ──
+    本脚本只管「二级标题差异化」;
+    编号体系差异 → bid_charts 的编号风格轮转(B/C/L…);
+    正文差异     → 写作模型 / 温度 / 数据指纹;
+    封面/排版/元数据差异 → bid_assemble。
 
 产出 V{XX}/:
-  1. chapter_plan_variant.md — 该变体完整章节规划(表格 + 子项分配),
-     格式与 chapter_plan.md 同构,可被 parse_chapter_plan / parse_plan_subitems 解析
-  2. chart_assignment.json — 图表类型分配
+  1. chapter_plan_variant.md — 该变体章节规划(章标题同基准,子项为本变体专属)
+  2. chart_assignment.json   — 图表类型分配
 
 用法: python bid_plan_variants.py <tender_dir> [--target-pages N]
 """
@@ -38,296 +48,123 @@ from bid_common import make_script_logger, parse_chapter_plan, parse_plan_subite
 from bid_llm_client import LLMClient
 
 
-# ── 章节标题同义池(按基准标题关键词匹配)────────────────────────────
-# Tier A 评分章的同义词必须保留主题关键词,确保评委能定位评分项。
-_TITLE_SYNONYMS: list[tuple[tuple[str, ...], list[str]]] = [
-    (("编制说明", "编制依据"),
-     ["编制说明及编制依据", "编制依据与总体说明", "编制总说明"]),
-    (("工程概况",),
-     ["工程概况", "项目概况与工程特点", "工程总体概况"]),
-    (("建设条件", "周边环境"),
-     ["建设条件与周边环境分析", "项目建设条件分析", "现场条件与环境分析"]),
-    (("施工部署",),
-     ["施工部署", "施工总体部署", "施工组织总体部署"]),
-    (("施工方案", "技术措施"),
-     ["施工方案与技术措施", "主要施工方案及技术措施", "施工技术方案与措施"]),
-    (("进度计划", "工期"),
-     ["施工进度计划及保证措施", "施工进度计划与工期保证措施", "工期计划及进度保证措施"]),
-    (("质量管理", "质量保证"),
-     ["质量管理体系与措施", "工程质量管理体系及保证措施", "质量保证体系与质量措施"]),
-    (("安全管理", "安全生产"),
-     ["安全管理体系与措施", "安全生产管理体系及措施", "施工安全保证体系与措施"]),
-    (("环保管理", "环境保护"),
-     ["环保管理体系与措施", "环境保护管理体系及措施", "施工环境保护体系与措施"]),
-    (("文明施工", "绿色施工"),
-     ["文明施工与绿色施工", "文明施工及绿色施工措施", "绿色文明施工管理措施"]),
-    (("劳动力", "机械设备"),
-     ["劳动力及机械设备投入计划", "人力与机械设备投入计划", "劳动力、机械设备配置计划"]),
-    (("管理措施", "综合管理"),
-     ["主要管理措施", "项目综合管理措施", "主要施工管理措施"]),
-    (("季节性", "季节施工"),
-     ["季节性施工措施", "季节性施工保证措施", "不利季节施工措施"]),
-    (("高原", "高海拔"),
-     ["高原施工专项方案", "高海拔施工专项措施", "高原特殊环境施工方案"]),
-    (("保修", "回访"),
-     ["工程竣工后的保修措施", "竣工保修及售后服务措施", "工程质量保修与回访措施"]),
-    (("附图", "附表"),
-     ["附图及附表", "施工图表及附表", "附图、附表汇编"]),
+# ── 子项切分维度池 ─────────────────────────────────────────────────
+# 每个变体按序号分到一种不同的切分逻辑,使 N 份方案二级结构天然分化。
+# (name, description) — description 直接写进 LLM prompt。
+_DECOMP_STRATEGIES: list[tuple[str, str]] = [
+    ("流程时序",
+     "按工作开展的全流程时间顺序切分:前期准备 → 组织实施 → 过程控制 → 检查验收 → "
+     "收尾完善;子项体现先后递进的工作链条。"),
+    ("管理职能",
+     "按管理职能与要素切分:组织机构与职责、制度与流程规范、过程质量控制、"
+     "资源保障、风险与应急;子项体现职能维度的分工。"),
+    ("对象专业",
+     "按工程对象 / 专业系统 / 设备类别等维度切分:分单体、分专业、分设备类别并列展开;"
+     "子项体现对象的并列划分。"),
+    ("要点对应",
+     "按评分标准的关键要点逐条对应切分:把评分标准里出现的每个关键词 / 要求各自独立成节,"
+     "确保对评分点逐条响应、不遗漏。"),
+    ("目标递进",
+     "按『目标定位 → 实施措施 → 资源与制度保障 → 检查考核 → 责任承诺』的递进逻辑切分。"),
+    ("问题导向",
+     "按『本项目特征与难点 → 针对性对策 → 实施与控制 → 效果保证』的问题—对策逻辑切分。"),
 ]
 
-# ── Tier B 自由章合并规则:(可被并入章关键词, 优先并入目标关键词)────
-_MERGE_RULES: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
-    (("文明施工", "绿色施工"), ("施工部署", "施工方案", "施工组织")),
-    (("季节性", "季节施工", "不利季节"), ("高原", "专项", "特殊环境")),
-    (("主要管理措施", "综合管理", "管理措施"), ("施工部署", "项目管理")),
-]
 
-# ── 自由章拆分规则:可拆章关键词 → 拆出标题列表 ──────────────────────
-_SPLIT_RULES: list[tuple[tuple[str, ...], list[str]]] = [
-    (("工程概况",), ["工程概况", "建设条件与周边环境分析"]),
-    (("施工部署",), ["施工部署", "施工资源组织与协调"]),
-]
-
-# 每变体目标章节数偏移(相对基准),保证 V01/V02/V03... 章节数确有差异
-_CHAPTER_COUNT_SPREAD = [0, -2, 2, -1, 1, -3, 3]
+def assign_strategy(variant_index: int) -> tuple[str, str]:
+    """按变体序号确定性分配切分维度,N 变体互不相同(N ≤ 维度池大小时无碰撞)。"""
+    return _DECOMP_STRATEGIES[int(variant_index) % len(_DECOMP_STRATEGIES)]
 
 
 # ── 工具 ──────────────────────────────────────────────────────────
 
 def _is_tier_a(ch: dict) -> bool:
-    """评分锚定章:评分项列非空(有 score_item 或 score>0)。"""
+    """评分锚定章:评分项列非空 或 score>0。"""
     si = (ch.get("score_item") or "").strip()
     return bool(si and si not in ("—", "-", "无")) or ch.get("score", 0) > 0
 
 
-def _slug(filename: str) -> str:
-    """从基准文件名取拼音 slug:'04_shigongfangan.md' → 'shigongfangan'。"""
-    stem = re.sub(r"\.md$", "", filename or "")
-    stem = re.sub(r"^\d+_", "", stem)
-    return stem or "zhang"
-
-
-def _pick_title(base_title: str, variant_index: int) -> str:
-    """从同义池为章节挑标题。
-
-    按 variant_index 旋转取词,保证同一章在 N 个变体里拿到**不同**同义词
-    (同义池 ≥ 变体数时无碰撞);offset 由章节标题稳定派生,使不同章节的
-    旋转相位错开。无匹配池则原样返回。
-    """
-    for keys, pool in _TITLE_SYNONYMS:
-        if any(k in base_title for k in keys):
-            offset = sum(ord(ch) for ch in base_title)
-            return pool[(offset + variant_index) % len(pool)]
-    return base_title
-
-
 def _est_pages(target_chars: int, chart_count: int) -> float:
-    """字数 + 图表估算页数(约 500 字/页,每图 0.4 页)。"""
-    return round(target_chars / 500.0 + chart_count * 0.4, 1)
+    """字数 + 图表估算页数(约 625 字/页[14pt 四号 1.5 倍],每图 0.4 页)。"""
+    return round(target_chars / 625.0 + chart_count * 0.4, 1)
 
 
-# ── 结构变换 ──────────────────────────────────────────────────────
+# ── 评分标准 / 项目背景加载 ────────────────────────────────────────
 
-def _new_chapter(base: dict) -> dict:
-    """从基准章节克隆一个可变换的工作副本,带 _scope(子项范围参考)。"""
-    return {
-        "title": base["title"],
-        "score_item": base.get("score_item", ""),
-        "score": base.get("score", 0),
-        "target_chars": int(base.get("target_chars", 2000)),
-        "chart_count": int(base.get("chart_count", 0)),
-        "subitem_count": int(base.get("subitem_count", 0)) or len(base.get("_subitems", [])),
-        "slug": _slug(base.get("filename", "")),
-        "tier": "A" if _is_tier_a(base) else "B",
-        "_scope": [s["title"] for s in base.get("_subitems", [])],
-    }
+def _load_criteria(extracted: Path, base_chapters: list[dict],
+                   log: logging.Logger) -> dict[str, str]:
+    """读 evaluation_method.json 的评分标准原文,按章序号映射 {num: criteria}。
 
-
-def _apply_merges(chapters: list[dict], need: int, rng: random.Random,
-                  log: logging.Logger) -> list[dict]:
-    """把 Tier B 章合并进相关章,减少 need 个章节。"""
-    done = 0
-    for src_keys, tgt_keys in _MERGE_RULES:
-        if done >= need:
-            break
-        src_idx = next(
-            (i for i, c in enumerate(chapters)
-             if c["tier"] == "B" and any(k in c["title"] for k in src_keys)),
-            None,
-        )
-        if src_idx is None:
-            continue
-        tgt_idx = next(
-            (i for i, c in enumerate(chapters)
-             if i != src_idx and any(k in c["title"] for k in tgt_keys)),
-            None,
-        )
-        if tgt_idx is None:
-            continue
-        src = chapters[src_idx]
-        tgt = chapters[tgt_idx]
-        tgt["target_chars"] += src["target_chars"]
-        tgt["chart_count"] += src["chart_count"]
-        tgt["_scope"] = tgt["_scope"] + src["_scope"]
-        tgt["subitem_count"] = max(tgt["subitem_count"], 3) + 2
-        log.info(f"    合并:「{src['title']}」并入「{tgt['title']}」")
-        chapters.pop(src_idx)
-        done += 1
-    if done < need:
-        log.info(f"    可用合并规则不足,实际合并 {done}/{need}")
-    return chapters
-
-
-def _apply_splits(chapters: list[dict], need: int, work_labels: list[str],
-                  rng: random.Random, log: logging.Logger) -> list[dict]:
-    """拆分章节,增加 need 个章节。优先拆自由章,其次按专业拆施工方案。"""
-    done = 0
-    # 1. Tier B 拆分规则
-    for split_keys, new_titles in _SPLIT_RULES:
-        if done >= need:
-            break
-        idx = next(
-            (i for i, c in enumerate(chapters)
-             if c["tier"] == "B" and any(k in c["title"] for k in split_keys)),
-            None,
-        )
-        if idx is None:
-            continue
-        chapters[idx:idx + 1] = _split_one(chapters[idx], new_titles)
-        log.info(f"    拆分:「{new_titles[0]}」拆出「{new_titles[1]}」")
-        done += 1
-    # 2. 施工方案按专业拆(Tier A,所有拆出章保留 score_item)
-    if done < need and len(work_labels) >= 3:
-        idx = next(
-            (i for i, c in enumerate(chapters)
-             if c["tier"] == "A" and "施工方案" in c["title"]
-             and c["subitem_count"] >= 6),
-            None,
-        )
-        if idx is not None:
-            profs = _profession_titles(work_labels)
-            if len(profs) >= 2:
-                chapters[idx:idx + 1] = _split_one(
-                    chapters[idx], profs, keep_score=True, keep_title=True)
-                log.info(f"    拆分:施工方案按专业拆为 {profs}")
-                done += len(profs) - 1
-    if done < need:
-        log.info(f"    可用拆分规则不足,实际拆分 {done}/{need}")
-    return chapters
-
-
-def _profession_titles(work_labels: list[str]) -> list[str]:
-    """从作业队标签生成 2~3 个专业施工方案章标题。"""
-    cleaned = []
-    seen = set()
-    for lbl in work_labels:
-        name = re.sub(r"(施工队|作业队|工区)$", "", lbl).split("-")[0].strip()
-        if name and name not in seen:
-            seen.add(name)
-            cleaned.append(name)
-    titles = [f"{n}施工方案与技术措施" for n in cleaned[:3]]
-    return titles if len(titles) >= 2 else []
-
-
-def _split_one(ch: dict, new_titles: list[str], keep_score: bool = False,
-               keep_title: bool = False) -> list[dict]:
-    """把一个章节拆成 len(new_titles) 个,平分预算/图表/子项范围。
-
-    keep_title=True 时拆出章标题不再走同义改写(用于已含专业前缀的标题)。
+    评分制下章节与 scoring_items 同序一一对应。缺失时返回空 dict,
+    decompose 会回退到基准子项作为内容参考。
     """
-    n = len(new_titles)
-    scope = ch["_scope"] or [ch["title"]]
-    out = []
-    for i, title in enumerate(new_titles):
-        seg = scope[i::n] or [title]
-        sub_n = max(3, ch["subitem_count"] // n + (1 if i == 0 else 0))
-        out.append({
-            "title": title,
-            "score_item": ch["score_item"] if (keep_score or i == 0) else "",
-            "score": ch["score"] if (keep_score or i == 0) else 0,
-            "target_chars": ch["target_chars"] // n,
-            "chart_count": ch["chart_count"] // n + (1 if i == 0 and ch["chart_count"] % n else 0),
-            "subitem_count": sub_n,
-            "slug": ch["slug"] + ("" if i == 0 else chr(ord("a") + i)),
-            "tier": ch["tier"],
-            "_scope": seg,
-            "_keep_title": keep_title,
-        })
+    em_path = extracted / "evaluation_method.json"
+    if not em_path.exists():
+        return {}
+    try:
+        em = json.loads(em_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        log.warning(f"evaluation_method.json 解析失败({e}),评分标准回退基准子项")
+        return {}
+    items = em.get("scoring_items", []) or []
+    out: dict[str, str] = {}
+    for ch, it in zip(base_chapters, items):
+        crit = (it.get("criteria_original") or "").strip()
+        if crit:
+            out[str(ch["num"]).zfill(2)] = crit
     return out
 
 
-def _reorder_tail(chapters: list[dict], rng: random.Random) -> list[dict]:
-    """对中后段自由章做温和重排(编制说明保持首、附图保持尾)。"""
-    tail_kw = ("文明施工", "绿色施工", "季节性", "高原", "高海拔", "管理措施", "综合管理")
-    movable = [i for i, c in enumerate(chapters)
-               if c["tier"] == "B" and any(k in c["title"] for k in tail_kw)]
-    if len(movable) < 2:
-        return chapters
-    picked = [chapters[i] for i in movable]
-    rng.shuffle(picked)
-    for slot, ch in zip(movable, picked):
-        chapters[slot] = ch
-    return chapters
+def _load_project_brief(extracted: Path) -> str:
+    """从 project_facts.json 取一句项目背景,供 LLM 切分时保持项目专属性。"""
+    fp = extracted / "project_facts.json"
+    if not fp.exists():
+        return ""
+    try:
+        facts = json.loads(fp.read_text(encoding="utf-8")).get("facts", {})
+        name = ((facts.get("project_name") or {}).get("value") or "").strip()
+        scope = ((facts.get("project_scope") or {}).get("value") or "").strip()
+        brief = "；".join(x for x in (name, scope) if x)
+        return brief[:240]
+    except Exception:
+        return ""
 
 
-def _rebudget(chapters: list[dict], scale: float, rng: random.Random) -> None:
-    """按变体缩放因子 + 逐章 jitter 重设字数预算。"""
-    for c in chapters:
-        jitter = 1.0 + rng.uniform(-0.08, 0.08)
-        c["target_chars"] = max(1500, int(c["target_chars"] * scale * jitter))
-        c["est_pages"] = _est_pages(c["target_chars"], c["chart_count"])
+# ── 变体章节构建(章标题/数量/顺序 = 基准,只缩放字数)──────────────
 
+def build_variant_chapters(base_chapters: list[dict], variant: dict,
+                           scale: float) -> list[dict]:
+    """克隆基准章节为某变体的工作副本。
 
-def _seeded_subitem_count(base: int, rng: random.Random) -> int:
-    """打破固定 ±1 offset:在 [base-2, base+2] 内独立随机。"""
-    base = base or 4
-    return max(3, rng.randint(base - 2, base + 2))
-
-
-def build_variant_structure(
-    base_chapters: list[dict], variant: dict, variant_index: int, delta: int,
-    target_scale: float, work_labels: list[str], log: logging.Logger,
-) -> list[dict]:
-    """为一个变体生成结构独立的章节列表(未含子项明细)。"""
-    seed = variant.get("section_order_seed") or hash(variant.get("id", "")) & 0xFFFFFFFF
+    ★ 章标题、章数量、章顺序、评分项、文件名 全部 1:1 沿用基准,绝不变换。
+    仅按变体缩放因子 + 逐章 jitter 重设字数预算(字数差异也是反串标的一环)。
+    """
+    seed = variant.get("section_order_seed") or (hash(variant.get("id", "")) & 0xFFFFFFFF)
     rng = random.Random(seed)
-
-    chapters = [_new_chapter(c) for c in base_chapters]
-
-    # 1. 合并 / 拆分 → 章节数变化
-    if delta < 0:
-        chapters = _apply_merges(chapters, -delta, rng, log)
-    elif delta > 0:
-        chapters = _apply_splits(chapters, delta, work_labels, rng, log)
-
-    # 2. 章节标题同义改写(按 variant_index 旋转,N 变体取不同词;
-    #    专业拆分章已含专业前缀,_keep_title 跳过)
-    for c in chapters:
-        if not c.get("_keep_title"):
-            c["title"] = _pick_title(c["title"], variant_index)
-
-    # 3. 中后段自由章温和重排
-    chapters = _reorder_tail(chapters, rng)
-
-    # 4. 字数预算缩放 + jitter
-    _rebudget(chapters, target_scale, rng)
-
-    # 5. 子项数打破固定 offset
-    for c in chapters:
-        c["subitem_count"] = _seeded_subitem_count(c["subitem_count"], rng)
-
-    # 6. 重新编号 + 生成文件名
-    for i, c in enumerate(chapters, 1):
-        c["num"] = f"{i:02d}"
-        c["filename"] = f"{i:02d}_{c['slug']}.md"
-
+    chapters: list[dict] = []
+    for base in base_chapters:
+        num = str(base["num"]).zfill(2)
+        jitter = 1.0 + rng.uniform(-0.08, 0.08)
+        target_chars = max(1500, int(base.get("target_chars", 2000) * scale * jitter))
+        chart_count = int(base.get("chart_count", 0))
+        chapters.append({
+            "num": num,
+            "title": base["title"],                       # ★ 逐字照基准,不改写
+            "filename": base.get("filename") or f"{num}_{base['title']}.md",
+            "score_item": base.get("score_item", ""),
+            "score": base.get("score", 0),
+            "target_chars": target_chars,
+            "chart_count": chart_count,
+            "est_pages": _est_pages(target_chars, chart_count),
+            "_scope": [s["title"] for s in base.get("_subitems", [])],
+        })
     return chapters
 
 
-def verify_scoring_coverage(
-    variant_chapters: list[dict], base_score_items: set[str], log: logging.Logger,
-) -> None:
-    """校验每个评分项仍有章节覆盖,缺失即抛错(防变体结构变换丢分)。"""
+def verify_scoring_coverage(variant_chapters: list[dict],
+                            base_score_items: set[str],
+                            log: logging.Logger) -> None:
+    """校验每个评分项仍有章节覆盖。本机制下章节不变换,属冗余安全闸。"""
     covered = {
         (c.get("score_item") or "").strip()
         for c in variant_chapters
@@ -335,54 +172,69 @@ def verify_scoring_coverage(
     }
     missing = base_score_items - covered
     if missing:
-        raise RuntimeError(
-            f"变体结构变换后评分项失去章节覆盖: {sorted(missing)} —— "
-            f"合并/拆分规则有误,请检查"
-        )
+        raise RuntimeError(f"变体章节丢失评分项覆盖: {sorted(missing)}")
     log.info(f"    评分覆盖校验通过:{len(base_score_items)} 个评分项均有章节")
 
 
-# ── LLM 子项分解 ─────────────────────────────────────────────────
+# ── LLM 子项分解(核心)───────────────────────────────────────────
 
 _DECOMPOSE_PROMPT = """\
-你是施工组织设计编写专家。下面是某投标文件「{vid}」的章节列表,请为**每一章**
-按指定子项数把该章主题分解成有逻辑层次的二级子标题,并分配目标字数。
+你是资深施工组织设计编写专家。现在为投标文件「{vid}」拟定各章的**二级子标题**。
 
-要求:
-1. 子项数量严格按每章指定的"需 N 项"
-2. 子标题按本章主题语义切分,不得用"编制依据/实施方案/保障措施/应急响应"这类
-   空泛的万能兜底;要结合该章实际内容
-3. 各章子项目标字数之和 = 该章"目标字数"(每项可 ±50 字浮动)
-4. 子标题简洁专业,不带序号前缀
+【项目背景】{project_brief}
 
-章节列表:
+【本变体统一的切分维度 —— {strategy_name}】
+{strategy_desc}
+
+【硬性要求】
+1. 一级章标题已固定(下方给出),**绝对不要改动章标题**,只为每章拟二级子标题。
+2. 每章子项必须**完整覆盖该章「评分标准」的全部要点**,任何评分关键词都不得遗漏。
+3. 子项切分必须严格贯彻本变体的【{strategy_name}】维度,使其与按其它维度
+   切分的版本**结构上明显不同**(不是换同义词,是换组织逻辑)。
+4. 子项数量由内容决定(一般 5-9 项,大分值章可更多),不强求与他人一致。
+5. 子标题须结合项目实际,专业、具体、可落地;**严禁**「编制依据 / 实施方案 /
+   保障措施 / 应急响应」这类放之四海皆准的空泛兜底标题。
+6. 各章子项目标字数之和 = 该章「目标字数」(每项可 ±50 字浮动)。
+7. 子标题不带任何序号前缀。
+
+【章节与评分标准】
 {chapters_brief}
 
-严格输出 JSON:
+严格只输出 JSON,不要任何解释:
 {{"chapters": [{{"num": "01", "subitems": [{{"title": "...", "chars": N}}, ...]}}, ...]}}"""
 
 
-def decompose_variant(
-    client: LLMClient, model: str, variant_id: str,
-    chapters: list[dict], log: logging.Logger,
-) -> dict[str, list[dict]]:
-    """调 LLM 为一个变体的所有章节生成子项分解。返回 {num: [{title,chars}]}。"""
+def decompose_variant(client: LLMClient, model: str, variant_id: str,
+                      strategy: tuple[str, str], chapters: list[dict],
+                      criteria_map: dict[str, str], project_brief: str,
+                      log: logging.Logger) -> dict[str, list[dict]]:
+    """调 LLM 为一个变体的所有章节生成「按指定维度切分」的子项。
+
+    返回 {num: [{title, chars}]}。失败则返回空 dict,由 _fallback_subitems 兜底。
+    """
+    sname, sdesc = strategy
     briefs = []
     for c in chapters:
-        scope = "、".join(c["_scope"][:8]) if c["_scope"] else c["title"]
-        briefs.append(
-            f"- 第{c['num']}章「{c['title']}」需 {c['subitem_count']} 项,"
-            f"目标字数 {c['target_chars']},覆盖范围:{scope}"
-        )
+        crit = criteria_map.get(c["num"], "")
+        ref = "、".join(c["_scope"][:12]) if c["_scope"] else ""
+        lines = [f"- 第{c['num']}章「{c['title']}」(目标字数 {c['target_chars']})"]
+        if crit:
+            lines.append(f"  评分标准原文:{crit}")
+        if ref:
+            lines.append(f"  内容参考(基准子项,可按本变体维度拆解重组):{ref}")
+        briefs.append("\n".join(lines))
+
     prompt = _DECOMPOSE_PROMPT.format(
-        vid=variant_id, chapters_brief="\n".join(briefs),
+        vid=variant_id, strategy_name=sname, strategy_desc=sdesc,
+        project_brief=project_brief or "工程建设投标项目",
+        chapters_brief="\n".join(briefs),
     )
     try:
         resp = client.chat(
             model_key=model,
-            system="你是资深施工组织设计编写专家,擅长按章主题做差异化的子项切分。",
+            system="你是资深施工组织设计编写专家,擅长按指定维度对章节主题做差异化的子项切分。",
             user=prompt,
-            temperature=0.8,
+            temperature=0.85,
         )
         m = re.search(r"\{[\s\S]*\}", resp.text)
         if not m:
@@ -392,7 +244,7 @@ def decompose_variant(
         for ch in data.get("chapters", []):
             num = str(ch.get("num", "")).zfill(2)
             subs = [
-                {"title": re.sub(r"^\d+(?:\.\d+)*\s*", "", str(s.get("title", ""))).strip(),
+                {"title": re.sub(r"^\d+(?:\.\d+)*[、.\s]*", "", str(s.get("title", ""))).strip(),
                  "chars": int(s.get("chars", 0) or 0)}
                 for s in ch.get("subitems", []) if s.get("title")
             ]
@@ -400,17 +252,16 @@ def decompose_variant(
                 result[num] = subs
         return result
     except Exception as e:
-        log.warning(f"  变体 {variant_id} 子项 LLM 分解失败({e}),用均分兜底")
+        log.warning(f"  变体 {variant_id} 子项 LLM 分解失败({e}),用基准子项兜底")
         return {}
 
 
 def _fallback_subitems(ch: dict) -> list[dict]:
-    """LLM 失败时的兜底:按 _scope 均分,无 scope 时按章标题切。"""
-    n = ch["subitem_count"]
-    scope = ch["_scope"] or [ch["title"]]
-    titles = [scope[i % len(scope)] for i in range(n)]
-    per = max(200, ch["target_chars"] // n)
-    return [{"title": t, "chars": per} for t in titles]
+    """LLM 失败时的兜底:直接用基准子项,字数按目标均分。"""
+    scope = ch.get("_scope") or [ch["title"]]
+    n = max(1, len(scope))
+    per = max(300, ch["target_chars"] // n)
+    return [{"title": t, "chars": per} for t in scope]
 
 
 def _normalize_subitems(subs: list[dict], target_chars: int) -> list[dict]:
@@ -428,13 +279,14 @@ def _normalize_subitems(subs: list[dict], target_chars: int) -> list[dict]:
 
 # ── 渲染变体规划文件 ──────────────────────────────────────────────
 
-def render_variant_plan(variant_id: str, chapters: list[dict]) -> str:
+def render_variant_plan(variant_id: str, strategy: tuple[str, str],
+                        chapters: list[dict]) -> str:
     """渲染该变体完整章节规划(表格 + 子项分配),与 chapter_plan.md 同构。"""
     lines = [
         f"# 变体 {variant_id} 章节规划",
         "",
-        "> 由 bid_plan_variants.py 从 chapter_plan.md 派生,本变体结构独立"
-        "(章节数/标题/顺序/字数/子项均为本变体专属)。",
+        f"> 由 bid_plan_variants.py 从 chapter_plan.md 派生。",
+        f"> 一级标题逐字沿用评标表原文(三家一致);二级子项按【{strategy[0]}】维度切分(本变体专属)。",
         "",
         "## 大章节分配",
         "",
@@ -449,7 +301,7 @@ def render_variant_plan(variant_id: str, chapters: list[dict]) -> str:
         tc = c["target_chars"]
         lo, hi = int(tc * 0.85), int(tc * 1.15)
         subs = c.get("subitems", [])
-        sub_n = len(subs) if subs else c["subitem_count"]
+        sub_n = len(subs)
         ep = c.get("est_pages", _est_pages(tc, c["chart_count"]))
         total_chars += tc
         total_pages += ep
@@ -458,7 +310,7 @@ def render_variant_plan(variant_id: str, chapters: list[dict]) -> str:
             f"{sub_n} | {tc} | {lo}-{hi} | {c['chart_count']} | {ep} |"
         )
     lines += [
-        f"| **合计** | | | | | | **{total_chars}** | | | **{round(total_pages,1)}** |",
+        f"| **合计** | | | | | | **{total_chars}** | | | **{round(total_pages, 1)}** |",
         "",
         "## 子项分配",
         "",
@@ -476,12 +328,11 @@ def render_variant_plan(variant_id: str, chapters: list[dict]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-# ── 图表分配(沿用原逻辑,喂入变体专属章节)──────────────────────────
+# ── 图表分配(沿用原逻辑)──────────────────────────────────────────
 
-def _assign_charts_for_variant(
-    variant: dict, base_chart_specs, org_templates: dict,
-    chapters: list[dict], work_labels: list[str] | None = None,
-) -> dict:
+def _assign_charts_for_variant(variant: dict, base_chart_specs, org_templates: dict,
+                               chapters: list[dict],
+                               work_labels: list[str] | None = None) -> dict:
     """为单个变体生成图表分配(确定性,基于 section_order_seed)。"""
     seed = variant.get("section_order_seed", 0)
     rng = random.Random(seed ^ 0xABCD1234)
@@ -617,10 +468,11 @@ def _projectize_org_tree(children: list[dict], work_labels: list[str]) -> list[d
 # ── 主流程 ────────────────────────────────────────────────────────
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="为每个变体生成结构独立的章节规划")
+    p = argparse.ArgumentParser(
+        description="为每个变体生成差异化二级标题的章节规划(一级标题锁定评标表原文)")
     p.add_argument("tender_dir", help="投标根目录(含 extracted/)")
     p.add_argument("--target-pages", type=float, default=None,
-                   help="目标总页数(覆盖 chapter_plan 基准),变体在此上下浮动")
+                   help="目标总页数(覆盖 chapter_plan 基准);缺省则沿用基准字数")
     args = p.parse_args()
 
     tender_dir = Path(args.tender_dir)
@@ -655,7 +507,11 @@ def main() -> int:
         for c in base_chapters
         if _is_tier_a(c) and (c.get("score_item") or "").strip() not in ("", "—", "-")
     }
-    base_total_chars = sum(int(c.get("target_chars", 0)) for c in base_chapters)
+
+    criteria_map = _load_criteria(extracted, base_chapters, log)
+    project_brief = _load_project_brief(extracted)
+    log.info(f"评分标准命中 {len(criteria_map)}/{len(base_chapters)} 章"
+             f"{'(其余回退基准子项作参考)' if len(criteria_map) < len(base_chapters) else ''}")
 
     # chart_specs / org_templates / work_labels
     base_chart_specs: dict[str, list] = {}
@@ -666,7 +522,8 @@ def main() -> int:
             raw = raw.get("specs", [])
         for spec in raw:
             if isinstance(spec, dict):
-                base_chart_specs.setdefault(str(spec.get("chapter", "")).zfill(2), []).append(spec)
+                base_chart_specs.setdefault(
+                    str(spec.get("chapter", "")).zfill(2), []).append(spec)
     org_templates = {"templates": {}, "management_chart_types": {"combinations": []}}
     org_path = ROOT / "configs" / "org_templates.json"
     if org_path.exists():
@@ -675,39 +532,41 @@ def main() -> int:
     if work_labels:
         log.info(f"清单驱动作业队标签: {work_labels}")
 
-    # 目标总页数 → 缩放因子
+    # 目标总页数 → 全局缩放因子(缺省沿用基准字数)
     base_pages = sum(c.get("est_pages", 0) for c in base_chapters) or 1
     user_scale = 1.0
     if args.target_pages:
         user_scale = args.target_pages / base_pages
-        log.info(f"用户指定目标页数 {args.target_pages}(基准 {base_pages:.0f}),全局缩放 ×{user_scale:.2f}")
+        log.info(f"用户指定目标页数 {args.target_pages}(基准 {base_pages:.0f}),"
+                 f"全局缩放 ×{user_scale:.2f}")
 
     client = LLMClient.load(log=log)
     rewrite_model = "deepseek_chat"
     if rewrite_model not in (client.config.get("models", {})):
         rewrite_model = client.config.get("default_model", "deepseek")
 
-    log.info(f"开始为 {n_variants} 个变体生成结构独立的章节规划...")
+    log.info(f"开始为 {n_variants} 个变体生成差异化二级标题"
+             f"(一级标题锁定评标表原文,模型={rewrite_model})...")
 
-    # 1. 每变体结构变换
-    variant_structures: list[tuple[dict, list[dict]]] = []
+    # 1. 每变体:章节 = 基准(不变换),只缩放字数;并分配切分维度
+    variant_structures: list[tuple[dict, list[dict], tuple[str, str]]] = []
     for i, variant in enumerate(variants):
-        delta = _CHAPTER_COUNT_SPREAD[i % len(_CHAPTER_COUNT_SPREAD)]
-        # 变体总量缩放:V01≈基准,其余 ±5%
-        v_scale = user_scale * (1.0 + [0.0, -0.05, 0.05, -0.03, 0.03][i % 5])
-        log.info(f"  {variant['id']}: 目标章节数偏移 {delta:+d}, 总量 ×{v_scale:.2f}")
-        chapters = build_variant_structure(
-            base_chapters, variant, i, delta, v_scale, work_labels, log
-        )
+        # 变体缩放全部 ≤ 1.0:基准即上限,任何变体都不超基准字数
+        # (页数硬顶项目防超顶;字数仍有差异 → 反串标)
+        v_scale = user_scale * (1.0 + [0.0, -0.05, -0.02, -0.07, -0.04][i % 5])
+        chapters = build_variant_chapters(base_chapters, variant, v_scale)
         verify_scoring_coverage(chapters, base_score_items, log)
-        log.info(f"    → {len(chapters)} 章")
-        variant_structures.append((variant, chapters))
+        strategy = assign_strategy(i)
+        log.info(f"  {variant['id']}: 切分维度【{strategy[0]}】, 字数 ×{v_scale:.2f}, "
+                 f"{len(chapters)} 章(同基准)")
+        variant_structures.append((variant, chapters, strategy))
 
-    # 2. 并行 LLM 子项分解(每变体一次调用)
+    # 2. 并行 LLM 子项分解(每变体一次调用,按各自维度切分)
     def _decompose(item):
-        variant, chapters = item
+        variant, chapters, strategy = item
         return variant["id"], decompose_variant(
-            client, rewrite_model, variant["id"], chapters, log
+            client, rewrite_model, variant["id"], strategy, chapters,
+            criteria_map, project_brief, log,
         )
 
     decomposed: dict[str, dict[str, list[dict]]] = {}
@@ -716,23 +575,17 @@ def main() -> int:
             decomposed[vid] = result
 
     # 3. 落子项 + 渲染 + 图表分配
-    for variant, chapters in variant_structures:
+    for variant, chapters, strategy in variant_structures:
         vid = variant["id"]
         sub_map = decomposed.get(vid, {})
         for c in chapters:
             subs = sub_map.get(c["num"]) or _fallback_subitems(c)
-            # 子项数对齐声明值
-            want = c["subitem_count"]
-            if len(subs) > want:
-                subs = subs[:want]
-            elif len(subs) < want:
-                subs += _fallback_subitems({**c, "subitem_count": want - len(subs)})
             c["subitems"] = _normalize_subitems(subs, c["target_chars"])
 
         v_dir = output / vid
         v_dir.mkdir(parents=True, exist_ok=True)
         (v_dir / "chapter_plan_variant.md").write_text(
-            render_variant_plan(vid, chapters), encoding="utf-8"
+            render_variant_plan(vid, strategy, chapters), encoding="utf-8"
         )
         chart_assign = _assign_charts_for_variant(
             variant, base_chart_specs, org_templates, chapters, work_labels
@@ -740,10 +593,12 @@ def main() -> int:
         (v_dir / "chart_assignment.json").write_text(
             json.dumps(chart_assign, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        total_p = round(sum(c.get("est_pages", 0) for c in chapters), 1)
-        log.info(f"  {vid}: {len(chapters)} 章 / 约 {total_p} 页 已写入")
+        total_c = sum(c["target_chars"] for c in chapters)
+        total_s = sum(len(c.get("subitems", [])) for c in chapters)
+        log.info(f"  {vid}【{strategy[0]}】: {len(chapters)} 章 / {total_s} 子项 / "
+                 f"{total_c} 字 已写入")
 
-    log.info(f"完成:{n_variants} 个变体的结构独立章节规划已生成")
+    log.info(f"完成:{n_variants} 个变体的差异化二级标题章节规划已生成")
     return 0
 
 

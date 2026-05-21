@@ -1964,7 +1964,8 @@ def _adapt_site_layout_data(data: dict) -> dict:
                 # 平均分配
                 normed[_SITE_DIRECTIONS[i % 4]].append(z)
             elif isinstance(z, dict):
-                name = str(z.get("name") or z.get("label") or f"区域{i+1}")
+                name = str(z.get("name") or z.get("label") or z.get("zone")
+                           or z.get("symbol") or f"区域{i+1}")
                 # 优先看用户显式声明的 direction
                 explicit = z.get("direction") or z.get("方位")
                 if explicit:
@@ -1985,6 +1986,59 @@ def _adapt_site_layout_data(data: dict) -> dict:
                 else:
                     normed[_SITE_DIRECTIONS[i % 4]].append(name)
         d["zones"] = normed
+        return d
+
+    # 通用兜底:writer 的 site_layout schema 不统一(elements / legend字典 /
+    # zonning_areas / facilities …),从任意字段搜刮设施名,轮转均分到 4 区。
+    # 各变体设施清单不同 → 渲染结果天然互不雷同(反串标)。
+    _road_kw = ("道路", "干道", "次干道", "主干道", "支路", "通道", "围挡", "围墙",
+                "消防通道", "运输路", "环路")
+    facilities: list[str] = []
+
+    def _add_fac(name) -> None:
+        name = str(name or "").strip()
+        if (name and name not in facilities
+                and not any(k in name for k in _road_kw)):
+            facilities.append(name)
+
+    raw_elements = d.get("elements")
+    if isinstance(raw_elements, list):
+        for e in raw_elements:
+            if isinstance(e, dict):
+                _add_fac(e.get("label") or e.get("name"))
+    leg = d.get("legend")
+    if isinstance(leg, dict):
+        items = leg.get("items")
+        if isinstance(items, list):
+            for it in items:
+                _add_fac((it.get("label") or it.get("symbol") or it.get("name"))
+                         if isinstance(it, dict) else it)
+        else:
+            for k, v in leg.items():
+                if isinstance(v, str):  # {设施名: 描述}
+                    _add_fac(k)
+    elif isinstance(leg, list):
+        for it in leg:
+            _add_fac((it.get("label") or it.get("symbol") or it.get("name"))
+                     if isinstance(it, dict) else it)
+    for fld in ("zonning_areas", "zoning_areas", "facilities",
+                "buildings", "main_buildings", "areas"):
+        val = d.get(fld)
+        if isinstance(val, list):
+            for it in val:
+                _add_fac(it.get("name") or it.get("label") if isinstance(it, dict) else it)
+
+    if facilities:
+        d["main_building"] = next(
+            (f for f in facilities if any(k in f for k in ("鸡舍", "主体", "拟建", "厂房"))),
+            "主体建筑",
+        )
+        rest = [f for f in facilities if f != d["main_building"]]
+        normed = {dir_: [] for dir_ in _SITE_DIRECTIONS}
+        for i, name in enumerate(rest[:16]):
+            normed[_SITE_DIRECTIONS[i % 4]].append(name)
+        d["zones"] = normed
+        d["template"] = "rectangular_center"
         return d
 
     # 没 zones,塞个空
@@ -2916,7 +2970,7 @@ def preprocess_md(
                     png_name = f"{stem}_{ctype}{suffix}.png"
                     png_path = charts_dir / png_name
                     chart_title = data.get("title") or render_data.get("title") or \
-                                  f"{stem} {_CHART_TITLES.get(ctype, ctype)}"
+                                  _CHART_TITLES.get(ctype, ctype)
                     ok = renderer(render_data, png_path, chart_title, log, chart_style)
                     if ok:
                         rel = Path("..") / charts_dir.name / png_name

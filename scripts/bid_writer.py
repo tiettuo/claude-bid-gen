@@ -1414,6 +1414,44 @@ def _generate_one_single(
     return True
 
 
+def _single_call_safe_chars(client: LLMClient, model_key: str) -> int:
+    """模型单次安全产出字数上限。
+
+    取 config 的 output_char_cap(实测校准值,如 deepseek=8000)。
+    章节目标字数超过此值,单次整章调用必然写不满 → 应转子项级。
+    """
+    m = client.models.get(model_key, {}) if hasattr(client, "models") else {}
+    return int(m.get("output_char_cap", 8000) or 8000)
+
+
+def _build_auto_subitem_plan(chapter: dict, variant: dict,
+                             subitems: list[dict]) -> dict | None:
+    """无显式 chapter_model_plan 时,按章节子项即时构建子项级计划。
+
+    所有子项用变体主模型(单作者模式下保持 1 变体 = 1 模型);
+    子项无分配则返回 None(无法拆 → 调用方回退整章)。
+    """
+    if not subitems:
+        return None
+    vmodel = variant.get("model", "deepseek")
+    vtemp = variant.get("temperature", 0.7)
+    assigns = []
+    for idx, s in enumerate(subitems):
+        assigns.append({
+            "idx": idx,
+            "title": s.get("title", ""),
+            "target_chars": int(s.get("chars") or s.get("target_chars") or 0),
+            "model": vmodel,
+            "temperature": vtemp,
+        })
+    return {
+        "mode": "cross_model",
+        "polish_model": vmodel,
+        "polish_temperature": vtemp,
+        "subitems": assigns,
+    }
+
+
 def generate_one(
     client: LLMClient, chapter: dict, variant: dict,
     brain_excerpt: str, disq_excerpt: str,
@@ -1423,13 +1461,15 @@ def generate_one(
     get_sem=None,
     response_keywords=None,
     variant_chart_overrides=None,
+    chapter_plan_override=None,
 ) -> bool:
     """生成单个 variant × 单个章节
 
-    有 chapter_model_plan 且 mode=cross_model 走子项并行+润色流程；
-    否则走旧的单模型整章流程（向后兼容）。
+    chapter_plan_override(由 run_task 按字数自动判定时传入)或
+    variant.chapter_model_plan 中 mode=cross_model → 走子项并行流程;
+    否则走单模型整章流程。
     """
-    plan = (variant.get("chapter_model_plan") or {}).get(chapter["num"])
+    plan = chapter_plan_override or (variant.get("chapter_model_plan") or {}).get(chapter["num"])
     if plan and plan.get("mode") == "cross_model" and get_sem is not None:
         return _generate_one_cross(
             client, chapter, variant, brain_excerpt, disq_excerpt,
@@ -1635,15 +1675,30 @@ def main() -> int:
             except Exception:
                 pass
         plan = (v.get("chapter_model_plan") or {}).get(ch["num"])
-        if plan and plan.get("mode") == "cross_model":
-            # 交叉模式：外层不占 sem，内层对每个子项独立占（否则主模型 sem 会与子项用主模型死锁）
+        explicit_cross = bool(plan and plan.get("mode") == "cross_model")
+        # 自动判定:无显式 cross 计划时,章节目标字数 > 主模型单次安全上限
+        #   → 即时构建子项级计划(防大章单次整章调用写不满)
+        auto_plan = None
+        if not explicit_cross:
+            cap = _single_call_safe_chars(client, v.get("model", ""))
+            if int(ch.get("target_chars", 0) or 0) > cap:
+                auto_plan = _build_auto_subitem_plan(ch, v, subitems)
+                if auto_plan:
+                    log.info(
+                        f"[{v['id']}] 章 {ch['num']} 目标 {ch.get('target_chars')} 字 "
+                        f"> {v.get('model')} 单次上限 {cap} → 自动转子项级"
+                        f"({len(auto_plan['subitems'])} 子项)"
+                    )
+        if explicit_cross or auto_plan:
+            # 交叉/子项级：外层不占 sem，内层对每个子项独立占（否则主模型 sem 会与子项用主模型死锁）
             return generate_one(
                 client, ch, v, brain_excerpt, disq_excerpt, out_path, log,
                 system_prompt, subitems, get_sem=get_sem,
                 response_keywords=response_keywords,
                 variant_chart_overrides=variant_chart_overrides,
+                chapter_plan_override=auto_plan,
             )
-        # 单模型模式：外层占主模型 sem（保留旧行为）
+        # 单模型整章模式：外层占主模型 sem（章节字数在单次安全上限内）
         sem = get_sem(v["model"])
         with sem:
             return generate_one(
