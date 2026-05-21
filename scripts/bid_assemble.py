@@ -2353,12 +2353,14 @@ _WORD_RENDER_COUNT_APPLESCRIPT = r'''
 tell application "Microsoft Word"
     set d to open file name (POSIX file "{path}" as string)
     delay 3
-    try
-        update field of every field of d
-    end try
-    delay 1
-    save d
-    set pg to (compute statistics d statistic (statistic pages))
+    with timeout of 420 seconds
+        try
+            update field of every field of d
+        end try
+        delay 1
+        save d
+        set pg to (compute statistics d statistic (statistic pages))
+    end timeout
     close d saving no
     return (pg as string)
 end tell
@@ -2402,7 +2404,8 @@ def _check_page_count(docx_path: Path, fmt: dict, log: logging.Logger) -> int | 
     Word 渲染 = 评委实际看到的页数。三道快速短路,避免旧实现的 90s×2 干等:
       1. --no-word / 非 macOS / 未装 Word → 跳过
       2. Word 已开着文档(被用户占用)→ 跳过(8s 内探明)
-      3. 合并为一次开关,超时 45s
+      3. 合并为一次开关,AppleScript 内 with timeout 420s + 子进程 480s
+         (大文档[~350页]分页耗时长,旧 60s 上限会误判超时)
     跳过不影响 docx 可用:文档已带 updateFields,用户打开按 F9 即更新目录。
     """
     if _SKIP_WORD:
@@ -2421,10 +2424,10 @@ def _check_page_count(docx_path: Path, fmt: dict, log: logging.Logger) -> int | 
     try:
         result = subprocess.run(
             ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=480,
         )
     except subprocess.TimeoutExpired:
-        log.warning("  页数检查: Word 超时(>60s),跳过(docx 已保存;目录可在 Word 中按 F9 更新)")
+        log.warning("  页数检查: Word 超时(>480s),跳过(docx 已保存;目录可在 Word 中按 F9 更新)")
         return None
     if result.returncode != 0:
         log.warning(f"  页数检查: Word 失败 — {result.stderr.strip()[:120]}")
@@ -2549,8 +2552,10 @@ def _assemble_one(
     output_dir: 最终 DOCX 保存目录
     variant: 批量模式下的 variant 配置；单份模式传 None
     """
-    from bid_common import preferred_rules_path
-    rules_path = preferred_rules_path(extracted_dir)
+    # 格式/暗标/密度/format_sets 一律以 disqualification_rules.md 为唯一真源,
+    # 不走 preferred_rules_path(authoring) —— 避免双轨 desync(养殖类项目踩坑)。
+    from bid_common import canonical_rules_path
+    rules_path = canonical_rules_path(extracted_dir)
     rules_text = rules_path.read_text(encoding="utf-8") if rules_path.exists() else ""
     fmt = parse_format_rules(rules_path, log)
 
@@ -2567,7 +2572,17 @@ def _assemble_one(
             fmt = _apply_format_set(fmt, fs, log)
             fmt["cover_style"] = fs_key   # 封面版式按变体区分(反串标)
         else:
-            log.warning(f"  [format_set] {fs_key} 在 disqualification_rules.md 中未定义")
+            # 变体引用了不存在的 format_set 是真错(三家排版会退化成完全相同)
+            # —— 报 ERROR 并抛出,不静默放行
+            avail = ", ".join(sorted(format_sets)) or "(空)"
+            log.error(
+                f"  [format_set] {fs_key} 在 disqualification_rules.md 中未定义"
+                f"(已定义: {avail})——三家排版将无法差异化"
+            )
+            raise ValueError(
+                f"variant {variant.get('id', '?')} 引用的 format_set '{fs_key}' "
+                f"未在 disqualification_rules.md 的 format_sets 块中定义"
+            )
 
     info = read_tender_info(chapter_dir, log, extracted_dir=extracted_dir)
     if variant:

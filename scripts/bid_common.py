@@ -127,6 +127,21 @@ def preferred_rules_path(extracted_dir) -> Path:
     return extracted_dir / "disqualification_rules.md"
 
 
+def canonical_rules_path(extracted_dir) -> Path:
+    """格式/暗标/密度/format_sets 的【唯一真源】= disqualification_rules.md。
+
+    两份规则文件曾共享 format/blind/density 块,手工只改一份会 desync
+    (养殖类项目曾因此组装用了 authoring 的旧 blind/字号)。凡读这几类
+    共享配置,一律走本函数,不要用 preferred_rules_path。authoring_rules.md
+    仅作方案规则(章节锚点/技术雷区/工程构成)来源。
+    """
+    extracted_dir = Path(extracted_dir)
+    dq = extracted_dir / "disqualification_rules.md"
+    if dq.exists():
+        return dq
+    return extracted_dir / "authoring_rules.md"
+
+
 # ─── chapter_plan.md 解析 ─────────────────────────────────────────────
 
 def parse_chapter_plan(plan_path: Path) -> list[dict]:
@@ -559,7 +574,7 @@ def detect_blind_bid(extracted_dir: Path) -> bool:
     请改用 needs_blind_scan()。
     """
     extracted_dir = Path(extracted_dir)
-    path = preferred_rules_path(extracted_dir)
+    path = canonical_rules_path(extracted_dir)
     if not path.exists():
         return False
     text = path.read_text(encoding="utf-8")
@@ -580,7 +595,7 @@ def needs_blind_scan(extracted_dir: Path) -> bool:
     这是 reviewer / compliance / assemble 三处共享的唯一决策函数，避免各自判定漂移。
     """
     extracted_dir = Path(extracted_dir)
-    path = preferred_rules_path(extracted_dir)
+    path = canonical_rules_path(extracted_dir)
     if not path.exists():
         return False
     text = path.read_text(encoding="utf-8")

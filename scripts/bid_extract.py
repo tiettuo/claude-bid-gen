@@ -809,6 +809,74 @@ def get_file_brief(text: str) -> str:
     return clean[:200].replace("\n", " ")
 
 
+def _zip_safe_extract(zf, dest: Path, log) -> list[Path]:
+    """解一个 zip 到 dest,文件名按 cp437→gbk/utf-8 兜底解码,带 zip-slip 防护。"""
+    out: list[Path] = []
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        raw = info.filename
+        for enc in ("gbk", "utf-8"):
+            try:
+                name = raw.encode("cp437").decode(enc)
+                break
+            except Exception:
+                name = raw
+        if ".." in Path(name).parts or Path(name).is_absolute():
+            continue  # zip-slip 防护
+        target = dest / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with zf.open(info) as src, open(target, "wb") as dst:
+                dst.write(src.read())
+            out.append(target)
+        except Exception as e:
+            log.warning(f"    解出 {name} 失败: {e}")
+    return out
+
+
+def unpack_archives(input_dir: Path, log: logging.Logger) -> None:
+    """解开 .XZZ / .zip 招标包,内容落到 _unpacked/ 供后续扫描。
+
+    西藏等地电子标书是 .XZZ(标准 zip),常见嵌套 GEFile.zip 内含
+    「招标项目/招标文件.pdf」等真正的招标正文——不解包就只能拿到招标公告。
+    幂等:_unpacked/<stem>/ 已存在则跳过。
+    """
+    import zipfile as _zip
+    unpacked_root = input_dir / "_unpacked"
+    archives = sorted(
+        f for f in input_dir.rglob("*")
+        if f.is_file() and f.suffix.lower() in (".xzz", ".zip")
+        and "_unpacked" not in f.relative_to(input_dir).parts
+        and "extracted" not in f.relative_to(input_dir).parts
+        and "output" not in f.relative_to(input_dir).parts
+    )
+    for arc in archives:
+        dest = unpacked_root / arc.stem
+        if dest.exists():
+            log.info(f"  归档已解包,跳过: {arc.name}")
+            continue
+        try:
+            with _zip.ZipFile(arc) as zf:
+                files = _zip_safe_extract(zf, dest, log)
+            log.info(f"  解包归档 {arc.name} → {len(files)} 个文件")
+        except _zip.BadZipFile:
+            log.warning(f"  {arc.name} 非有效 zip,跳过")
+            continue
+        except Exception as e:
+            log.warning(f"  解包 {arc.name} 失败: {e}")
+            continue
+        # 递归解嵌套 zip(如 .XZZ 内的 GEFile.zip)
+        for f in list(files):
+            if f.suffix.lower() == ".zip":
+                try:
+                    with _zip.ZipFile(f) as zf2:
+                        n2 = _zip_safe_extract(zf2, f.parent / f.stem, log)
+                    log.info(f"    解包嵌套 {f.name} → {len(n2)} 个文件")
+                except Exception as e:
+                    log.warning(f"    嵌套 zip {f.name} 解包失败: {e}")
+
+
 def main():
     if len(sys.argv) < 2:
         print("用法: python bid_extract.py /path/to/tender/")
@@ -861,6 +929,9 @@ def main():
 
     extracted_count = 0
     failed_count = 0
+
+    # 先解开 .XZZ / zip 招标包(内含真正的招标正文,如 GEFile.zip 里的招标文件.pdf)
+    unpack_archives(input_dir, log)
 
     # 递归扫描所有子目录；跳过已生成的 extracted/ 和 output/ 避免自吞
     skip_dirs = {"extracted", "output"}

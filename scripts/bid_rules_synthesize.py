@@ -617,6 +617,63 @@ def _yaml_block(d: dict, indent: int = 0) -> str:
     return "\n".join(lines)
 
 
+# 多变体反串标排版套预设。bid_variants 给变体分配 A/B/C… ID,
+# bid_assemble._apply_format_set 据此套用。只差异化 字体/标题字体/行距/页边距;
+# 不含字号——字号若招标强制须三家一致,且改字号大幅影响页数。
+_FORMAT_SET_PRESETS: dict[str, dict] = {
+    "A": {"description": "宋体正文+黑体标题+1.5倍行距",
+          "font_name_cn": "宋体", "font_name_h1": "黑体",
+          "line_spacing_rule": "multiple", "line_spacing": 1.5,
+          "margin_top_cm": 2.5, "margin_bottom_cm": 2.5,
+          "margin_left_cm": 2.8, "margin_right_cm": 2.8},
+    "B": {"description": "仿宋正文+宋体标题+固定28磅行距",
+          "font_name_cn": "仿宋", "font_name_h1": "宋体",
+          "line_spacing_rule": "exact", "line_spacing": 28,
+          "margin_top_cm": 2.6, "margin_bottom_cm": 2.6,
+          "margin_left_cm": 3.1, "margin_right_cm": 3.1},
+    "C": {"description": "楷体正文+黑体标题+1.6倍行距",
+          "font_name_cn": "楷体", "font_name_h1": "黑体",
+          "line_spacing_rule": "multiple", "line_spacing": 1.6,
+          "margin_top_cm": 3.0, "margin_bottom_cm": 2.7,
+          "margin_left_cm": 2.6, "margin_right_cm": 2.6},
+    "D": {"description": "宋体正文+黑体标题+固定26磅行距",
+          "font_name_cn": "宋体", "font_name_h1": "黑体",
+          "line_spacing_rule": "exact", "line_spacing": 26,
+          "margin_top_cm": 2.7, "margin_bottom_cm": 2.5,
+          "margin_left_cm": 3.0, "margin_right_cm": 2.7},
+    "E": {"description": "仿宋正文+黑体标题+1.5倍行距",
+          "font_name_cn": "仿宋", "font_name_h1": "黑体",
+          "line_spacing_rule": "multiple", "line_spacing": 1.5,
+          "margin_top_cm": 2.8, "margin_bottom_cm": 2.8,
+          "margin_left_cm": 2.7, "margin_right_cm": 2.7},
+    "F": {"description": "楷体正文+宋体标题+固定28磅行距",
+          "font_name_cn": "楷体", "font_name_h1": "宋体",
+          "line_spacing_rule": "exact", "line_spacing": 28,
+          "margin_top_cm": 2.5, "margin_bottom_cm": 2.7,
+          "margin_left_cm": 2.9, "margin_right_cm": 2.9},
+}
+
+
+def _render_format_sets_block() -> list[str]:
+    """渲染 format_sets yaml 块(供 bid_assemble._parse_format_sets 消费)。"""
+    lines = [
+        "## 排版套(format_sets — 多变体反串标差异化)",
+        "",
+        "> bid_variants 给每个变体分配 A/B/C… ID,bid_assemble 据此套用不同"
+        "字体/行距/页边距。",
+        "> ★ 若招标强制规定字体/字号/行距/页边距,删除本块、或把对应字段改成三家一致。",
+        "",
+        "```yaml",
+        "format_sets:",
+    ]
+    for key, fs in _FORMAT_SET_PRESETS.items():
+        lines.append(f"  {key}:")
+        for k, v in fs.items():
+            lines.append(f"    {k}: {v}")
+    lines += ["```", ""]
+    return lines
+
+
 def render_rules_md(project: dict, evaluation: dict, procurement: dict,
                     blind: dict, format_cfg: dict, density: dict,
                     schedule: dict, must_include: dict,
@@ -656,6 +713,7 @@ def render_rules_md(project: dict, evaluation: dict, procurement: dict,
         "",
         "> 招标文件未明示字号/行距 → 按工程类比选惯例(宋体小四+1.5倍)。",
         "",
+        *_render_format_sets_block(),
         "## 字数密度",
         "",
         "```yaml",

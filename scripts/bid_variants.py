@@ -191,8 +191,9 @@ CHART_THEMES = [
     },
 ]
 
-# 排版套（对应 disqualification_rules.md 的 format_sets A/B/C）
-FORMAT_SET_KEYS = ["A", "B", "C"]
+# 排版套（对应 disqualification_rules.md 的 format_sets A-F,
+# bid_rules_synthesize._FORMAT_SET_PRESETS 生成同名 6 套,≤6 变体可两两不同)
+FORMAT_SET_KEYS = ["A", "B", "C", "D", "E", "F"]
 
 
 def generate_variant_style(variant_id: str, seed: int = 0) -> dict:

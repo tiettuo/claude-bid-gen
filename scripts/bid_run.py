@@ -59,6 +59,7 @@ STEPS = [
     "write",         # bid_writer.py
     "review",        # bid_reviewer.py
     "assemble",      # bid_assemble.py (--batch 批量 / 单份)
+    "verify",        # bid_verify.py (组装产物验证门:封面/三家排版差异/页数硬顶)
     "compliance",    # bid_compliance.py (--all-variants 批量 / 单份)
     "similarity",    # bid_similarity.py (批量专用)
     "summary",       # 写项目总览.md + compliance_summary.md + review_summary.md
@@ -1116,6 +1117,17 @@ def run_pipeline(tender_dir: Path, args, log) -> int:
                 if mode == "batch":
                     cmd.append("--batch")
                 code = run_script("bid_assemble.py", cmd, log)
+            elif step == "verify":
+                # 组装产物验证门:exit 2=硬失败(封面缺失/三家排版雷同/超硬顶)→ abort
+                vcode = run_script("bid_verify.py", [str(tender_dir)], log)
+                if vcode == 2 and not args.force_continue:
+                    log.error("verify 门禁:产物硬失败,abort(详见 output/verify_report.md)")
+                    mark_step(state, step, "fail", exit_code=2, error="verify gate failed")
+                    save_state(state_path, state)
+                    return 1
+                if vcode == 1:
+                    log.warning("verify 门禁:有警告,已记入 output/verify_report.md,继续")
+                code = 0  # warn 不阻断;hard fail 已在上面 return
             elif step == "compliance":
                 cmd = [str(tender_dir)]
                 if mode == "batch":
