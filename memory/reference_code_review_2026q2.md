@@ -22,6 +22,6 @@ type: reference
 - **P3 质量地基 ✅已落地:**
   - P3.1 charts/assemble/writer 补特征化测试(原本零测试);P3.2 新增 validate_chart_data 图表数据校验。
   - P3.3 拆了两个最大 god 函数:render_site_layout 304行→55行编排+10个 _sl_draw_* helper(PNG md5 逐字节验证不变)、parse_format_rules 抽出 _normalize_rule_param_keys(输出 dict 逐字段验证不变)。
-  - **P3.3 余留 ⬜:** postprocess_docx 219 / _fit_images 192 / _postproc_normalize_tables 177 / bid_writer.main 215 仍是 god 函数;改 docx 对象、特征化需真实 docx 夹具,留作真正改到时顺手拆。
+  - **P3.3 余留 ✅(2026-05-31 完成):** 4 个 god 函数全拆完——postprocess_docx 219→58(8 个 _pp_* helper)、_postproc_normalize_tables 177→29(6 个 _tbl_* helper)、_fit_images 192→80(_img_anchors_to_inline/_img_wrap_landscape/_img_normalize_para);前三者用新旧产物 document/styles/settings.xml 逐字节对比验证零行为变化。bid_writer.main 215→141(抽 _parse_writer_args/_load_writer_inputs/_build_writer_tasks，加载块返回元组解包回同名变量→并发段 run_task 闭包零改)，网络编排无法字节验，靠保守移动+补 _build_writer_tasks 特征化测试+import 兜底。提交 4c997c0。
 
-测试 70→128 passed。关联 [[project_mozhugongka_chicken_farm_retro]]、[[feedback_verify_assembled_artifact]]。
+测试 70→128→**131 passed**。关联 [[project_mozhugongka_chicken_farm_retro]]、[[feedback_verify_assembled_artifact]]。
