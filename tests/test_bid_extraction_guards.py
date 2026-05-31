@@ -53,9 +53,9 @@ def test_derive_prefers_explicit_altitude(tmp_path):
     assert derived["size_class"] == "small"
 
 
-def test_generation_gate_blocks_empty_boq(tmp_path):
+def _gate_fixture(tmp_path, boq_txt: str):
+    """构造 extracted/ 含 facts + 一个清单 txt + 空 boq.json，返回 gate 结果。"""
     from bid_run import generation_input_gate
-
     ext = tmp_path / "extracted"
     out = tmp_path / "output"
     ext.mkdir()
@@ -64,8 +64,20 @@ def test_generation_gate_blocks_empty_boq(tmp_path):
         json.dumps({"facts": {"project_name": {"value": "某某人居环境整治项目"}}}, ensure_ascii=False),
         encoding="utf-8",
     )
-    (ext / "工程量清单.txt").write_text("清单文本", encoding="utf-8")
+    (ext / "工程量清单.txt").write_text(boq_txt, encoding="utf-8")
     (ext / "boq.json").write_text(json.dumps({"categories": []}), encoding="utf-8")
-    ok, issues = generation_input_gate(tmp_path)
+    return generation_input_gate(tmp_path)
+
+
+def test_generation_gate_blocks_empty_boq_on_extract_failure(tmp_path):
+    """清单含明细表头却抽出 0 条 = 抽取失败，必须拦。"""
+    ok, issues = _gate_fixture(tmp_path, "分部分项工程量清单\n序号 名称 单位 数量\n...")
     assert not ok
     assert any("boq.json 未解析出工程量" in i for i in issues)
+
+
+def test_generation_gate_allows_empty_boq_in_summary_mode(tmp_path):
+    """清单只有汇总表、无明细表头 = 汇总表模式，空 boq 合法，放行。"""
+    ok, issues = _gate_fixture(tmp_path, "单位工程费汇总表\n招标控制价汇总\n合计 372 万元")
+    assert ok, f"汇总表模式不应被拦，但有 issues: {issues}"
+    assert not any("未解析出工程量" in i for i in issues)

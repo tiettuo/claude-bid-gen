@@ -171,6 +171,64 @@ def _ocr_precise_api(image_bytes: bytes, log: logging.Logger) -> str:
         return ""
 
 
+_BOQ_FILENAME_KEYWORDS = [
+    "清单", "工程量", "控制价", "招标控制价", "工程造价",
+    "报价单", "计价表", "费用汇总",
+]
+_BOQ_SUMMARY_KEYWORDS = [
+    "汇总表", "汇总", "工程费汇总", "单项工程费", "单位工程费",
+    "招标控制价汇总", "工程造价汇总", "费用汇总",
+]
+_BOQ_DETAIL_HEADER = [
+    "分部分项工程量清单", "单价措施项目", "措施项目清单",
+    "其他项目清单", "暂估价", "暂列金额", "计日工",
+    "材料（工程设备）暂估单价", "专业工程暂估价",
+]
+
+
+def _is_boq_file(file_path: Path) -> bool:
+    """判断 PDF 是否为工程量清单/控制价文件（按文件名关键词）。"""
+    name = file_path.stem.lower()
+    return any(kw in file_path.stem for kw in _BOQ_FILENAME_KEYWORDS)
+
+
+def _filter_boq_summary_pages(page_meta: list[dict], log: logging.Logger) -> list[dict]:
+    """清单 PDF 只保留汇总表相关页，跳过分部分项明细行。
+
+    策略：
+    - 全页均为扫描页（无文字）→ 只取前 15 页（封面+汇总表通常在此范围）
+    - 有文字的页：包含汇总关键词或前 5 页 → 保留；命中明细表头且无汇总词 → 跳过
+    """
+    all_scanned = all(meta.get("is_scanned", False) or not meta.get("text", "").strip()
+                      for meta in page_meta)
+    if all_scanned:
+        # 全扫描清单：先只送前 25 页进 vision OCR，vision 完成后在阶段4再按"汇总表"过滤
+        kept = [m for m in page_meta if m["idx"] < 30]
+        log.info(f"  清单文件（全扫描）：送前 30 页做 Vision OCR，跳过 {len(page_meta) - len(kept)} 页明细，"
+                 f"阶段4将按'汇总表'关键词二次过滤")
+        return kept
+
+    kept = []
+    for meta in page_meta:
+        idx = meta["idx"]
+        text = meta.get("text", "")
+        is_summary = any(kw in text for kw in _BOQ_SUMMARY_KEYWORDS)
+        is_detail_only = (
+            any(kw in text for kw in _BOQ_DETAIL_HEADER)
+            and not is_summary
+        )
+        if idx < 5 or is_summary:
+            kept.append(meta)
+        elif is_detail_only:
+            pass  # 跳过明细页
+        else:
+            kept.append(meta)
+    skipped = len(page_meta) - len(kept)
+    if skipped:
+        log.info(f"  清单文件：保留 {len(kept)}/{len(page_meta)} 页（跳过 {skipped} 页明细）")
+    return kept
+
+
 def extract_pdf(file_path: Path, log: logging.Logger, vision_report: dict | None = None) -> str:
     """提取 PDF 文本，分层策略：
     - 文字页 + 无关键词命中 → pdfplumber 原样输出
@@ -258,6 +316,10 @@ def extract_pdf(file_path: Path, log: logging.Logger, vision_report: dict | None
                 })
             log.info(f"  PyMuPDF 扫描完成: {file_path.name} ({len(page_meta)} 页)")
 
+        # 清单文件：在触发 vision 前先过滤，只保留汇总表页
+        if _is_boq_file(file_path):
+            page_meta = _filter_boq_summary_pages(page_meta, log)
+
         # === 阶段 3：决定哪些页走视觉 ===
         vision_page_records: list[dict] = []
         vision_targets: list[tuple[int, str]] = []  # (idx, reason)
@@ -331,6 +393,19 @@ def extract_pdf(file_path: Path, log: logging.Logger, vision_report: dict | None
                 log.info(f"    第{idx+1}页 [{reason}] 模型={model_used} 字符={len(vision_text)}")
 
         # === 阶段 4：汇总输出文本 ===
+        # 清单全扫描文件：vision 完成后按"汇总表"二次过滤
+        if _is_boq_file(file_path):
+            filtered_meta = []
+            for meta in page_meta:
+                final_text = meta.get("vision_text") or meta.get("text", "")
+                if "汇总表" in final_text:
+                    filtered_meta.append(meta)
+            if filtered_meta:
+                log.info(f"  清单文件：二次过滤后保留 {len(filtered_meta)}/{len(page_meta)} 页（含'汇总表'）")
+                page_meta = filtered_meta
+            else:
+                log.warning(f"  清单文件：二次过滤无命中，保留全部 {len(page_meta)} 页（'汇总表'未识别到）")
+
         for meta in page_meta:
             i = meta["idx"]
             if "vision_text" in meta:

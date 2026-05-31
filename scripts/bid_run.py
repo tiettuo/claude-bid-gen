@@ -244,7 +244,23 @@ def generation_input_gate(tender_dir: Path) -> tuple[bool, list[str]]:
                 boq = json.loads(boq_path.read_text(encoding="utf-8"))
                 total_items = sum(len(c.get("items", []) or []) for c in boq.get("categories", []) or [])
                 if total_items == 0:
-                    issues.append("存在清单文本但 boq.json 未解析出工程量，需修复清单抽取后再生成")
+                    # 区分两种"空 boq"：
+                    #   汇总表模式（清单只有汇总表、无明细）= 合法空 → 放行；
+                    #   抽取失败（清单含明细表头却没抽出条目）= 仍拦，防 [[feedback_boq_must_read]] 那类漏抽。
+                    try:
+                        from bid_extract import _BOQ_DETAIL_HEADER as _detail_kw
+                    except Exception:
+                        _detail_kw = ["分部分项工程量清单", "单价措施项目", "措施项目清单", "其他项目清单"]
+                    _blob = ""
+                    for _tp in (list(ext.glob("*清单*.txt")) + list(ext.glob("*工程量*.txt"))
+                                + list(ext.glob("*BoQ*.txt"))):
+                        try:
+                            _blob += _tp.read_text(encoding="utf-8", errors="ignore")
+                        except Exception:
+                            pass
+                    if any(kw in _blob for kw in _detail_kw):
+                        issues.append("清单含明细表头但 boq.json 未解析出工程量，疑似抽取失败，需修复清单抽取后再生成")
+                    # 否则=汇总表模式（只有汇总表、无明细），合法空，放行
             except Exception as e:  # noqa: BLE001
                 issues.append(f"boq.json 读取失败: {e}")
 
@@ -1112,6 +1128,9 @@ def run_pipeline(tender_dir: Path, args, log) -> int:
                         mark_step(state, step, "fail", error="review gate failed")
                         save_state(state_path, state)
                         return 1
+                    else:
+                        # 门禁通过 → moderate/minor 不阻断，强制 code=0 继续
+                        code = 0
             elif step == "assemble":
                 cmd = [str(tender_dir / "output")]
                 if mode == "batch":
