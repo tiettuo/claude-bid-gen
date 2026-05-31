@@ -203,9 +203,156 @@ def _call_glm_ocr(
     return md.strip()
 
 
+def _html_tables_to_markdown(text: str) -> str:
+    """把 GLM-OCR 本地版固化输出的 HTML 表格转成 Markdown 表格。
+    只处理 <table>…</table> 块，其余文本原样保留。
+    不依赖第三方库，用标准库 html.parser。
+    """
+    from html.parser import HTMLParser
+    import re
+
+    class _TableParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.rows: list[list[str]] = []
+            self._cur_row: list[str] = []
+            self._cur_cell: list[str] = []
+            self._in_cell = False
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "tr":
+                self._cur_row = []
+            elif tag in ("td", "th"):
+                self._cur_cell = []
+                self._in_cell = True
+
+        def handle_endtag(self, tag):
+            if tag in ("td", "th"):
+                cell = " ".join(self._cur_cell).strip()
+                # 换行符在单元格内转为空格，避免破坏表格行
+                cell = cell.replace("\n", " ")
+                self._cur_row.append(cell)
+                self._in_cell = False
+            elif tag == "tr":
+                if self._cur_row:
+                    self.rows.append(self._cur_row)
+            elif tag == "table":
+                pass
+
+        def handle_data(self, data):
+            if self._in_cell:
+                self._cur_cell.append(data)
+
+        def handle_starttag_br(self):
+            if self._in_cell:
+                self._cur_cell.append("\n")
+
+    def _table_to_md(html_table: str) -> str:
+        p = _TableParser()
+        p.feed(html_table)
+        rows = p.rows
+        if not rows:
+            return html_table
+        # 统一列数
+        n_cols = max(len(r) for r in rows)
+        rows = [r + [""] * (n_cols - len(r)) for r in rows]
+        # 转 Markdown：第一行做表头
+        lines = []
+        header = rows[0]
+        lines.append("| " + " | ".join(header) + " |")
+        lines.append("| " + " | ".join(["---"] * n_cols) + " |")
+        for row in rows[1:]:
+            lines.append("| " + " | ".join(row) + " |")
+        return "\n".join(lines)
+
+    # 替换所有 <table>…</table> 块（含嵌套属性、跨行）
+    table_re = re.compile(r"<table[^>]*>.*?</table>", re.DOTALL | re.IGNORECASE)
+    return table_re.sub(lambda m: _table_to_md(m.group(0)), text)
+
+
+def _call_glm_ocr_local(
+    image_bytes: bytes,
+    prompt: str,
+    model_cfg: dict,
+    log: logging.Logger,
+    timeout: int,
+) -> str:
+    """本地 Ollama GLM-OCR 离线兜底。用 curl 子进程调 /api/chat 绕过 Python HTTP 兼容问题。
+    输出的 HTML 表格自动转为 Markdown 表格（云端版行为一致）。
+    """
+    import json, subprocess, tempfile, os
+
+    ollama_url = model_cfg.get("ollama_url", "http://127.0.0.1:11434/api/chat")
+    model_name = model_cfg.get("model_name", "glm-ocr:latest")
+    num_ctx = model_cfg.get("num_ctx", 16384)
+
+    # 快速检查 Ollama 是否在线
+    try:
+        check = subprocess.run(
+            ["curl", "-sf", "--max-time", "2",
+             ollama_url.replace("/api/chat", "/api/tags")],
+            capture_output=True, timeout=5,
+        )
+        if check.returncode != 0:
+            log.warning("  GLM-OCR 本地：Ollama 未运行，跳过")
+            return ""
+    except Exception:
+        log.warning("  GLM-OCR 本地：Ollama 连通性检查失败，跳过")
+        return ""
+
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    payload = {
+        "model": model_name,
+        "stream": False,
+        "options": {"num_ctx": num_ctx},
+        "messages": [{
+            "role": "user",
+            "content": prompt,
+            "images": [b64],
+        }],
+    }
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8"
+        ) as f:
+            json.dump(payload, f, ensure_ascii=True)
+            tmp_path = f.name
+
+        result = subprocess.run(
+            ["curl", "-s", "-X", "POST", ollama_url,
+             "-H", "Content-Type: application/json",
+             "-d", f"@{tmp_path}"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if result.returncode != 0:
+            log.warning(f"  GLM-OCR 本地：curl 失败: {result.stderr[:200]}")
+            return ""
+        data = json.loads(result.stdout)
+        text = data.get("message", {}).get("content", "").strip()
+        if text:
+            text = _html_tables_to_markdown(text)
+            log.info(f"  GLM-OCR 本地识别成功 ({len(text)} 字符)")
+        return text
+    except subprocess.TimeoutExpired:
+        log.warning(f"  GLM-OCR 本地：推理超时 ({timeout}s)")
+        return ""
+    except Exception as e:
+        log.warning(f"  GLM-OCR 本地：异常: {e}")
+        return ""
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
 _DISPATCH = {
     "qwen_vl": _call_qwen_vl,
     "glm_ocr": _call_glm_ocr,
+    "glm_ocr_local": _call_glm_ocr_local,
 }
 
 
@@ -254,10 +401,11 @@ def _call_model_with_retries(
     if not dispatcher:
         log.warning(f"  未知视觉模型类型: {model_key}，跳过")
         return "", model_key
-    api_key = _get_api_key(model_cfg)
-    if not api_key:
-        log.warning(f"  {model_cfg.get('display_name')} 未配置 API Key，跳过")
-        return "", model_key
+    if not model_cfg.get("local"):
+        api_key = _get_api_key(model_cfg)
+        if not api_key:
+            log.warning(f"  {model_cfg.get('display_name')} 未配置 API Key，跳过")
+            return "", model_key
 
     retry = cfg.get("retry", {})
     max_attempts = int(retry.get("max_attempts", 2))

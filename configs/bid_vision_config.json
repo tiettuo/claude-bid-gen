@@ -18,15 +18,23 @@
       "api_key_env": "GLM_API_KEY",
       "api_key_env_alt": "LLM_ZHIPU_KEY",
       "notes": "兜底版面解析，不走 OpenAI 兼容接口，走 zai SDK 的 layout_parsing 端点"
+    },
+    "glm_ocr_local": {
+      "display_name": "GLM-OCR 本地（Ollama）",
+      "local": true,
+      "ollama_url": "http://127.0.0.1:11434/api/chat",
+      "model_name": "glm-ocr:latest",
+      "num_ctx": 16384,
+      "notes": "离线兜底：云端全部失败时调本地 Ollama，M4 Mac ~1.7s/页，无需网络"
     }
   },
 
-  "fallback_order": ["glm_ocr", "qwen_vl"],
+  "fallback_order": ["qwen_vl", "glm_ocr_local"],
 
   "category_routing": {
-    "_comment": "GLM-OCR 为主（中文版面/表格 SOTA），Qwen-VL 为辅（GLM 失败时兜底）",
-    "table_dense": "glm_ocr",
-    "text_dense": "glm_ocr"
+    "_comment": "Qwen-VL 为主（全场景），glm_ocr_local 离线兜底",
+    "table_dense": "qwen_vl",
+    "text_dense": "qwen_vl"
   },
 
   "retry": {
