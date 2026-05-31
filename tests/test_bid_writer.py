@@ -67,3 +67,42 @@ def test_build_auto_subitem_plan_subitem_chars_preserved():
     subs = [{"title": "a", "chars": 9000}, {"title": "b", "chars": 11000}]
     plan = W._build_auto_subitem_plan(chapter, variant, subs)
     assert [s["target_chars"] for s in plan["subitems"]] == [9000, 11000]
+
+
+# ─── _build_writer_tasks（P3.3 拆 main 后的任务构造）─────────────
+def test_build_writer_tasks_skip_and_collect(tmp_path):
+    import logging
+    from types import SimpleNamespace
+    log = logging.getLogger("t_build"); log.setLevel(logging.ERROR)
+    output = tmp_path / "output"; output.mkdir()
+    variants = [{"id": "V01", "model": "deepseek"}, {"id": "V02", "model": "deepseek"}]
+    chapters = [
+        {"num": "01", "title": "工程概况", "filename": "01_工程概况.md"},
+        {"num": "02", "title": "施工部署", "filename": "02_施工部署.md"},
+    ]
+    args = SimpleNamespace(chapter=None, force=False)
+    # 预先在 V01 放一个已生成章节 → 应被 skip
+    (output / "V01").mkdir()
+    (output / "V01" / "01_工程概况.md").write_text("已生成", encoding="utf-8")
+
+    tasks, skip = W._build_writer_tasks(variants, chapters, output, args, log)
+    # 2 变体 × 2 章 = 4，减去 V01 的 01（已存在）→ 3 个任务 + 1 跳过
+    assert skip == 1
+    assert len(tasks) == 3
+    assert ("V01", "02") in [(v["id"], ch["num"]) for v, ch, _ in tasks]
+    assert ("V01", "01") not in [(v["id"], ch["num"]) for v, ch, _ in tasks]
+
+
+def test_build_writer_tasks_chapter_filter(tmp_path):
+    import logging
+    from types import SimpleNamespace
+    log = logging.getLogger("t_build2"); log.setLevel(logging.ERROR)
+    output = tmp_path / "output"; output.mkdir()
+    variants = [{"id": "V01", "model": "deepseek"}]
+    chapters = [
+        {"num": "01", "title": "x", "filename": "01_x.md"},
+        {"num": "02", "title": "y", "filename": "02_y.md"},
+    ]
+    args = SimpleNamespace(chapter="2", force=False)  # 仅生成第 02 章
+    tasks, skip = W._build_writer_tasks(variants, chapters, output, args, log)
+    assert len(tasks) == 1 and tasks[0][1]["num"] == "02"

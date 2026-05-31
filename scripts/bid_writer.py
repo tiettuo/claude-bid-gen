@@ -1523,7 +1523,7 @@ def _validate_variant_models(variants: list[dict], client: LLMClient,
     return True
 
 
-def main() -> int:
+def _parse_writer_args(argv=None):
     p = argparse.ArgumentParser(description="多模型章节生成工作器")
     p.add_argument("tender_dir", help="投标根目录")
     p.add_argument("--variant", help="仅生成指定 variant（如 V01）")
@@ -1533,32 +1533,22 @@ def main() -> int:
     p.add_argument("--per-model-limit", type=int, default=2, help="单模型并发上限（默认 2）")
     p.add_argument("--no-polish", action="store_true", help="跳过主笔润色，直接用子项拼章草稿为最终输出")
     p.add_argument("-v", "--verbose", action="store_true")
-    args = p.parse_args()
+    return p.parse_args(argv)
 
-    global SKIP_POLISH
-    SKIP_POLISH = args.no_polish
 
-    tender_dir = Path(args.tender_dir).expanduser().resolve()
-    extracted = tender_dir / "extracted"
-    output = tender_dir / "output"
-    output.mkdir(exist_ok=True)
-
-    log_path = output / "writer.log"
-    log = make_script_logger("bid_writer", log_path, verbose=args.verbose)
-    log.info("=" * 60)
-    log.info(f"bid_writer 启动  目录: {tender_dir}  时间: {datetime.now().isoformat(timespec='seconds')}")
-
-    # 加载输入
+def _load_writer_inputs(extracted: Path, log):
+    """加载 writer 所需的全部输入。失败（缺 variants.json / chapter_plan 解析为空）
+    时记录日志并返回 None；成功返回元组（顺序见 main 解包处，变量名保持不变）。"""
     variants_path = extracted / "variants.json"
     if not variants_path.exists():
         log.error(f"缺少 {variants_path}。请先运行 bid_variants.py")
-        return 2
+        return None
     variants_payload = json.loads(variants_path.read_text(encoding="utf-8"))
 
     chapters = parse_chapter_plan(extracted / "chapter_plan.md")
     if not chapters:
         log.error("chapter_plan.md 解析不到任何章节")
-        return 2
+        return None
 
     # 加载图表规格(可选,缺失时退回到 prompt 中的 7 种 type 总览)
     load_chart_specs(extracted, log)
@@ -1597,22 +1587,13 @@ def main() -> int:
 
     client = LLMClient.load(log=log)
 
-    # 过滤 variants / chapters
-    target_variants = variants_payload["variants"]
-    if args.variant:
-        target_variants = [v for v in target_variants if v["id"].upper() == args.variant.upper()]
-        if not target_variants:
-            log.error(f"未找到 variant: {args.variant}")
-            return 2
+    return (variants_payload, chapters, subitems_map, brain_text,
+            disq_excerpt, response_keywords, system_prompt, client)
 
-    # 校验变体模型在当前 config 下可用(不可用则就地替换,避免整批章节白跑)
-    if not _validate_variant_models(target_variants, client, log):
-        return 2
 
-    ok_count = fail_count = skip_count = 0
-
-    # 章节结构:每个变体优先用自己的 chapter_plan_variant.md(结构独立,反串标),
-    # 缺失时回退共享 chapter_plan.md。
+def _build_writer_tasks(target_variants, chapters, output: Path, args, log):
+    """构造 (variant, chapter, out_path) 任务列表；返回 (tasks, skip_count)。
+    每变体优先用自己的 chapter_plan_variant.md(结构独立,反串标),缺失回退共享 chapter_plan.md。"""
     def _variant_chapters(v: dict) -> list[dict]:
         vp = output / v["id"] / "chapter_plan_variant.md"
         v_chs = parse_chapter_plan(vp) if vp.exists() else []
@@ -1622,8 +1603,8 @@ def main() -> int:
             v_chs = [c for c in v_chs if c["num"] == args.chapter.zfill(2)]
         return v_chs
 
-    # 构造任务列表(逐变体取各自的章节结构)
     tasks = []
+    skip_count = 0
     for v in target_variants:
         v_dir = output / v["id"]
         v_dir.mkdir(exist_ok=True)
@@ -1639,6 +1620,48 @@ def main() -> int:
                 skip_count += 1
                 continue
             tasks.append((v, ch, out_path))
+    return tasks, skip_count
+
+
+def main() -> int:
+    args = _parse_writer_args()
+
+    global SKIP_POLISH
+    SKIP_POLISH = args.no_polish
+
+    tender_dir = Path(args.tender_dir).expanduser().resolve()
+    extracted = tender_dir / "extracted"
+    output = tender_dir / "output"
+    output.mkdir(exist_ok=True)
+
+    log_path = output / "writer.log"
+    log = make_script_logger("bid_writer", log_path, verbose=args.verbose)
+    log.info("=" * 60)
+    log.info(f"bid_writer 启动  目录: {tender_dir}  时间: {datetime.now().isoformat(timespec='seconds')}")
+
+    # 加载输入（缺关键文件则记录日志并退出）
+    loaded = _load_writer_inputs(extracted, log)
+    if loaded is None:
+        return 2
+    (variants_payload, chapters, subitems_map, brain_text,
+     disq_excerpt, response_keywords, system_prompt, client) = loaded
+
+    # 过滤 variants / chapters
+    target_variants = variants_payload["variants"]
+    if args.variant:
+        target_variants = [v for v in target_variants if v["id"].upper() == args.variant.upper()]
+        if not target_variants:
+            log.error(f"未找到 variant: {args.variant}")
+            return 2
+
+    # 校验变体模型在当前 config 下可用(不可用则就地替换,避免整批章节白跑)
+    if not _validate_variant_models(target_variants, client, log):
+        return 2
+
+    ok_count = fail_count = 0
+
+    # 构造任务列表(逐变体取各自的章节结构)
+    tasks, skip_count = _build_writer_tasks(target_variants, chapters, output, args, log)
 
     log.info(f"待生成: {len(target_variants)} 个变体, 共 {len(tasks)} 个章节任务"
              + (f"(另跳过 {skip_count})" if skip_count else ""))

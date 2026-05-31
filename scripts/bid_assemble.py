@@ -1202,38 +1202,10 @@ def _apply_doc_soft_layer(doc, fmt: dict, vs: dict, log) -> None:
         log.info(f"  文档软层微调: {', '.join(touched)}")
 
 
-def _fit_images(doc, fmt: dict, log) -> None:
-    """扫描文档中的图片，约束尺寸并为大图切换横版。
-
-    规则：
-    1. 图片宽度不超过版心宽度，等比缩放
-    2. 缩放后高度仍超过版心高度 85% → 切横版（landscape）
-    3. 横版结束后自动恢复竖版
-    """
-    from docx.shared import Cm, Emu
+def _img_anchors_to_inline(doc, log):
+    """把所有 wp:anchor(浮动图片)转为 wp:inline(嵌入式),防止图片飘到文字后面。"""
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
-    import copy
-
-    page_w_cm = fmt.get("page_width_cm", 21.0)
-    page_h_cm = fmt.get("page_height_cm", 29.7)
-    ml = fmt.get("margin_left_cm", 2.8)
-    mr = fmt.get("margin_right_cm", 2.4)
-    mt = fmt.get("margin_top_cm", 2.6)
-    mb = fmt.get("margin_bottom_cm", 2.5)
-
-    content_w_portrait = Cm(page_w_cm - ml - mr)
-    content_h_portrait = Cm(page_h_cm - mt - mb)
-    content_w_landscape = Cm(page_h_cm - ml - mr)   # 横版：高变宽
-    content_h_landscape = Cm(page_w_cm - mt - mb)    # 横版：宽变高
-
-    threshold = 0.85
-    img_count = 0
-    landscape_count = 0
-
-    body = doc.element.body
-
-    # 先把所有 wp:anchor（浮动图片）转为 wp:inline（嵌入式），防止图片飘到文字后面
     for para in doc.paragraphs:
         for anchor in para._element.findall(f".//{qn('wp:anchor')}"):
             inline = OxmlElement("wp:inline")
@@ -1253,6 +1225,128 @@ def _fit_images(doc, fmt: dict, log) -> None:
             anchor.getparent().replace(anchor, inline)
             log.info("  浮动图片 → 嵌入式（防止文字遮盖）")
 
+
+def _img_wrap_landscape(body, para_elem, page_w_cm, page_h_cm, ml, mr, mt, mb):
+    """在图片段落前后插入连续分节符：前段=竖→横, 后段=横→竖, 让大图独占横版页。"""
+    from docx.shared import Cm
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    import copy
+
+    # 创建横版的 sectPr
+    sect_landscape = OxmlElement("w:sectPr")
+    pgsz = OxmlElement("w:pgSz")
+    pgsz.set(qn("w:w"), str(int(Cm(page_h_cm).twips)))   # 横版：高→宽
+    pgsz.set(qn("w:h"), str(int(Cm(page_w_cm).twips)))   # 横版：宽→高
+    pgsz.set(qn("w:orient"), "landscape")
+    sect_landscape.append(pgsz)
+    # 横版的边距（左右对调因为旋转）
+    pgmar = OxmlElement("w:pgMar")
+    pgmar.set(qn("w:top"), str(int(Cm(mt).twips)))
+    pgmar.set(qn("w:bottom"), str(int(Cm(mb).twips)))
+    pgmar.set(qn("w:left"), str(int(Cm(ml).twips)))
+    pgmar.set(qn("w:right"), str(int(Cm(mr).twips)))
+    sect_landscape.append(pgmar)
+
+    # 在图片段落前插入一个空段落，把竖版→横版的分节符放在这个空段里
+    pre_break = OxmlElement("w:p")
+    pre_pPr = OxmlElement("w:pPr")
+    pre_pPr.append(copy.deepcopy(sect_landscape))
+    pre_break.append(pre_pPr)
+    body.insert(list(body).index(para_elem), pre_break)
+
+    # 在图片段落后插入一个空段落，把横版→竖版的分节符放在里面
+    sect_portrait = OxmlElement("w:sectPr")
+    pgsz2 = OxmlElement("w:pgSz")
+    pgsz2.set(qn("w:w"), str(int(Cm(page_w_cm).twips)))
+    pgsz2.set(qn("w:h"), str(int(Cm(page_h_cm).twips)))
+    sect_portrait.append(pgsz2)
+    pgmar2 = OxmlElement("w:pgMar")
+    pgmar2.set(qn("w:top"), str(int(Cm(mt).twips)))
+    pgmar2.set(qn("w:bottom"), str(int(Cm(mb).twips)))
+    pgmar2.set(qn("w:left"), str(int(Cm(ml).twips)))
+    pgmar2.set(qn("w:right"), str(int(Cm(mr).twips)))
+    sect_portrait.append(pgmar2)
+
+    post_break = OxmlElement("w:p")
+    post_pPr = OxmlElement("w:pPr")
+    post_pPr.append(sect_portrait)
+    post_break.append(post_pPr)
+    para_idx = list(body).index(para_elem)
+    if para_idx + 1 < len(list(body)):
+        body.insert(para_idx + 1, post_break)
+    else:
+        body.append(post_break)
+
+
+def _img_normalize_para(para, new_h):
+    """图片段落 pPr：删 pStyle/旧行距 → 重建撑开行距 + 首行缩进归零 + 居中。"""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    # 图片段落：彻底脱离 Normal 样式（exact 28pt 会裁切图片）
+    pPr = para._element.find(qn("w:pPr"))
+    if pPr is None:
+        pPr = OxmlElement("w:pPr")
+        para._element.insert(0, pPr)
+    # 删除 pStyle（CaptionedFigure 等 pandoc 样式未定义，Word 回退 Normal exact 行距会裁图）
+    old_pstyle = pPr.find(qn("w:pStyle"))
+    if old_pstyle is not None:
+        pPr.remove(old_pstyle)
+    # 行距：删旧重建，最小值=图片高度，确保段落撑开
+    old_sp = pPr.find(qn("w:spacing"))
+    if old_sp is not None:
+        pPr.remove(old_sp)
+    img_h_twips = int(new_h / 914400 * 1440)  # EMU → twips
+    spacing = OxmlElement("w:spacing")
+    spacing.set(qn("w:line"), str(max(img_h_twips, 240)))
+    spacing.set(qn("w:lineRule"), "atLeast")
+    spacing.set(qn("w:before"), "120")
+    spacing.set(qn("w:after"), "120")
+    pPr.append(spacing)
+    # 首行缩进归零（覆盖 Normal 样式的 firstLine=560）
+    ind = pPr.find(qn("w:ind"))
+    if ind is None:
+        ind = OxmlElement("w:ind")
+        pPr.append(ind)
+    ind.set(qn("w:firstLine"), "0")
+    ind.set(qn("w:firstLineChars"), "0")
+    ind.set(qn("w:left"), "0")
+    ind.set(qn("w:right"), "0")
+    # 居中
+    jc = pPr.find(qn("w:jc"))
+    if jc is None:
+        jc = OxmlElement("w:jc")
+        pPr.append(jc)
+    jc.set(qn("w:val"), "center")
+
+
+def _fit_images(doc, fmt: dict, log) -> None:
+    """扫描文档中的图片，约束尺寸并为大图切换横版（编排）。
+    1. 宽不超版心，等比缩放  2. 缩放后仍超版心高 85% → 切横版  3. 横版后恢复竖版
+    具体步骤见 _img_anchors_to_inline / _img_wrap_landscape / _img_normalize_para。
+    """
+    from docx.shared import Cm
+    from docx.oxml.ns import qn
+
+    page_w_cm = fmt.get("page_width_cm", 21.0)
+    page_h_cm = fmt.get("page_height_cm", 29.7)
+    ml = fmt.get("margin_left_cm", 2.8)
+    mr = fmt.get("margin_right_cm", 2.4)
+    mt = fmt.get("margin_top_cm", 2.6)
+    mb = fmt.get("margin_bottom_cm", 2.5)
+
+    content_w_portrait = Cm(page_w_cm - ml - mr)
+    content_h_portrait = Cm(page_h_cm - mt - mb)
+    content_w_landscape = Cm(page_h_cm - ml - mr)   # 横版：高变宽
+    content_h_landscape = Cm(page_w_cm - mt - mb)    # 横版：宽变高
+    threshold = 0.85
+    img_count = 0
+    landscape_count = 0
+    body = doc.element.body
+
+    # 浮动图片 → 嵌入式
+    _img_anchors_to_inline(doc, log)
+
     paragraphs_with_images = []
     for para in doc.paragraphs:
         drawings = para._element.findall(f".//{qn('wp:inline')}")
@@ -1264,19 +1358,16 @@ def _fit_images(doc, fmt: dict, log) -> None:
         extent = drawing.find(qn("wp:extent"))
         if extent is None:
             continue
-
         orig_w = int(extent.get("cx", 0))
         orig_h = int(extent.get("cy", 0))
         if orig_w == 0 or orig_h == 0:
             continue
-
         aspect = orig_h / orig_w
         img_count += 1
 
         # 先尝试竖版缩放
         new_w = min(orig_w, int(content_w_portrait))
         new_h = int(new_w * aspect)
-
         need_landscape = (not fmt.get("force_portrait")) and (new_h > int(content_h_portrait * threshold))
 
         if need_landscape:
@@ -1286,58 +1377,10 @@ def _fit_images(doc, fmt: dict, log) -> None:
             if new_h > int(content_h_landscape):
                 new_h = int(content_h_landscape)
                 new_w = int(new_h / aspect)
-
-            # 在图片段落前插入分节符（连续型），设为横版
-            para_elem = para._element
-
-            # 创建横版的 sectPr
-            sect_landscape = OxmlElement("w:sectPr")
-            pgsz = OxmlElement("w:pgSz")
-            pgsz.set(qn("w:w"), str(int(Cm(page_h_cm).twips)))   # 横版：高→宽
-            pgsz.set(qn("w:h"), str(int(Cm(page_w_cm).twips)))   # 横版：宽→高
-            pgsz.set(qn("w:orient"), "landscape")
-            sect_landscape.append(pgsz)
-            # 横版的边距（左右对调因为旋转）
-            pgmar = OxmlElement("w:pgMar")
-            pgmar.set(qn("w:top"), str(int(Cm(mt).twips)))
-            pgmar.set(qn("w:bottom"), str(int(Cm(mb).twips)))
-            pgmar.set(qn("w:left"), str(int(Cm(ml).twips)))
-            pgmar.set(qn("w:right"), str(int(Cm(mr).twips)))
-            sect_landscape.append(pgmar)
-
-            # 在图片段落前插入一个空段落，把竖版→横版的分节符放在这个空段里
-            pre_break = OxmlElement("w:p")
-            pre_pPr = OxmlElement("w:pPr")
-            pre_pPr.append(copy.deepcopy(sect_landscape))
-            pre_break.append(pre_pPr)
-            body.insert(list(body).index(para_elem), pre_break)
-
-            # 在图片段落后插入一个空段落，把横版→竖版的分节符放在里面
-            sect_portrait = OxmlElement("w:sectPr")
-            pgsz2 = OxmlElement("w:pgSz")
-            pgsz2.set(qn("w:w"), str(int(Cm(page_w_cm).twips)))
-            pgsz2.set(qn("w:h"), str(int(Cm(page_h_cm).twips)))
-            sect_portrait.append(pgsz2)
-            pgmar2 = OxmlElement("w:pgMar")
-            pgmar2.set(qn("w:top"), str(int(Cm(mt).twips)))
-            pgmar2.set(qn("w:bottom"), str(int(Cm(mb).twips)))
-            pgmar2.set(qn("w:left"), str(int(Cm(ml).twips)))
-            pgmar2.set(qn("w:right"), str(int(Cm(mr).twips)))
-            sect_portrait.append(pgmar2)
-
-            post_break = OxmlElement("w:p")
-            post_pPr = OxmlElement("w:pPr")
-            post_pPr.append(sect_portrait)
-            post_break.append(post_pPr)
-            para_idx = list(body).index(para_elem)
-            if para_idx + 1 < len(list(body)):
-                body.insert(para_idx + 1, post_break)
-            else:
-                body.append(post_break)
-
+            _img_wrap_landscape(body, para._element, page_w_cm, page_h_cm, ml, mr, mt, mb)
             landscape_count += 1
         else:
-            # 竖版：超宽则缩放
+            # 竖版：超高则缩放
             if new_h > int(content_h_portrait):
                 new_h = int(content_h_portrait)
                 new_w = int(new_h / aspect)
@@ -1345,340 +1388,344 @@ def _fit_images(doc, fmt: dict, log) -> None:
         # 更新图片尺寸
         extent.set("cx", str(new_w))
         extent.set("cy", str(new_h))
-
         # 同步更新 a:xfrm 里的 ext（如果有）
         for ext_elem in drawing.findall(f".//{qn('a:ext')}"):
             if int(ext_elem.get("cx", 0)) > 0:
                 ext_elem.set("cx", str(new_w))
                 ext_elem.set("cy", str(new_h))
 
-        # 图片段落：彻底脱离 Normal 样式（exact 28pt 会裁切图片）
-        pPr = para._element.find(qn("w:pPr"))
-        if pPr is None:
-            pPr = OxmlElement("w:pPr")
-            para._element.insert(0, pPr)
-
-        # 删除 pStyle（CaptionedFigure 等 pandoc 样式在文档中未定义，
-        # Word 回退到 Normal 的 exact 行距会裁切图片）
-        old_pstyle = pPr.find(qn("w:pStyle"))
-        if old_pstyle is not None:
-            pPr.remove(old_pstyle)
-
-        # 行距：删旧重建，最小值=图片高度，确保段落撑开
-        old_sp = pPr.find(qn("w:spacing"))
-        if old_sp is not None:
-            pPr.remove(old_sp)
-        img_h_twips = int(new_h / 914400 * 1440)  # EMU → twips
-        spacing = OxmlElement("w:spacing")
-        spacing.set(qn("w:line"), str(max(img_h_twips, 240)))
-        spacing.set(qn("w:lineRule"), "atLeast")
-        spacing.set(qn("w:before"), "120")
-        spacing.set(qn("w:after"), "120")
-        pPr.append(spacing)
-
-        # 首行缩进归零（覆盖 Normal 样式的 firstLine=560）
-        ind = pPr.find(qn("w:ind"))
-        if ind is None:
-            ind = OxmlElement("w:ind")
-            pPr.append(ind)
-        ind.set(qn("w:firstLine"), "0")
-        ind.set(qn("w:firstLineChars"), "0")
-        ind.set(qn("w:left"), "0")
-        ind.set(qn("w:right"), "0")
-
-        # 居中
-        jc = pPr.find(qn("w:jc"))
-        if jc is None:
-            jc = OxmlElement("w:jc")
-            pPr.append(jc)
-        jc.set(qn("w:val"), "center")
+        _img_normalize_para(para, new_h)
 
     if img_count:
         log.info(f"  图片缩放: {img_count} 张, 其中 {landscape_count} 张切换为横版")
 
 
-def _postproc_normalize_tables(doc, fmt: dict, body_size, log,
-                                force_cn_font):
-    """规范化 docx 内所有表格(列宽/边框/表头/单元格字号/对齐/跨页重复)。
+def _tbl_set_or_add(parent, tag):
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    el = parent.find(qn(tag))
+    if el is None:
+        el = OxmlElement(tag)
+        parent.append(el)
+    return el
 
-    2026-05-11 Phase 3.1:从 postprocess_docx 内部抽出。
-    force_cn_font 是 postprocess_docx 闭包内的字体规范函数,通过回调传入。
-    """
+
+def _tbl_set_borders(tbl, line_sz, line_color_hex):
+    """表格四向+内框单线边框。line_sz=八分之一磅, line_color_hex=大写十六进制。"""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    tblPr = tbl._tbl.find(qn("w:tblPr"))
+    if tblPr is None:
+        return
+    borders = _tbl_set_or_add(tblPr, "w:tblBorders")
+    for child in list(borders):
+        borders.remove(child)
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        b = OxmlElement(f"w:{edge}")
+        b.set(qn("w:val"), "single")
+        b.set(qn("w:sz"), str(line_sz))
+        b.set(qn("w:space"), "0")
+        b.set(qn("w:color"), line_color_hex)
+        borders.append(b)
+
+
+def _tbl_calc_col_widths(tbl, total_dxa):
+    """按内容字符数比例分配列宽(中文算 2 宽度)。"""
+    rows = tbl.rows
+    if not rows:
+        return []
+    n_cols = len(rows[0].cells)
+    if n_cols == 0:
+        return []
+    min_dxa = 800
+    max_chars = [0] * n_cols
+    for row in rows:
+        for i, cell in enumerate(row.cells):
+            if i >= n_cols:
+                break
+            text = cell.text.strip()
+            w = sum(2 if '一' <= c <= '鿿' or c in '，。、；：""''（）《》【】' else 1 for c in text)
+            max_chars[i] = max(max_chars[i], w)
+    floor = 4
+    weights = [max(c, floor) for c in max_chars]
+    total_w = sum(weights)
+    widths = [max(min_dxa, int(total_dxa * w / total_w)) for w in weights]
+    remainder = total_dxa - sum(widths)
+    if remainder != 0 and widths:
+        widths[widths.index(max(widths))] += remainder
+    return widths
+
+
+def _tbl_set_col_widths(tbl, total_dxa):
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    widths = _tbl_calc_col_widths(tbl, total_dxa)
+    if not widths:
+        return
+    tblPr = tbl._tbl.find(qn("w:tblPr"))
+    if tblPr is not None:
+        tblW = _tbl_set_or_add(tblPr, "w:tblW")
+        tblW.set(qn("w:w"), str(total_dxa))
+        tblW.set(qn("w:type"), "dxa")
+        layout = _tbl_set_or_add(tblPr, "w:tblLayout")
+        layout.set(qn("w:type"), "fixed")
+    tblGrid = tbl._tbl.find(qn("w:tblGrid"))
+    if tblGrid is not None:
+        for child in list(tblGrid):
+            tblGrid.remove(child)
+        for w in widths:
+            gc = OxmlElement("w:gridCol")
+            gc.set(qn("w:w"), str(w))
+            tblGrid.append(gc)
+    for row in tbl.rows:
+        for i, cell in enumerate(row.cells):
+            tcPr = cell._tc.get_or_add_tcPr()
+            tcW = _tbl_set_or_add(tcPr, "w:tcW")
+            tcW.set(qn("w:w"), str(widths[i] if i < len(widths) else widths[-1]))
+            tcW.set(qn("w:type"), "dxa")
+
+
+def _tbl_mark_header_row(row):
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    trPr = row._tr.find(qn("w:trPr"))
+    if trPr is None:
+        trPr = OxmlElement("w:trPr")
+        row._tr.insert(0, trPr)
+    _tbl_set_or_add(trPr, "w:tblHeader")
+
+
+def _tbl_normalize_one(tbl, idx, usable_dxa, tbl_size, line_sz, line_color_hex, force_cn_font, log):
+    """规范单张表(居中/边框/列宽/表头/单元格)。返回列数(供 ≥7 列宽表统计)。"""
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-    # 版心宽度 = 页宽 - 左右页边距
+    # 表格整体居中
+    tblPr = tbl._tbl.find(qn("w:tblPr"))
+    if tblPr is not None:
+        jc = _tbl_set_or_add(tblPr, "w:jc")
+        jc.set(qn("w:val"), "center")
+
+    # 边框 + 列宽
+    _tbl_set_borders(tbl, line_sz, line_color_hex)
+    n_cols = len(tbl.rows[0].cells) if tbl.rows else 0
+    _tbl_set_col_widths(tbl, usable_dxa)
+    if n_cols >= 7:
+        log.warning(f"  ⚠ 表 #{idx} 列数 {n_cols} ≥ 7,可能溢出页面(建议拆表)")
+
+    # 表头行:仅居中 + 跨页重复(暗标铁律:除 H1 外不得有装饰区分,加粗 = 做标记)
+    if tbl.rows:
+        header = tbl.rows[0]
+        _tbl_mark_header_row(header)
+        for cell in header.cells:
+            tcPr = cell._tc.get_or_add_tcPr()
+            for shd in tcPr.findall(qn("w:shd")):
+                tcPr.remove(shd)
+            for para in cell.paragraphs:
+                para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                for r in para.runs:
+                    r.bold = False
+                    rPr = r._r.find(qn("w:rPr"))
+                    if rPr is not None:
+                        for tag in ("w:b", "w:bCs"):
+                            for node in rPr.findall(qn(tag)):
+                                rPr.remove(node)
+
+    # 所有单元格:字号/段距/去首行缩进/水平居中/垂直居中
+    for row in tbl.rows:
+        for cell in row.cells:
+            tcPr = cell._tc.get_or_add_tcPr()
+            vAlign = _tbl_set_or_add(tcPr, "w:vAlign")
+            vAlign.set(qn("w:val"), "center")
+            for para in cell.paragraphs:
+                pPr = para._p.find(qn("w:pPr"))
+                if pPr is None:
+                    pPr = OxmlElement("w:pPr")
+                    para._p.insert(0, pPr)
+                # 剥掉 pandoc 注入的 <w:pStyle w:val="Compact"/>(0 高度风险)
+                for ps in pPr.findall(qn("w:pStyle")):
+                    val = ps.get(qn("w:val"))
+                    if val in ("Compact", "Table", "TableParagraph"):
+                        pPr.remove(ps)
+                # 强制首行缩进 0(覆盖 Normal 样式的 2 字缩进)
+                ind = _tbl_set_or_add(pPr, "w:ind")
+                ind.set(qn("w:firstLine"), "0")
+                ind.set(qn("w:firstLineChars"), "0")
+                ind.set(qn("w:left"), "0")
+                ind.set(qn("w:leftChars"), "0")
+                ind.set(qn("w:right"), "0")
+                ind.set(qn("w:rightChars"), "0")
+                spacing = _tbl_set_or_add(pPr, "w:spacing")
+                spacing.set(qn("w:before"), "0")
+                spacing.set(qn("w:after"), "0")
+                spacing.set(qn("w:line"), "260")
+                spacing.set(qn("w:lineRule"), "auto")
+                para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                for r in para.runs:
+                    force_cn_font(r, size_pt=tbl_size, strip_bold=True)
+    return n_cols
+
+
+def _postproc_normalize_tables(doc, fmt: dict, body_size, log, force_cn_font):
+    """规范化 docx 内所有表格(列宽/边框/表头/单元格字号/对齐/跨页重复)。
+
+    2026-05-11 Phase 3.1 从 postprocess_docx 抽出；2026-05-31 P3.3 再拆成 _tbl_* helper。
+    force_cn_font 回调签名:(run, size_pt=, cn_font=, strip_bold=)。
+    """
+    # 版心宽度 = 页宽 - 左右页边距；1 cm ≈ 567 dxa
     page_w = fmt.get("page_width_cm", 21.0)
     margin_l = fmt.get("margin_left_cm", 3.17)
     margin_r = fmt.get("margin_right_cm", 3.17)
-    usable_cm = max(page_w - margin_l - margin_r, 10.0)
-    # OOXML dxa 单位:1 cm ≈ 567 dxa
-    usable_dxa = int(usable_cm * 567)
+    usable_dxa = int(max(page_w - margin_l - margin_r, 10.0) * 567)
     tbl_size = fmt.get("font_size_table") or max(body_size - 2, 10)
-
-    def _set_or_add(parent, tag):
-        el = parent.find(qn(tag))
-        if el is None:
-            el = OxmlElement(tag)
-            parent.append(el)
-        return el
-
     # 边框 sz 是"八分之一磅"单位,fmt 里是 pt
-    line_pt = float(fmt.get("line_thickness_pt", 0.5))
-    line_sz = max(1, round(line_pt * 8))  # 0.5pt→4 / 0.75pt→6 / 1.0pt→8
+    line_sz = max(1, round(float(fmt.get("line_thickness_pt", 0.5)) * 8))  # 0.5→4 / 0.75→6 / 1.0→8
     line_color_hex = str(fmt.get("line_color", "595959")).upper()
-
-    def _set_table_borders(tbl):
-        tblPr = tbl._tbl.find(qn("w:tblPr"))
-        if tblPr is None:
-            return
-        borders = _set_or_add(tblPr, "w:tblBorders")
-        for child in list(borders):
-            borders.remove(child)
-        for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
-            b = OxmlElement(f"w:{edge}")
-            b.set(qn("w:val"), "single")
-            b.set(qn("w:sz"), str(line_sz))
-            b.set(qn("w:space"), "0")
-            b.set(qn("w:color"), line_color_hex)
-            borders.append(b)
-
-    def _calc_col_widths(tbl, total_dxa):
-        """按内容字符数比例分配列宽(中文算 2 宽度)。"""
-        rows = tbl.rows
-        if not rows:
-            return []
-        n_cols = len(rows[0].cells)
-        if n_cols == 0:
-            return []
-        min_dxa = 800
-        max_chars = [0] * n_cols
-        for row in rows:
-            for i, cell in enumerate(row.cells):
-                if i >= n_cols:
-                    break
-                text = cell.text.strip()
-                w = sum(2 if '一' <= c <= '鿿' or c in '，。、；：""''（）《》【】' else 1 for c in text)
-                max_chars[i] = max(max_chars[i], w)
-        floor = 4
-        weights = [max(c, floor) for c in max_chars]
-        total_w = sum(weights)
-        widths = [max(min_dxa, int(total_dxa * w / total_w)) for w in weights]
-        remainder = total_dxa - sum(widths)
-        if remainder != 0 and widths:
-            widths[widths.index(max(widths))] += remainder
-        return widths
-
-    def _set_col_widths(tbl, total_dxa):
-        widths = _calc_col_widths(tbl, total_dxa)
-        if not widths:
-            return
-        tblPr = tbl._tbl.find(qn("w:tblPr"))
-        if tblPr is not None:
-            tblW = _set_or_add(tblPr, "w:tblW")
-            tblW.set(qn("w:w"), str(total_dxa))
-            tblW.set(qn("w:type"), "dxa")
-            layout = _set_or_add(tblPr, "w:tblLayout")
-            layout.set(qn("w:type"), "fixed")
-        tblGrid = tbl._tbl.find(qn("w:tblGrid"))
-        if tblGrid is not None:
-            for child in list(tblGrid):
-                tblGrid.remove(child)
-            for w in widths:
-                gc = OxmlElement("w:gridCol")
-                gc.set(qn("w:w"), str(w))
-                tblGrid.append(gc)
-        for row in tbl.rows:
-            for i, cell in enumerate(row.cells):
-                tcPr = cell._tc.get_or_add_tcPr()
-                tcW = _set_or_add(tcPr, "w:tcW")
-                tcW.set(qn("w:w"), str(widths[i] if i < len(widths) else widths[-1]))
-                tcW.set(qn("w:type"), "dxa")
-
-    def _mark_header_row(row):
-        trPr = row._tr.find(qn("w:trPr"))
-        if trPr is None:
-            trPr = OxmlElement("w:trPr")
-            row._tr.insert(0, trPr)
-        _set_or_add(trPr, "w:tblHeader")
 
     tbl_count = 0
     wide_tables = 0
     for tbl in doc.tables:
         tbl_count += 1
-
-        # 表格整体居中
-        tblPr = tbl._tbl.find(qn("w:tblPr"))
-        if tblPr is not None:
-            jc = _set_or_add(tblPr, "w:jc")
-            jc.set(qn("w:val"), "center")
-
-        # 边框 + 列宽
-        _set_table_borders(tbl)
-        n_cols = len(tbl.rows[0].cells) if tbl.rows else 0
-        _set_col_widths(tbl, usable_dxa)
+        n_cols = _tbl_normalize_one(tbl, tbl_count, usable_dxa, tbl_size,
+                                    line_sz, line_color_hex, force_cn_font, log)
         if n_cols >= 7:
             wide_tables += 1
-            log.warning(f"  ⚠ 表 #{tbl_count} 列数 {n_cols} ≥ 7,可能溢出页面(建议拆表)")
-
-        # 表头行:仅居中 + 跨页重复(暗标铁律:除 H1 外不得有装饰区分,加粗 = 做标记)
-        if tbl.rows:
-            header = tbl.rows[0]
-            _mark_header_row(header)
-            for cell in header.cells:
-                tcPr = cell._tc.get_or_add_tcPr()
-                for shd in tcPr.findall(qn("w:shd")):
-                    tcPr.remove(shd)
-                for para in cell.paragraphs:
-                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    for r in para.runs:
-                        r.bold = False
-                        rPr = r._r.find(qn("w:rPr"))
-                        if rPr is not None:
-                            for tag in ("w:b", "w:bCs"):
-                                for node in rPr.findall(qn(tag)):
-                                    rPr.remove(node)
-
-        # 所有单元格:字号/段距/去首行缩进/水平居中/垂直居中
-        for row in tbl.rows:
-            for cell in row.cells:
-                tcPr = cell._tc.get_or_add_tcPr()
-                vAlign = _set_or_add(tcPr, "w:vAlign")
-                vAlign.set(qn("w:val"), "center")
-                for para in cell.paragraphs:
-                    pPr = para._p.find(qn("w:pPr"))
-                    if pPr is None:
-                        pPr = OxmlElement("w:pPr")
-                        para._p.insert(0, pPr)
-                    # 剥掉 pandoc 注入的 <w:pStyle w:val="Compact"/>(0 高度风险)
-                    for ps in pPr.findall(qn("w:pStyle")):
-                        val = ps.get(qn("w:val"))
-                        if val in ("Compact", "Table", "TableParagraph"):
-                            pPr.remove(ps)
-                    # 强制首行缩进 0(覆盖 Normal 样式的 2 字缩进)
-                    ind = _set_or_add(pPr, "w:ind")
-                    ind.set(qn("w:firstLine"), "0")
-                    ind.set(qn("w:firstLineChars"), "0")
-                    ind.set(qn("w:left"), "0")
-                    ind.set(qn("w:leftChars"), "0")
-                    ind.set(qn("w:right"), "0")
-                    ind.set(qn("w:rightChars"), "0")
-                    spacing = _set_or_add(pPr, "w:spacing")
-                    spacing.set(qn("w:before"), "0")
-                    spacing.set(qn("w:after"), "0")
-                    spacing.set(qn("w:line"), "260")
-                    spacing.set(qn("w:lineRule"), "auto")
-                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    for r in para.runs:
-                        force_cn_font(r, size_pt=tbl_size, strip_bold=True)
 
     log.info(f"  规范表格: {tbl_count} 张(其中 {wide_tables} 张 ≥7 列,已警告)")
     return tbl_count
 
 
-def postprocess_docx(docx_path: Path, fmt: dict, project_name: str,
-                     company_name: str, log: logging.Logger,
-                     variant_style: dict | None = None) -> None:
-    """pandoc 产出的 DOCX 后处理：
-    1. 去除列表项小黑点（剥离 numPr），改为首行缩进
-    2. 强制所有 run 使用中文字体（防止 pandoc 默认等线/Calibri）
-    3. 表格居中、单元格字体规范
-    4. 封面（非暗标）/目录/页码插入
-    """
-    from docx import Document
-    from docx.shared import Pt, Cm
+def _pp_force_rfonts(rPr, cn_font, en_font):
+    """在给定 rPr 上设置/重建 w:rFonts，四套值全同步，清掉旧残留与 theme 引用。"""
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    for old in rPr.findall(qn("w:rFonts")):
+        rPr.remove(old)
+    rFonts = OxmlElement("w:rFonts")
+    rFonts.set(qn("w:ascii"), en_font)
+    rFonts.set(qn("w:hAnsi"), en_font)
+    rFonts.set(qn("w:eastAsia"), cn_font)
+    rFonts.set(qn("w:cs"), en_font)
+    for attr in ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"):
+        rFonts.attrib.pop(qn(f"w:{attr}"), None)
+    # rFonts 必须插在 rPr 开头附近，W3C 顺序要求
+    rPr.insert(0, rFonts)
 
-    doc = Document(str(docx_path))
-    body_size = fmt["font_size_body"]
 
-    def _force_rfonts(rPr, cn_font, en_font):
-        """在给定 rPr 上设置/重建 w:rFonts，四套值全同步，清掉旧残留。"""
-        # 先删掉已有 rFonts（防止旧属性如 asciiTheme/hAnsiTheme/eastAsiaTheme 残留干扰）
-        for old in rPr.findall(qn("w:rFonts")):
-            rPr.remove(old)
-        rFonts = OxmlElement("w:rFonts")
-        rFonts.set(qn("w:ascii"), en_font)
-        rFonts.set(qn("w:hAnsi"), en_font)
-        rFonts.set(qn("w:eastAsia"), cn_font)
-        rFonts.set(qn("w:cs"), en_font)
-        # 清掉 theme 引用（Word 主题字体会覆盖显式字体名）
-        for attr in ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"):
-            rFonts.attrib.pop(qn(f"w:{attr}"), None)
-        # rFonts 必须插在 rPr 开头附近，W3C 顺序要求
-        rPr.insert(0, rFonts)
-
-    def _force_cn_font(run, size_pt=None, cn_font=None, strip_bold=False):
-        if size_pt is not None:
-            run.font.size = Pt(size_pt)
-        run.font.name = fmt["font_name_en"]
-        rPr = run.element.get_or_add_rPr()
-        _force_rfonts(rPr, cn_font or fmt["font_name_cn"], fmt["font_name_en"])
-        # 暗标规则：除 H1/Title/Subtitle 外其余按正文处理 → 正文不能有粗体
-        if strip_bold:
-            for tag in ("w:b", "w:bCs"):
-                for node in rPr.findall(qn(tag)):
-                    rPr.remove(node)
-        # 强制黑色：清掉 pandoc / Word 默认的标题蓝色、链接蓝色、代码褐色
-        color = rPr.find(qn("w:color"))
-        if color is None:
-            color = OxmlElement("w:color")
-            rPr.append(color)
-        color.set(qn("w:val"), "000000")
-        # 清掉字符底纹（反引号代码的灰底）
-        shd = rPr.find(qn("w:shd"))
-        if shd is not None:
-            rPr.remove(shd)
-        # 清掉荧光笔高亮
-        hl = rPr.find(qn("w:highlight"))
-        if hl is not None:
-            rPr.remove(hl)
-        # 清掉字符样式 rStyle（Hyperlink/Verbatim Char 等会带默认字体/颜色）
-        rStyle = rPr.find(qn("w:rStyle"))
-        if rStyle is not None:
-            rPr.remove(rStyle)
-        # 强制取消斜体（pandoc 把 Markdown *text* / _text_ 转成斜体；评委可能判"做标记"）
-        for tag in ("w:i", "w:iCs"):
+def _pp_force_cn_font(run, fmt, size_pt=None, cn_font=None, strip_bold=False):
+    """run 级：同步四套字体 + 强制黑色 + 清底纹/高亮/rStyle/斜体（可选剥粗体）。"""
+    from docx.shared import Pt
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    if size_pt is not None:
+        run.font.size = Pt(size_pt)
+    run.font.name = fmt["font_name_en"]
+    rPr = run.element.get_or_add_rPr()
+    _pp_force_rfonts(rPr, cn_font or fmt["font_name_cn"], fmt["font_name_en"])
+    # 暗标规则：除 H1/Title/Subtitle 外其余按正文处理 → 正文不能有粗体
+    if strip_bold:
+        for tag in ("w:b", "w:bCs"):
             for node in rPr.findall(qn(tag)):
                 rPr.remove(node)
+    # 强制黑色：清掉 pandoc / Word 默认的标题蓝色、链接蓝色、代码褐色
+    color = rPr.find(qn("w:color"))
+    if color is None:
+        color = OxmlElement("w:color")
+        rPr.append(color)
+    color.set(qn("w:val"), "000000")
+    # 清掉字符底纹（反引号代码的灰底）
+    shd = rPr.find(qn("w:shd"))
+    if shd is not None:
+        rPr.remove(shd)
+    # 清掉荧光笔高亮
+    hl = rPr.find(qn("w:highlight"))
+    if hl is not None:
+        rPr.remove(hl)
+    # 清掉字符样式 rStyle（Hyperlink/Verbatim Char 等会带默认字体/颜色）
+    rStyle = rPr.find(qn("w:rStyle"))
+    if rStyle is not None:
+        rPr.remove(rStyle)
+    # 强制取消斜体（pandoc 把 Markdown *text* / _text_ 转成斜体；评委可能判"做标记"）
+    for tag in ("w:i", "w:iCs"):
+        for node in rPr.findall(qn(tag)):
+            rPr.remove(node)
 
-    def _normalize_style(style_name, cn_font=None):
-        """样式级：强制黑色 + 同步四套字体 + 清底纹/高亮。"""
-        try:
-            s = doc.styles[style_name]
-        except KeyError:
-            return
-        el = s.element
-        rPr = el.find(qn("w:rPr"))
-        if rPr is None:
-            rPr = OxmlElement("w:rPr")
-            el.append(rPr)
-        _force_rfonts(rPr, cn_font or fmt["font_name_cn"], fmt["font_name_en"])
-        color = rPr.find(qn("w:color"))
-        if color is None:
-            color = OxmlElement("w:color")
-            rPr.append(color)
-        color.set(qn("w:val"), "000000")
-        for tag in ("w:shd", "w:highlight", "w:i", "w:iCs"):
-            for node in rPr.findall(qn(tag)):
-                rPr.remove(node)
 
-    # ─── 0. 样式级规范化（统一字体 + 黑色 + 清底色 + 清斜体） ─────
+def _pp_normalize_style(doc, fmt, style_name, cn_font=None):
+    """样式级：强制黑色 + 同步四套字体 + 清底纹/高亮/斜体。"""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    try:
+        s = doc.styles[style_name]
+    except KeyError:
+        return
+    el = s.element
+    rPr = el.find(qn("w:rPr"))
+    if rPr is None:
+        rPr = OxmlElement("w:rPr")
+        el.append(rPr)
+    _pp_force_rfonts(rPr, cn_font or fmt["font_name_cn"], fmt["font_name_en"])
+    color = rPr.find(qn("w:color"))
+    if color is None:
+        color = OxmlElement("w:color")
+        rPr.append(color)
+    color.set(qn("w:val"), "000000")
+    for tag in ("w:shd", "w:highlight", "w:i", "w:iCs"):
+        for node in rPr.findall(qn(tag)):
+            rPr.remove(node)
+
+
+_PP_HEADING_H1_LIKE = {"Heading 1", "Heading1", "Title", "Subtitle"}
+
+
+def _pp_is_h1_like(p):
+    try:
+        sname = p.style.name if p.style is not None else ""
+    except Exception:
+        sname = ""
+    return sname in _PP_HEADING_H1_LIKE
+
+
+def _pp_clean_paragraph_rPr(paragraph):
+    """段落级 w:pPr > w:rPr 的脏字体/颜色清理（pandoc 可能在此塞字体）。"""
+    from docx.oxml.ns import qn
+    pPr = paragraph._p.find(qn("w:pPr"))
+    if pPr is None:
+        return
+    pRPr = pPr.find(qn("w:rPr"))
+    if pRPr is None:
+        return
+    # 段落级 rFonts/color 直接删除，让它跟随样式/run
+    for tag in ("w:rFonts", "w:color", "w:shd", "w:highlight", "w:rStyle"):
+        for node in pRPr.findall(qn(tag)):
+            pRPr.remove(node)
+
+
+def _pp_iter_all_runs(paragraph):
+    """遍历段落的所有 run（含 hyperlink 子 run）。"""
+    from docx.oxml.ns import qn
+    from docx.text.run import Run
+    # paragraph._p 是 w:p；w:r 可能直接在 w:p 下，也可能在 w:hyperlink 下
+    for r_el in paragraph._p.iter(qn("w:r")):
+        yield Run(r_el, paragraph)
+
+
+def _pp_normalize_styles(doc, fmt):
+    """Step 0：样式级规范化（统一字体 + 黑色 + 清底色 + 清斜体）。"""
+    from docx.oxml.ns import qn
     #   body 字体用中文正文字体；标题用黑体（与 build_reference_doc 的 _style 一致）
     body_cn = fmt["font_name_cn"]
     for sn in ("Normal", "Body Text", "List Paragraph", "Table Paragraph",
                "Hyperlink", "FollowedHyperlink",
                "Verbatim Char", "Source Code", "Code"):
-        _normalize_style(sn, cn_font=body_cn)
+        _pp_normalize_style(doc, fmt, sn, cn_font=body_cn)
     # 暗标规则仅 H1/Title 用黑体三号；H2-H6 用正文字体
     h1_cn = fmt.get("font_name_h1", "黑体")
     for sn in ("Heading 1", "Title", "Subtitle"):
-        _normalize_style(sn, cn_font=h1_cn)
+        _pp_normalize_style(doc, fmt, sn, cn_font=h1_cn)
     for sn in ("Heading 2", "Heading 3", "Heading 4", "Heading 5", "Heading 6"):
-        _normalize_style(sn, cn_font=body_cn)
+        _pp_normalize_style(doc, fmt, sn, cn_font=body_cn)
 
     # 暗标 FS-7 防线：所有残留样式（pandoc 注入的 pygments token 样式、Heading7-9、
     # HeadingXChar 等）一律把 rPr 下的 w:color 强制改 000000、剥底纹/斜体，
@@ -1698,42 +1745,13 @@ def postprocess_docx(docx_path: Path, fmt: dict, project_name: str,
             for node in rPr.findall(qn(tag)):
                 rPr.remove(node)
 
-    def _clean_paragraph_rPr(paragraph):
-        """段落级 w:pPr > w:rPr 的脏字体/颜色清理（pandoc 可能在此塞字体）。"""
-        pPr = paragraph._p.find(qn("w:pPr"))
-        if pPr is None:
-            return
-        pRPr = pPr.find(qn("w:rPr"))
-        if pRPr is None:
-            return
-        # 段落级 rFonts/color 直接删除，让它跟随样式/run
-        for tag in ("w:rFonts", "w:color", "w:shd", "w:highlight", "w:rStyle"):
-            for node in pRPr.findall(qn(tag)):
-                pRPr.remove(node)
 
-    # 包装：遍历段落的所有 run（含 hyperlink 子 run）
-    from docx.text.run import Run
-
-    def _iter_all_runs(paragraph):
-        # paragraph._p 是 w:p；w:r 可能直接在 w:p 下，也可能在 w:hyperlink 下
-        for r_el in paragraph._p.iter(qn("w:r")):
-            yield Run(r_el, paragraph)
-
-    # 段落样式 → 该用哪个中文字体（H1/Title/Subtitle 用 fmt["font_name_h1"]，其余用 body）
-    HEADING_H1_LIKE = {"Heading 1", "Heading1", "Title", "Subtitle"}
+def _pp_strip_lists_and_fonts(doc, fmt, body_size, log):
+    """Step 1：去列表黑点（numPr→首行缩进）+ 逐段规范 run 字体（含超链接内）。"""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    body_cn = fmt["font_name_cn"]
     h1_cn = fmt.get("font_name_h1", "黑体")
-
-    def _is_h1_like(p):
-        try:
-            sname = p.style.name if p.style is not None else ""
-        except Exception:
-            sname = ""
-        return sname in HEADING_H1_LIKE
-
-    def _para_cn_font(p):
-        return h1_cn if _is_h1_like(p) else body_cn
-
-    # ─── 1. 去列表黑点 & 字体规范 ─────────────────────────
     list_stripped = 0
     for p in doc.paragraphs:
         pPr = p._p.find(qn("w:pPr"))
@@ -1753,19 +1771,39 @@ def postprocess_docx(docx_path: Path, fmt: dict, project_name: str,
                 ind.set(qn("w:left"), "0")
                 ind.set(qn("w:leftChars"), "0")
         # 段落级 rPr 清理（清掉 pandoc 在 pPr 里塞的字体）
-        _clean_paragraph_rPr(p)
+        _pp_clean_paragraph_rPr(p)
         # 规范 run 字体（含超链接内）—— 按段落样式分流：H1/Title/Subtitle 走 h1_cn，其余走 body
         # 非 H1 段落同时剥掉 Markdown **强调** 转出来的 <w:b/>，保证正文无粗体
-        para_font = _para_cn_font(p)
-        h1_like = _is_h1_like(p)
-        for r in _iter_all_runs(p):
-            _force_cn_font(r, cn_font=para_font, strip_bold=not h1_like)
+        h1_like = _pp_is_h1_like(p)
+        para_font = h1_cn if h1_like else body_cn
+        for r in _pp_iter_all_runs(p):
+            _pp_force_cn_font(r, fmt, cn_font=para_font, strip_bold=not h1_like)
 
     log.info(f"  去除列表项目符号: {list_stripped} 处")
 
+
+def postprocess_docx(docx_path: Path, fmt: dict, project_name: str,
+                     company_name: str, log: logging.Logger,
+                     variant_style: dict | None = None) -> None:
+    """pandoc 产出的 DOCX 后处理（编排）。各步实现见 _pp_* / _postproc_* / _prepend_* 函数：
+    0. 样式级规范化   1. 去列表黑点 + run 字体   2. 表格   3. 封面（非暗标）
+    4. 目录   5. 页眉禁止   6. 页码   7. 软层指纹   8. 图片   9. settings 语言
+    """
+    from docx import Document
+
+    doc = Document(str(docx_path))
+    body_size = fmt["font_size_body"]
+
+    # ─── 0. 样式级规范化 ─────────────────────────
+    _pp_normalize_styles(doc, fmt)
+
+    # ─── 1. 去列表黑点 & run 字体规范 ─────────────────────────
+    _pp_strip_lists_and_fonts(doc, fmt, body_size, log)
+
     # ─── 2. 表格规范化（列宽/边框/表头/字号/行距/跨页重复）─────────
-    # 2026-05-11 Phase 3.1: 抽到 _postproc_normalize_tables() 模块级函数
-    _postproc_normalize_tables(doc, fmt, body_size, log, _force_cn_font)
+    # 字体回调绑定 fmt，签名与原闭包 _force_cn_font(run, size_pt=, cn_font=, strip_bold=) 一致
+    _postproc_normalize_tables(doc, fmt, body_size, log,
+                               lambda run, **kw: _pp_force_cn_font(run, fmt, **kw))
 
     # ─── 3. 插入封面 ─────────────────────────
     # 封面由 no_cover 单独控制（_prepend_cover 已是暗标安全的：投标人留空下划线、不印公司名）。
