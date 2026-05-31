@@ -52,12 +52,16 @@ def _docx_member(docx: Path, member: str) -> str:
         return ""
 
 
+_COVER_TITLE_KW = ("施工组织设计", "监理服务方案", "监理大纲", "监理规划",
+                   "服务方案", "技术标", "技术方案", "投标文件")
+
+
 def cover_present(docx: Path, project_kw: str = "") -> bool:
-    """文档开头是否有封面(前若干文本含"施工组织设计")。"""
+    """文档开头是否有封面(前若干文本含文档类型标题关键词,兼容监理/服务等非施工标)。"""
     x = _docx_member(docx, "word/document.xml")
     texts = [t for t in re.findall(r"<w:t[^>]*>([^<]*)</w:t>", x) if t.strip()]
     head = "".join(texts[:10]).replace(" ", "")
-    return "施工组织设计" in head
+    return any(kw in head for kw in _COVER_TITLE_KW)
 
 
 def _normal_style_block(styles_xml: str) -> str:
@@ -185,11 +189,14 @@ def verify(tender_dir: Path, check_pages: bool, log) -> int:
 
     # 1. 定位 DOCX
     batch_docx = sorted(output.glob("V[0-9][0-9]_*.docx"))
-    single_docx = [p for p in output.glob("*_施工组织设计.docx")
-                   if not p.name.startswith("V")]
+    # 单份产物:接受任意文档类型后缀(施工组织设计/监理服务方案/服务方案等),
+    # 仅排除批量变体(V##_)与临时锁文件(~$)。
+    single_docx = [p for p in output.glob("*.docx")
+                   if not p.name.startswith("~$")
+                   and not re.match(r"V\d{2}_", p.name)]
     docxs = batch_docx or single_docx
     if not docxs:
-        add("fail", "产物存在性", f"{output} 下未找到任何 *_施工组织设计.docx")
+        add("fail", "产物存在性", f"{output} 下未找到任何组装 docx(*.docx,排除 V##_ 变体与临时文件)")
         _write_report(output, findings, log)
         return 2
     is_batch = len(batch_docx) >= 2

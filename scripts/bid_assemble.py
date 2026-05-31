@@ -1767,8 +1767,11 @@ def postprocess_docx(docx_path: Path, fmt: dict, project_name: str,
     # 2026-05-11 Phase 3.1: 抽到 _postproc_normalize_tables() 模块级函数
     _postproc_normalize_tables(doc, fmt, body_size, log, _force_cn_font)
 
-    # ─── 3. 插入封面（非暗标） ─────────────────────────
-    if not (fmt["no_cover"] or fmt["blind_bid"]):
+    # ─── 3. 插入封面 ─────────────────────────
+    # 封面由 no_cover 单独控制（_prepend_cover 已是暗标安全的：投标人留空下划线、不印公司名）。
+    # 暗标默认 no_cover=True（line ~760 自动置位），故既有暗标项目行为不变；
+    # 仅当招标要求封面而显式设 no_cover=false 时，暗标项目才插入这张身份无关的封面。
+    if not fmt["no_cover"]:
         _prepend_cover(doc, project_name, company_name, fmt, log)
 
     # ─── 4. 插入目录（所有情况都插，暗标也要目录） ─────────────
@@ -2156,6 +2159,56 @@ def _set_page_numbers(doc, log, restart_after_toc: bool = False,
     log.info(f"  页码已设置（页脚{pos_cn},格式「{tpl}」{note}），section 数={len(sections)}")
 
 
+def _reapply_table_fonts(doc: "Document", fmt: dict, log: logging.Logger) -> None:
+    """Word 打开保存后会把 w:sz=21(10.5pt) 升调为 w:sz=22(11pt)，重新压回目标字号。"""
+    from docx.shared import Pt
+    tbl_size = fmt.get("font_size_table")
+    if not tbl_size:
+        return
+    fixed = 0
+    for tbl in doc.tables:
+        for row in tbl.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    for r in para.runs:
+                        if r.font.size != Pt(tbl_size):
+                            r.font.size = Pt(tbl_size)
+                            fixed += 1
+    if fixed:
+        log.info(f"  Word 后表格字号已修复: {fixed} 处 → {tbl_size}pt")
+
+
+def _reapply_h1_run_fonts(doc: "Document", fmt: dict, log: logging.Logger) -> None:
+    """Word save strips w:rFonts from H1 paragraph runs; reapply font+size at run level."""
+    from docx.shared import Pt
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    h1_cn = fmt.get("font_name_h1") or fmt.get("font_name_cn", "宋体")
+    en_font = fmt.get("font_name_en", "Times New Roman")
+    h1_size = fmt.get("font_size_h1") or fmt.get("font_size_body")
+    H1_STYLES = {"Heading 1", "Heading1", "标题 1", "标题1"}
+    fixed = 0
+    for p in doc.paragraphs:
+        sname = p.style.name if p.style else ""
+        if sname not in H1_STYLES:
+            continue
+        for r in p.runs:
+            if h1_size:
+                r.font.size = Pt(h1_size)
+            rPr = r._element.get_or_add_rPr()
+            for old in rPr.findall(qn("w:rFonts")):
+                rPr.remove(old)
+            rFonts = OxmlElement("w:rFonts")
+            rFonts.set(qn("w:eastAsia"), h1_cn)
+            rFonts.set(qn("w:ascii"), en_font)
+            rFonts.set(qn("w:hAnsi"), en_font)
+            rFonts.set(qn("w:hint"), "eastAsia")
+            rPr.insert(0, rFonts)
+            fixed += 1
+    if fixed:
+        log.info(f"  Word 后 H1 段落 run 字体已修复: {fixed} 处 → {h1_cn} {h1_size}pt")
+
+
 def _reapply_heading_fonts(doc: "Document", fmt: dict, log: logging.Logger) -> None:
     """Word 在页数检查时会剥离 H1/Title 的 w:rFonts，重新注入。"""
     from docx.oxml.ns import qn
@@ -2203,9 +2256,11 @@ def _apply_docx_metadata(docx_path: Path, variant: dict | None, log: logging.Log
         from datetime import datetime, timedelta
         doc = Document(str(docx_path))
 
-        # Word 在页数检查时会剥离 H1 样式的 w:rFonts，此处重新注入
+        # Word 在页数检查时会剥离 H1 样式的 w:rFonts，且把表格 10.5pt→11pt，此处修复
         if fmt:
             _reapply_heading_fonts(doc, fmt, log)
+            _reapply_h1_run_fonts(doc, fmt, log)
+            _reapply_table_fonts(doc, fmt, log)
         cp = doc.core_properties
 
         if variant:
@@ -2486,7 +2541,9 @@ def _make_chart_style(variant_id: str, variant: dict = None) -> dict:
         style["gantt_bar_hatch"] = cs.get("gantt_bar_hatch", "///")
         style["gantt_bar_height"] = cs.get("gantt_bar_height", 0.55)
         style["gantt_grid"] = cs.get("gantt_grid", "dashed")
-        style["gantt_milestone_style"] = cs.get("gantt_milestone_style", ":")
+        _ms = cs.get("gantt_milestone_style", ":")
+        _VALID_LS = {"-", "--", "-.", ":", "None", " ", "", "solid", "dashed", "dashdot", "dotted", "none"}
+        style["gantt_milestone_style"] = _ms if _ms in _VALID_LS else ":"
         style["gantt_date_fmt"] = cs.get("gantt_date_fmt", "%m月")
         # org chart
         style["org_direction"] = cs.get("org_direction", "TB")
