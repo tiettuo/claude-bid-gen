@@ -880,6 +880,30 @@ _SITE_TEMPLATES = {
     },
 }
 
+# 视觉风格(反串标):同一项目三家总平面图除模板形状外,再换"画法"——
+# 建筑填充/分区底色/指北针/图例-图签栏左右位置,使其看起来出自不同人之手。
+# 由 site_layout JSON 的 site_style 字段(或变体 chart_style.site_style)选 A/B/C。
+_SITE_STYLES = {
+    "A": {  # 经典:灰实底建筑 + 分区斜纹 + 右上圆盘指北针 + 图例左/图签右
+        "building_fc": "#DDDDDD", "building_hatch": "",
+        "zone_fc": "white", "zone_hatch": True, "zone_edge": "#666666", "zone_double": False,
+        "road_dash": True, "compass": "circle", "compass_xy": (93, 80),
+        "legend_x": 2, "title_x": 60, "scale_kind": "block",
+    },
+    "B": {  # 工程线条:白底斜线建筑 + 分区双线无纹 + 左上简箭头 + 图例右/图签左
+        "building_fc": "white", "building_hatch": "////",
+        "zone_fc": "white", "zone_hatch": False, "zone_edge": "black", "zone_double": True,
+        "road_dash": False, "compass": "arrow", "compass_xy": (8, 82),
+        "legend_x": 64, "title_x": 2, "scale_kind": "tick",
+    },
+    "C": {  # 浅灰块:交叉网格建筑 + 浅灰底分区 + 右上星形指北针 + 图例左/图签右
+        "building_fc": "white", "building_hatch": "xxx",
+        "zone_fc": "#ECECEC", "zone_hatch": False, "zone_edge": "black", "zone_double": False,
+        "road_dash": True, "compass": "star", "compass_xy": (93, 80),
+        "legend_x": 2, "title_x": 60, "scale_kind": "block",
+    },
+}
+
 _ZONE_HATCHES = {"north": "///", "south": "...", "east": "|||", "west": "xxx",
                  "northeast": "\\\\\\", "northwest": "+++", "center": ""}
 
@@ -924,9 +948,10 @@ def _sl_draw_fence(ax, tpl, line_w):
                 linestyle="-", solid_capstyle="round", zorder=2)
 
 
-def _sl_draw_zones(ax, tpl, zones_data, line_w, fs_off):
-    """各功能区设施格子。返回实际用到的 zone 名(供图例)。"""
+def _sl_draw_zones(ax, tpl, zones_data, line_w, fs_off, ss=None):
+    """各功能区设施格子。返回实际用到的 zone 名(供图例)。ss=视觉风格参数。"""
     from matplotlib.patches import Rectangle
+    ss = ss or _SITE_STYLES["A"]
     used_zones: list[str] = []
     for zone_name, zone_rect in tpl["zones"].items():
         items = zones_data.get(zone_name, [])
@@ -936,8 +961,8 @@ def _sl_draw_zones(ax, tpl, zones_data, line_w, fs_off):
         zx, zy, zw, zh = zone_rect["x"], zone_rect["y"], zone_rect["w"], zone_rect["h"]
         n = len(items)
         bg = Rectangle((zx, zy), zw, zh, linewidth=line_w * 0.8,
-                       edgecolor="#666666", facecolor="white",
-                       hatch=_ZONE_HATCHES.get(zone_name, ""),
+                       edgecolor=ss["zone_edge"], facecolor=ss["zone_fc"],
+                       hatch=(_ZONE_HATCHES.get(zone_name, "") if ss["zone_hatch"] else ""),
                        zorder=1)
         ax.add_patch(bg)
         sub_w = zw / max(n, 1)
@@ -947,8 +972,13 @@ def _sl_draw_zones(ax, tpl, zones_data, line_w, fs_off):
             iy = zy + 0.5
             ih = zh - 1
             r = Rectangle((ix, iy), iw, ih, linewidth=line_w,
-                          edgecolor="black", facecolor="white", zorder=2)
+                          edgecolor="black", facecolor=ss["zone_fc"], zorder=2)
             ax.add_patch(r)
+            if ss["zone_double"]:  # 双线边框(向内偏移一圈)
+                r2 = Rectangle((ix + 0.35, iy + 0.35), iw - 0.7, ih - 0.7,
+                               linewidth=line_w * 0.5, edgecolor="black",
+                               facecolor="none", zorder=2)
+                ax.add_patch(r2)
             wrap_chars = max(2, int(iw / 1.6))
             wrapped = _wrap_text(str(item_label), wrap_chars)
             ax.text(ix + iw / 2, iy + ih / 2, wrapped,
@@ -956,16 +986,23 @@ def _sl_draw_zones(ax, tpl, zones_data, line_w, fs_off):
     return used_zones
 
 
-def _sl_draw_main_building(ax, tpl, data, line_w, fs_off):
-    """主体建筑(名称 + 副信息)。"""
+def _sl_draw_main_building(ax, tpl, data, line_w, fs_off, ss=None):
+    """主体建筑(名称 + 副信息)。ss=视觉风格参数(填充/网格)。"""
     from matplotlib.patches import Rectangle
+    ss = ss or _SITE_STYLES["A"]
     b = tpl["building"]
     main_label = data.get("main_building", "主体建筑")
     main_area = data.get("main_building_area") or data.get("main_area") or ""
     main_type = data.get("main_building_type") or data.get("main_type") or ""
     rect = Rectangle((b["x"], b["y"]), b["w"], b["h"], linewidth=line_w + 1.2,
-                     edgecolor="black", facecolor="#DDDDDD", zorder=4)
+                     edgecolor="black", facecolor=ss["building_fc"],
+                     hatch=ss["building_hatch"], zorder=4)
     ax.add_patch(rect)
+    # 文字加白色描边底,避免压在网格/斜线上看不清
+    if ss["building_hatch"]:
+        ax.add_patch(Rectangle((b["x"] + b["w"] * 0.12, b["y"] + b["h"] * 0.38),
+                               b["w"] * 0.76, b["h"] * 0.24,
+                               linewidth=0, facecolor="white", alpha=0.85, zorder=4))
     cy_text = b["y"] + b["h"] / 2
     if main_type or main_area:
         ax.text(b["x"] + b["w"] / 2, cy_text + 2.5, main_label,
@@ -980,15 +1017,19 @@ def _sl_draw_main_building(ax, tpl, data, line_w, fs_off):
                 fontweight="bold", zorder=5)
 
 
-def _sl_draw_road(ax, tpl, line_w):
-    """施工道路(双线硬化路面)。"""
+def _sl_draw_road(ax, tpl, line_w, dash=True):
+    """施工道路(硬化路面)。dash=中心线虚线/实线。"""
     road = tpl.get("road_spine", [])
     if road:
         rx = [p[0] for p in road]
         ry = [p[1] for p in road]
         ax.plot(rx, ry, color="black", linewidth=line_w * 4, alpha=0.15, zorder=1)
-        ax.plot(rx, ry, color="black", linewidth=line_w * 0.5,
-                linestyle="--", zorder=2, dashes=(4, 3))
+        if dash:
+            ax.plot(rx, ry, color="black", linewidth=line_w * 0.5,
+                    linestyle="--", zorder=2, dashes=(4, 3))
+        else:
+            ax.plot(rx, ry, color="black", linewidth=line_w * 0.6,
+                    linestyle="-", zorder=2)
 
 
 def _sl_draw_gate(ax, tpl, line_w, fs_off):
@@ -1046,20 +1087,35 @@ def _sl_draw_cranes(ax, tpl, cranes, line_w, fs_off):
                 fontsize=7 + fs_off, fontweight="bold", zorder=5)
 
 
-def _sl_draw_compass(ax, line_w, fs_off):
-    """指北针(右上角,带圆环)。"""
+def _sl_draw_compass(ax, line_w, fs_off, ss=None):
+    """指北针。ss 控制样式(circle 圆盘/arrow 简箭头/star 星形)与位置。"""
     from matplotlib.patches import Circle, Polygon
-    n_cx, n_cy, n_r = 93, 80, 4
-    ax.add_patch(Circle((n_cx, n_cy), n_r, fill=False,
-                        edgecolor="black", linewidth=line_w + 0.3, zorder=4))
-    arrow = Polygon([(n_cx, n_cy + n_r - 0.5), (n_cx - 1.2, n_cy),
-                     (n_cx + 1.2, n_cy)],
-                    closed=True, facecolor="black", edgecolor="black", zorder=5)
-    ax.add_patch(arrow)
-    arrow_s = Polygon([(n_cx, n_cy - n_r + 0.5), (n_cx - 1.2, n_cy),
-                       (n_cx + 1.2, n_cy)],
-                      closed=True, facecolor="white", edgecolor="black", zorder=5)
-    ax.add_patch(arrow_s)
+    ss = ss or _SITE_STYLES["A"]
+    n_cx, n_cy = ss["compass_xy"]
+    n_r = 4
+    kind = ss["compass"]
+    if kind == "circle":  # 圆环 + 黑白双三角
+        ax.add_patch(Circle((n_cx, n_cy), n_r, fill=False,
+                            edgecolor="black", linewidth=line_w + 0.3, zorder=4))
+        ax.add_patch(Polygon([(n_cx, n_cy + n_r - 0.5), (n_cx - 1.2, n_cy),
+                              (n_cx + 1.2, n_cy)], closed=True,
+                             facecolor="black", edgecolor="black", zorder=5))
+        ax.add_patch(Polygon([(n_cx, n_cy - n_r + 0.5), (n_cx - 1.2, n_cy),
+                              (n_cx + 1.2, n_cy)], closed=True,
+                             facecolor="white", edgecolor="black", zorder=5))
+    elif kind == "arrow":  # 细长简箭头(无圆环)
+        ax.annotate("", xy=(n_cx, n_cy + n_r + 0.5), xytext=(n_cx, n_cy - n_r),
+                    arrowprops=dict(arrowstyle="-|>", color="black",
+                                    lw=line_w + 0.8), zorder=5)
+    else:  # star 四角星指北
+        pts = [(n_cx, n_cy + n_r), (n_cx + 1.0, n_cy + 1.0), (n_cx + n_r, n_cy),
+               (n_cx + 1.0, n_cy - 1.0), (n_cx, n_cy - n_r),
+               (n_cx - 1.0, n_cy - 1.0), (n_cx - n_r, n_cy), (n_cx - 1.0, n_cy + 1.0)]
+        ax.add_patch(Polygon(pts, closed=True, facecolor="white",
+                             edgecolor="black", linewidth=line_w + 0.2, zorder=4))
+        ax.add_patch(Polygon([(n_cx, n_cy + n_r), (n_cx - 1.0, n_cy + 1.0),
+                              (n_cx + 1.0, n_cy + 1.0)], closed=True,
+                             facecolor="black", edgecolor="black", zorder=5))
     ax.text(n_cx, n_cy + n_r + 0.8, "N", ha="center", va="bottom",
             fontsize=10 + fs_off, fontweight="bold", zorder=5)
 
@@ -1093,12 +1149,12 @@ def _sl_draw_scale_bar(ax, scale_str, line_w, fs_off):
             fontweight="bold", zorder=5)
 
 
-def _sl_draw_legend(ax, used_zones, line_w, fs_off):
-    """图例框(左下)。"""
+def _sl_draw_legend(ax, used_zones, line_w, fs_off, leg_x=2):
+    """图例框(底部,leg_x 控制左/右)。"""
     from matplotlib.patches import Rectangle
     if not used_zones:
         return
-    leg_x, leg_y = 2, -16
+    leg_y = -16
     leg_w, leg_h = 32, 11
     ax.add_patch(Rectangle((leg_x, leg_y), leg_w, leg_h,
                            linewidth=line_w + 0.3,
@@ -1121,10 +1177,10 @@ def _sl_draw_legend(ax, used_zones, line_w, fs_off):
                 ha="left", va="center", fontsize=7 + fs_off, zorder=4)
 
 
-def _sl_draw_title_block(ax, data, title, scale_str, line_w, fs_off):
-    """图签栏(右下:图名/比例/图号/日期)。"""
+def _sl_draw_title_block(ax, data, title, scale_str, line_w, fs_off, sig_x=60):
+    """图签栏(底部,sig_x 控制左/右:图名/比例/图号/日期)。"""
     from matplotlib.patches import Rectangle
-    sig_x, sig_y = 60, -16
+    sig_y = -16
     sig_w, sig_h = 38, 11
     ax.add_patch(Rectangle((sig_x, sig_y), sig_w, sig_h,
                            linewidth=line_w + 0.5,
@@ -1205,16 +1261,20 @@ def render_site_layout(data: dict, out_png: Path, title: str,
     scale_str = str(data.get("scale") or "1:200")
     cranes = data.get("cranes") or []
 
+    # 视觉风格(反串标):A/B/C 换建筑填充/分区底色/指北针/图例-图签位置
+    sskey = str(data.get("site_style") or style.get("site_style") or "A").upper()
+    ss = _SITE_STYLES.get(sskey, _SITE_STYLES["A"])
+
     _sl_draw_fence(ax, tpl, line_w)
-    used_zones = _sl_draw_zones(ax, tpl, data.get("zones") or {}, line_w, fs_off)
-    _sl_draw_main_building(ax, tpl, data, line_w, fs_off)
-    _sl_draw_road(ax, tpl, line_w)
+    used_zones = _sl_draw_zones(ax, tpl, data.get("zones") or {}, line_w, fs_off, ss)
+    _sl_draw_main_building(ax, tpl, data, line_w, fs_off, ss)
+    _sl_draw_road(ax, tpl, line_w, ss["road_dash"])
     _sl_draw_gate(ax, tpl, line_w, fs_off)
     _sl_draw_cranes(ax, tpl, cranes, line_w, fs_off)
-    _sl_draw_compass(ax, line_w, fs_off)
+    _sl_draw_compass(ax, line_w, fs_off, ss)
     _sl_draw_scale_bar(ax, scale_str, line_w, fs_off)
-    _sl_draw_legend(ax, used_zones, line_w, fs_off)
-    _sl_draw_title_block(ax, data, title, scale_str, line_w, fs_off)
+    _sl_draw_legend(ax, used_zones, line_w, fs_off, ss["legend_x"])
+    _sl_draw_title_block(ax, data, title, scale_str, line_w, fs_off, ss["title_x"])
 
     plt.tight_layout()
     out_png.parent.mkdir(parents=True, exist_ok=True)
