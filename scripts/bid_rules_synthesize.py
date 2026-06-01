@@ -654,13 +654,49 @@ _FORMAT_SET_PRESETS: dict[str, dict] = {
 }
 
 
-def _render_format_sets_block() -> list[str]:
-    """渲染 format_sets yaml 块(供 bid_assemble._parse_format_sets 消费)。"""
-    lines = [
-        "## 排版套(format_sets — 多变体反串标差异化)",
-        "",
-        "> bid_variants 给每个变体分配 A/B/C… ID,bid_assemble 据此套用不同"
-        "字体/行距/页边距。",
+def _render_format_sets_block(format_cfg: dict | None = None) -> list[str]:
+    """渲染 format_sets yaml 块(供 bid_assemble._parse_format_sets 消费)。
+
+    ★ 强制格式项目(招标锁字体/字号/行距/页边距,典型信号 color_allowed=false):
+      生成 A/B/C 三套【字体/行距/页边距完全相同】,仅 KEY 不同 → bid_assemble 据 KEY 给
+      三家套不同【封面版式】(cover_style),既差异化封面又不违反招标强制格式。
+      (历史坑:默认 6 套不同字体会让三家排版各异 → 直接违反强制格式废标)
+    否则(招标未规定格式):沿用 _FORMAT_SET_PRESETS 的 6 套差异化字体。"""
+    fc = format_cfg or {}
+    mandated = fc.get("color_allowed") is False
+    lines = ["## 排版套(format_sets — 多变体反串标差异化)", ""]
+    if mandated:
+        m = fc.get("margin_cm") or {"top": 2.54, "bottom": 2.54, "left": 2.54, "right": 2.54}
+        cn = fc.get("font_chinese", "宋体")
+        h1 = fc.get("font_name_h1", "黑体")
+        lsr = fc.get("line_spacing_rule", "multiple")
+        lsv = fc.get("line_spacing_value", 1.5)
+        lines += [
+            "> ★ 招标强制统一格式(color_allowed=false):A/B/C 三套字体/行距/页边距完全相同,",
+            "> 仅 KEY 不同 → bid_assemble 据 KEY 套不同封面版式(A居中/B横线/C左对齐落款)。",
+            "> 三家排版实测一致(合规),反串标靠内容+图表+封面版式。",
+            "",
+            "```yaml",
+            "format_sets:",
+        ]
+        descs = {"A": "封面居中式", "B": "封面横线分隔式", "C": "封面项目名突出左对齐落款式"}
+        for key in ("A", "B", "C"):
+            lines += [
+                f"  {key}:",
+                f"    description: 招标强制格式({descs[key]})-字体行距页边距三家一致",
+                f"    font_name_cn: {cn}",
+                f"    font_name_h1: {h1}",
+                f"    line_spacing_rule: {lsr}",
+                f"    line_spacing: {lsv}",
+                f"    margin_top_cm: {m.get('top', 2.54)}",
+                f"    margin_bottom_cm: {m.get('bottom', 2.54)}",
+                f"    margin_left_cm: {m.get('left', 2.54)}",
+                f"    margin_right_cm: {m.get('right', 2.54)}",
+            ]
+        lines += ["```", ""]
+        return lines
+    lines += [
+        "> bid_variants 给每个变体分配 A/B/C… ID,bid_assemble 据此套用不同字体/行距/页边距。",
         "> ★ 若招标强制规定字体/字号/行距/页边距,删除本块、或把对应字段改成三家一致。",
         "",
         "```yaml",
@@ -713,7 +749,7 @@ def render_rules_md(project: dict, evaluation: dict, procurement: dict,
         "",
         "> 招标文件未明示字号/行距 → 按工程类比选惯例(宋体小四+1.5倍)。",
         "",
-        *_render_format_sets_block(),
+        *_render_format_sets_block(format_cfg),
         "## 字数密度",
         "",
         "```yaml",
@@ -1171,6 +1207,60 @@ def synthesize(tender_dir: Path, force: bool = False, log=None) -> int:
         "required_attachments": outline_data.get("attachments", []),
     }
 
+    # ★ 致命格式字段(page_hard_cap/color_allowed/margin/table_font/line_weight/landscape)
+    # 必须在渲染 disqualification_rules.md 之前覆盖进 format_cfg——compliance/assemble 读此文件,
+    # 若沿用默认(margin2.5/无color_allowed/table11)→图表不黑白、超页不拦、页边距错。
+    # (历史 bug:此覆盖原只在后面的 authoring_rules 块做,disqualification 拿到的是默认值)
+    proj_size = "unknown"
+    ext_fmt = {}
+    format_sources_map = {}
+    try:
+        from bid_derive import size_class as _size_class
+        cp = _val(facts, "control_price_cny", 0)
+        try:
+            cp_f = float(cp)
+        except (TypeError, ValueError):
+            cp_f = 0.0
+        proj_size = _size_class(cp_f if cp_f > 0 else None)
+        log.info(f"  项目规模判档: {proj_size} (控制价 {cp_f:,.0f} 元)")
+        ext_fmt = extract_authoring_format_spec(main_text, log, project_size=proj_size)
+    except Exception as e:
+        log.warning(f"  扩展格式字段抽取失败,沿用默认: {e}")
+    for _k in format_cfg.keys():
+        format_sources_map[_k] = ("tender_regex" if (_k in (
+            "body_size_pt", "body_size_name", "line_spacing_value", "line_spacing_rule") and fmt_spec)
+            else "default")
+    if "page_hard_cap" in ext_fmt:
+        format_cfg["page_hard_cap"] = ext_fmt["page_hard_cap"]["value"]
+        format_sources_map["page_hard_cap"] = ext_fmt["page_hard_cap"]["source"]
+        density["target_total_pages"] = ext_fmt["page_hard_cap"]["value"]
+    if "color_allowed" in ext_fmt:
+        format_cfg["color_allowed"] = ext_fmt["color_allowed"]["value"]
+        format_cfg["no_color"] = not ext_fmt["color_allowed"]["value"]
+        format_sources_map["color_allowed"] = ext_fmt["color_allowed"]["source"]
+    if "margin_cm" in ext_fmt:
+        format_cfg["margin_cm"] = ext_fmt["margin_cm"]["value"]
+        format_sources_map["margin_cm"] = ext_fmt["margin_cm"]["source"]
+    if "first_line_indent" in ext_fmt:
+        fli = ext_fmt["first_line_indent"]["value"]
+        chars = fli.get("chars", 2)
+        body_pt = format_cfg.get("body_size_pt", 14)
+        format_cfg["first_line_indent_chars"] = chars
+        format_cfg["paragraph_first_line_indent_cm"] = round(chars * body_pt * 2.54 / 72, 2)
+        format_sources_map["first_line_indent_chars"] = ext_fmt["first_line_indent"]["source"]
+        format_sources_map["paragraph_first_line_indent_cm"] = ext_fmt["first_line_indent"]["source"]
+    if "table_font" in ext_fmt:
+        tf = ext_fmt["table_font"]["value"]
+        format_cfg["table_font_size_pt"] = tf["size_pt"]
+        format_cfg["table_font_size_name"] = tf["size_name"]
+        format_sources_map["table_font_size_pt"] = ext_fmt["table_font"]["source"]
+    if "line_weight_pt" in ext_fmt:
+        format_cfg["line_weight_pt"] = ext_fmt["line_weight_pt"]["value"]
+        format_sources_map["line_weight_pt"] = ext_fmt["line_weight_pt"]["source"]
+    if "landscape_pages" in ext_fmt:
+        format_cfg["landscape_pages"] = ext_fmt["landscape_pages"]["value"]
+        format_sources_map["landscape_pages"] = ext_fmt["landscape_pages"]["source"]
+
     disq_summary = categorize_disqualification(disq_data)
 
     md = render_rules_md(project, evaluation, procurement, blind,
@@ -1185,59 +1275,8 @@ def synthesize(tender_dir: Path, force: bool = False, log=None) -> int:
     # 代码 bug 级异常(TypeError / AttributeError / ValueError)应抛出阻断下游
     auth_path = ext / "authoring_rules.md"
     try:
-        # 推断项目规模(供 page_hard_cap 选档)
-        from bid_derive import size_class as _size_class
-        cp = _val(facts, "control_price_cny", 0)
-        try:
-            cp_f = float(cp)
-        except (TypeError, ValueError):
-            cp_f = 0.0
-        proj_size = _size_class(cp_f if cp_f > 0 else None)
-        log.info(f"  项目规模判档: {proj_size} (控制价 {cp_f:,.0f} 元)")
-
-        # 抽 authoring 扩展格式字段(传入 project_size 让 page_hard_cap 选档)
-        ext_fmt = extract_authoring_format_spec(main_text, log, project_size=proj_size)
-
-        # 构造 format_sources 字典:每字段标 source
-        format_sources_map = {}
-        for k in format_cfg.keys():
-            if k in ("body_size_pt", "body_size_name", "line_spacing_value", "line_spacing_rule") and fmt_spec:
-                format_sources_map[k] = "tender_regex"
-            else:
-                format_sources_map[k] = "default"
-
-        # 用 authoring 抽到的字段覆盖默认值
-        if "page_hard_cap" in ext_fmt:
-            format_cfg["page_hard_cap"] = ext_fmt["page_hard_cap"]["value"]
-            format_sources_map["page_hard_cap"] = ext_fmt["page_hard_cap"]["source"]
-            density["target_total_pages"] = ext_fmt["page_hard_cap"]["value"]
-        if "color_allowed" in ext_fmt:
-            format_cfg["color_allowed"] = ext_fmt["color_allowed"]["value"]
-            format_sources_map["color_allowed"] = ext_fmt["color_allowed"]["source"]
-        if "margin_cm" in ext_fmt:
-            format_cfg["margin_cm"] = ext_fmt["margin_cm"]["value"]
-            format_sources_map["margin_cm"] = ext_fmt["margin_cm"]["source"]
-        if "first_line_indent" in ext_fmt:
-            fli = ext_fmt["first_line_indent"]["value"]
-            # 同时保留 cm 旧字段（向后兼容），按 14pt 估算
-            chars = fli.get("chars", 2)
-            body_pt = format_cfg.get("body_size_pt", 14)
-            cm_eq = round(chars * body_pt * 2.54 / 72, 2)
-            format_cfg["first_line_indent_chars"] = chars
-            format_cfg["paragraph_first_line_indent_cm"] = cm_eq
-            format_sources_map["first_line_indent_chars"] = ext_fmt["first_line_indent"]["source"]
-            format_sources_map["paragraph_first_line_indent_cm"] = ext_fmt["first_line_indent"]["source"]
-        if "table_font" in ext_fmt:
-            tf = ext_fmt["table_font"]["value"]
-            format_cfg["table_font_size_pt"] = tf["size_pt"]
-            format_cfg["table_font_size_name"] = tf["size_name"]
-            format_sources_map["table_font_size_pt"] = ext_fmt["table_font"]["source"]
-        if "line_weight_pt" in ext_fmt:
-            format_cfg["line_weight_pt"] = ext_fmt["line_weight_pt"]["value"]
-            format_sources_map["line_weight_pt"] = ext_fmt["line_weight_pt"]["source"]
-        if "landscape_pages" in ext_fmt:
-            format_cfg["landscape_pages"] = ext_fmt["landscape_pages"]["value"]
-            format_sources_map["landscape_pages"] = ext_fmt["landscape_pages"]["source"]
+        # proj_size / ext_fmt / format_sources_map / format_cfg 的致命字段覆盖
+        # 已在 disqualification_rules 渲染前统一完成(见上文),此处直接复用,保证两文件一致。
 
         # 章节锚点 topics (含 subsections_original)
         chapter_topics = outline_data.get("topics", [])

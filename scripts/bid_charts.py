@@ -904,6 +904,28 @@ _SITE_STYLES = {
     },
 }
 
+# 多变体总平面图自动差异化轮换池(按变体序号取):形状/视觉风格/图号前缀/比例
+_SITE_TEMPLATE_ROTATION = ["rectangular_center", "L_shape", "U_shape"]
+_SITE_STYLE_ROTATION = ["A", "B", "C"]
+_SITE_DRAWING_PREFIX = ["SZ-PM", "GC-ZP", "ZB-S", "PM-SG", "SG-ZP", "ZP-PM"]
+_SITE_SCALE_ROTATION = ["1:200", "1:150", "1:250"]
+
+
+def _auto_diff_site_layout(data: dict, variant_id: str) -> dict:
+    """多变体批量时,按变体序号给 site_layout 自动分配不同 模板/视觉风格/图号/比例。
+    仅在字段缺省时注入(JSON 已显式指定则尊重),使三家总平面图"不像一个人画的"。
+    单份模式(variant_id 非 V\\d+)不强制。"""
+    m = re.match(r"[Vv](\d+)", variant_id or "")
+    if not m:
+        return data
+    i = max(0, int(m.group(1)) - 1)
+    data.setdefault("template", _SITE_TEMPLATE_ROTATION[i % len(_SITE_TEMPLATE_ROTATION)])
+    data.setdefault("site_style", _SITE_STYLE_ROTATION[i % len(_SITE_STYLE_ROTATION)])
+    data.setdefault("scale", _SITE_SCALE_ROTATION[i % len(_SITE_SCALE_ROTATION)])
+    data.setdefault("drawing_no", f"{_SITE_DRAWING_PREFIX[i % len(_SITE_DRAWING_PREFIX)]}-{i + 1:02d}")
+    return data
+
+
 _ZONE_HATCHES = {"north": "///", "south": "...", "east": "|||", "west": "xxx",
                  "northeast": "\\\\\\", "northwest": "+++", "center": ""}
 
@@ -3056,6 +3078,9 @@ def preprocess_md(
 
             elif ctype != "other":
                 # 图表：适配数据格式 → 渲染 PNG
+                if ctype == "site_layout":
+                    # 多变体批量:按变体序号自动分配不同模板/风格/图号/比例(缺省才注入)
+                    data = _auto_diff_site_layout(data, variant_id)
                 adapter = _CHART_ADAPTERS.get(ctype)
                 render_data = adapter(data) if adapter else data
                 _data_ok, _data_why = validate_chart_data(ctype, render_data)

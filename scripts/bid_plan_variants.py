@@ -264,6 +264,31 @@ def _fallback_subitems(ch: dict) -> list[dict]:
     return [{"title": t, "chars": per} for t in scope]
 
 
+def _is_attachment_chapter(title: str) -> bool:
+    """是否为「附图及附表」类章节(大纲点名的附图附表汇总章)。"""
+    t = title or ""
+    return "附图" in t or "附表" in t
+
+
+def _attachment_subitems(ch: dict, attachments: list) -> list[dict] | None:
+    """附图及附表章:子项 = 大纲点名的附图附表(1:1,三家一致),不套切分维度。
+    切分维度(管理职能等)会把附图章写成"职责/绘制流程"散文而漏掉实际附表 → 合格制不响应。
+    返回 None 表示大纲未列附表,回退常规切分。"""
+    titles = []
+    for a in attachments or []:
+        if isinstance(a, dict):
+            label = (a.get("label") or "").strip()
+            name = (a.get("title_original") or a.get("title") or "").strip()
+            if name:
+                titles.append(f"{label} {name}".strip() if label else name)
+        elif isinstance(a, str) and a.strip():
+            titles.append(a.strip())
+    if not titles:
+        return None
+    per = max(280, ch["target_chars"] // len(titles))
+    return [{"title": t, "chars": per} for t in titles]
+
+
 def _normalize_subitems(subs: list[dict], target_chars: int) -> list[dict]:
     """把子项字数之和校正到 target_chars。"""
     if not subs:
@@ -510,6 +535,17 @@ def main() -> int:
 
     criteria_map = _load_criteria(extracted, base_chapters, log)
     project_brief = _load_project_brief(extracted)
+
+    # 附图及附表章:锁定为大纲点名的附图附表(1:1),不套切分维度(否则被写成"职责"散文漏附表)
+    attachments = []
+    outline_p = extracted / "mandatory_outline.json"
+    if outline_p.exists():
+        try:
+            attachments = json.loads(outline_p.read_text(encoding="utf-8")).get("attachments", []) or []
+        except (ValueError, json.JSONDecodeError):
+            attachments = []
+    if attachments:
+        log.info(f"附图及附表章将锁定为大纲点名的 {len(attachments)} 张附图附表(三家一致,不套切分维度)")
     log.info(f"评分标准命中 {len(criteria_map)}/{len(base_chapters)} 章"
              f"{'(其余回退基准子项作参考)' if len(criteria_map) < len(base_chapters) else ''}")
 
@@ -579,7 +615,11 @@ def main() -> int:
         vid = variant["id"]
         sub_map = decomposed.get(vid, {})
         for c in chapters:
-            subs = sub_map.get(c["num"]) or _fallback_subitems(c)
+            att_subs = _attachment_subitems(c, attachments) if _is_attachment_chapter(c["title"]) else None
+            if att_subs is not None:
+                subs = att_subs  # 附图章:强制 = 大纲附表清单,绕开切分维度
+            else:
+                subs = sub_map.get(c["num"]) or _fallback_subitems(c)
             c["subitems"] = _normalize_subitems(subs, c["target_chars"])
 
         v_dir = output / vid

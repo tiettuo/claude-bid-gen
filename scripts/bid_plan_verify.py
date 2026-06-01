@@ -433,14 +433,20 @@ def verify(tender_dir: Path, strict: bool | None = None) -> int:
             warnings.append(cpp_warning)
             print(f"{WARN} {cpp_warning}")
         if target_pages:
+            n_charts = sum(r["chart_count"] for r in rows)
             est_text_pages = sum(r["target_chars"] for r in rows) / cpp
-            est_chart_pages = sum(r["chart_count"] for r in rows) * 0.4
+            # ★ 每张渲染图表(graphviz/matplotlib PNG)在 docx 实测约占 ~0.9 整页(带标题+前后空白),
+            #   远高于旧系数 0.4——历史超页废标根因(普兰食堂首装 76-78 页超 70)。取 0.9 才能提前拦。
+            est_chart_pages = n_charts * 0.9
             est_total = est_text_pages + est_chart_pages
-            if est_total <= target_pages * 1.05:
-                print(f"{OK} 估算 {est_total:.1f} 页 ≤ 目标 {target_pages:.0f} × 1.05")
-                print(f"    文字 {est_text_pages:.1f} 页 + 图表 {est_chart_pages:.1f} 页")
+            cover_toc = 4  # 封面+目录约 4 页
+            est_with_front = est_total + cover_toc
+            if est_with_front <= target_pages * 1.05:
+                print(f"{OK} 估算 {est_with_front:.1f} 页 ≤ 目标 {target_pages:.0f} × 1.05")
+                print(f"    文字 {est_text_pages:.1f} + 图表 {est_chart_pages:.1f}({n_charts}张×0.9) + 封面目录 {cover_toc} 页")
             else:
-                msg = f"估算 {est_total:.1f} 页超出目标 {target_pages:.0f} × 1.05"
+                msg = (f"估算 {est_with_front:.1f} 页(文字{est_text_pages:.0f}+图表{est_chart_pages:.0f}/{n_charts}张+封面目录{cover_toc})"
+                       f"超出目标 {target_pages:.0f}×1.05 — 建议削减图表数(每张≈0.9页)或下调章节字数")
                 errors.append(msg)
                 print(f"{FAIL} {msg}")
         else:
