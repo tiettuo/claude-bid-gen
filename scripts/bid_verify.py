@@ -165,16 +165,53 @@ def chart_md5s(variant_dir: Path) -> dict[str, str]:
 # ─── 硬顶页数检测 ─────────────────────────────────────────────────
 
 def detect_page_cap(extracted: Path) -> int | None:
-    """从 chapter_plan.md / disqualification_rules.md 探测页数硬顶。"""
+    """从 chapter_plan.md / disqualification_rules.md 探测页数硬顶。
+
+    优先取 disqualification_rules.md 的 page_hard_cap 字段(由 Step 2 据招标判档写入);
+    否则正文正则兜底。正则匹配 2-3 位页数(招标常见'70页'/'100页'),同一文件命中多个时
+    取最小值——招标常同时列大型(100)/中小型(70)两档,绑定约束是更严的那个。"""
+    # 1. 优先读结构化字段 page_hard_cap(最可靠,已判档)
+    dq = extracted / "disqualification_rules.md"
+    if dq.exists():
+        m = re.search(r"page_hard_cap:\s*(\d{2,3})", dq.read_text(encoding="utf-8"))
+        if m:
+            return int(m.group(1))
+    # 2. 正文正则兜底:取最小(最严)的页数硬顶
     for name in ("chapter_plan.md", "disqualification_rules.md", "project_brain.md"):
         f = extracted / name
         if not f.exists():
             continue
         txt = f.read_text(encoding="utf-8")
-        m = re.search(r"(?:硬顶|超过|控制在|≤|≦)\s*(\d{3})\s*页", txt)
-        if m:
-            return int(m.group(1))
+        caps = [int(x) for x in re.findall(r"(?:硬顶|超过|控制在|≤|≦|不得超过)\s*(\d{2,3})\s*页", txt)]
+        if caps:
+            return min(caps)
     return None
+
+
+def detect_mandated_format(extracted: Path) -> bool:
+    """判断招标是否强制规定统一排版格式(字体/字号/行距/页边距/颜色)。
+
+    强制格式项目下,三家变体的字体/行距/页边距【必须一致】(差异化会直接违反招标
+    强制格式→废标),反串标改由内容(H2结构/模型/数据)+图表承担。此时不能再把
+    '三家格式相同'判为反串标失效(那是误判)。
+
+    判定信号(满足其一即视为强制格式):
+    - disqualification_rules.md 的 format_sets 块只有 ≤1 个排版套(Step 2 因招标强制
+      已收敛为单一套,三家共用);
+    - format 块声明 color_allowed: false(招标连颜色都管死,属强制格式典型特征)。"""
+    dq = extracted / "disqualification_rules.md"
+    if not dq.exists():
+        return False
+    txt = dq.read_text(encoding="utf-8")
+    m = re.search(r"```yaml\s*\nformat_sets:(.*?)```", txt, re.DOTALL)
+    if m:
+        # 顶格两空格的排版套 key(如 "  A:")计数
+        set_keys = re.findall(r"^  (\w+):\s*$", m.group(1), re.MULTILINE)
+        if len(set_keys) <= 1:
+            return True
+    if re.search(r"color_allowed:\s*false|no_color:\s*true", txt):
+        return True
+    return False
 
 
 # ─── 验证主体 ────────────────────────────────────────────────────
@@ -233,9 +270,21 @@ def verify(tender_dir: Path, check_pages: bool, log) -> int:
 
     # 3. 多变体交叉:字体/行距/页边距/图表 是否真差异化
     if is_batch:
+        mandated_fmt = detect_mandated_format(extracted)
+        if mandated_fmt:
+            log.info("  招标强制统一格式(format_sets≤1 或 color_allowed:false):"
+                     "三家字体/行距/页边距【应当一致】,反串标改看内容+图表(见 bid_similarity)")
         for dim, key in (("正文字体", "font"), ("行距", "spacing"), ("页边距", "margin")):
             vals = {v: per[v][key] for v in per}
             uniq = set(vals.values())
+            if mandated_fmt:
+                # 强制格式下:一致=符合招标(正确);反而不一致才是格式违规风险
+                if len(uniq) == 1:
+                    log.info(f"  反串标-{dim}: 三家一致({next(iter(uniq))}) ✓ 符合招标强制格式")
+                else:
+                    add("warn", f"强制格式-{dim}",
+                        f"招标强制统一格式,但三家{dim}不一致:{vals}——可能违反招标格式规定")
+                continue
             if len(uniq) == 1:
                 add("fail", f"反串标-{dim}", f"三家{dim}完全相同({uniq.pop()})——差异化失效")
             elif len(uniq) < len(vals):

@@ -118,6 +118,101 @@ def check_standards_fabrication(md_files: list[Path], truth: dict, log: logging.
         log.info(f"标准编造检测: {total} 条引用，无编造")
     return result
 
+
+# ─── 工期废标门（网络图关键线路 / 进度跨度 / 声明总工期 须 ≤ 招标工期）──────────
+def _aoa_critical_path(activities: list) -> int:
+    """双代号网络图最长路径(关键线路)天数。activities:[{from,to,duration,...}]。"""
+    edges: dict[int, list] = {}
+    nodes: set[int] = set()
+    for a in activities or []:
+        try:
+            fr = int(a.get("from")); to = int(a.get("to"))
+            dur = float(a.get("duration", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        edges.setdefault(fr, []).append((to, dur))
+        nodes.add(fr); nodes.add(to)
+    if not nodes:
+        return 0
+    best = {n: 0.0 for n in nodes}  # 事件编号即拓扑序(from<to),DP 求最长路径
+    for n in sorted(nodes):
+        for to, dur in edges.get(n, []):
+            if best[n] + dur > best.get(to, 0.0):
+                best[to] = best[n] + dur
+    return int(round(max(best.values())))
+
+
+def _schedule_span(tasks: list) -> int:
+    """进度横道图跨度(天)= max(end) - min(start) + 1。"""
+    from datetime import datetime as _dt
+    ds = []
+    for t in tasks or []:
+        for k in ("start", "end"):
+            v = t.get(k)
+            if not v:
+                continue
+            for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"):
+                try:
+                    ds.append(_dt.strptime(str(v).strip(), fmt)); break
+                except ValueError:
+                    continue
+    return (max(ds) - min(ds)).days + 1 if len(ds) >= 2 else 0
+
+
+def check_schedule_duration(md_files: list[Path], tender_days: int, log: logging.Logger) -> dict:
+    """工期废标门。评委按双代号网络图算关键线路,activities 最长路径 > 招标工期即超期废标。
+    同时查 schedule 横道跨度、散文声明的"总工期 N 天"。"""
+    result = {"tender_days": tender_days, "violations": [], "warnings": [], "checked": 0}
+    if not tender_days or tender_days <= 0:
+        log.info("  工期门:招标工期未知,跳过")
+        return result
+    json_re = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+    for md in md_files:
+        text = md.read_text(encoding="utf-8", errors="ignore")
+        for m in json_re.finditer(text):
+            try:
+                d = json.loads(m.group(1))
+            except (ValueError, json.JSONDecodeError):
+                continue
+            if d.get("type") == "aoa_network":
+                cp = _aoa_critical_path(d.get("activities") or [])
+                result["checked"] += 1
+                if cp > tender_days:
+                    result["violations"].append({
+                        "file": md.name, "kind": "网络图关键线路", "value": cp, "limit": tender_days,
+                        "detail": f"{md.name} 双代号网络图关键线路累加 {cp} 天 > 招标工期 {tender_days} 天(超期废标)"})
+            elif d.get("type") == "schedule":
+                span = _schedule_span(d.get("tasks") or [])
+                if span:
+                    result["checked"] += 1
+                    if span > tender_days:
+                        result["violations"].append({
+                            "file": md.name, "kind": "进度横道跨度", "value": span, "limit": tender_days,
+                            "detail": f"{md.name} 进度横道图跨度 {span} 天 > 招标工期 {tender_days} 天"})
+        for pm in re.finditer(r"(?:总工期|计算工期)[^。\d]{0,6}(\d{2,3})\s*(?:日历)?天", text):
+            val = int(pm.group(1))
+            if val > tender_days:
+                result["violations"].append({
+                    "file": md.name, "kind": "声明总工期", "value": val, "limit": tender_days,
+                    "detail": f"{md.name} 声明总工期 {val} 天 > 招标工期 {tender_days} 天"})
+        for pm in re.finditer(r"合计\s*(\d{2,3})\s*天", text):
+            val = int(pm.group(1))
+            if val > tender_days:
+                result["warnings"].append(
+                    f"{md.name} 出现'合计{val}天'(>{tender_days}),确认是否为交叉作业压缩前的累加值,"
+                    f"建议改述以免评委误读为关键线路超期")
+    nv = len(result["violations"])
+    if nv:
+        log.error(f"  工期门:{nv} 处工期超招标 {tender_days} 天(超期废标风险)")
+        for v in result["violations"]:
+            log.error(f"    - {v['detail']}")
+    else:
+        log.info(f"  工期门:已检 {result['checked']} 张进度图,关键线路/跨度均 ≤ {tender_days} 天 ✓")
+    for w in result["warnings"]:
+        log.warning(f"  工期门(提示): {w}")
+    return result
+
+
 def scan_blind(md_files: list[Path], is_blind: bool, log: logging.Logger) -> list[dict]:
     """扫描章节文件中的暗标禁用信息（薄封装：委托 bid_common + 日志）
 
@@ -605,6 +700,24 @@ def _run_single(root: Path, chapter_dir: Path, variant_id: str) -> int:
     truth = load_standards_truth(config_dir)
     std_result = check_standards_fabrication(md_files, truth, log)
 
+    log.info("工期废标门(网络图关键线路/进度跨度 ≤ 招标工期):")
+    tender_days = 0
+    facts_p = extracted / "project_facts.json"
+    if facts_p.exists():
+        try:
+            _fj = json.loads(facts_p.read_text(encoding="utf-8"))
+            _f = _fj.get("facts", _fj)
+            _dd = _f.get("duration_days")
+            _dd = _dd.get("value") if isinstance(_dd, dict) else _dd
+            tender_days = int(float(_dd or 0))
+        except (ValueError, json.JSONDecodeError, TypeError, AttributeError):
+            tender_days = 0
+    if not tender_days:
+        m = re.search(r"total_duration_days:\s*(\d+)", rules_text)
+        if m:
+            tender_days = int(m.group(1))
+    schedule_check = check_schedule_duration(md_files, tender_days, log)
+
     # 生成机读报告（JSON，供 Claude 读取）+ 人读报告（MD）
     reports_dir = output / "reports"
     reports_dir.mkdir(exist_ok=True)
@@ -623,6 +736,7 @@ def _run_single(root: Path, chapter_dir: Path, variant_id: str) -> int:
         "chart_coverage": chart_coverage,
         "format_audit": format_audit_result,
         "standards_check": std_result,
+        "schedule_check": schedule_check,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     log.info(f"机读报告: {report_json}")
 
@@ -727,6 +841,7 @@ def _run_single(root: Path, chapter_dir: Path, variant_id: str) -> int:
     has_chart_violation = chart_coverage.get("loaded") and bool(chart_coverage.get("missing"))
     has_format_severe = format_audit_result.get("exit_code", 0) >= 2
     has_std_violation = std_result.get("fabricated", 0) > 0
+    has_schedule_violation = bool(schedule_check.get("violations"))
     has_violation = (
         bool(blind_hits)
         or any(r["required"] and not r["present"] for r in responses)
@@ -734,6 +849,7 @@ def _run_single(root: Path, chapter_dir: Path, variant_id: str) -> int:
         or has_chart_violation
         or has_format_severe
         or has_std_violation
+        or has_schedule_violation
     )
     log.info("=" * 60)
     if has_violation:
@@ -746,6 +862,10 @@ def _run_single(root: Path, chapter_dir: Path, variant_id: str) -> int:
             n_v = len(format_audit_result.get("violations", []))
             n_sv = len(format_audit_result.get("style_violations", []))
             log.error(f"DOCX 格式实测层硬违规：{n_v} 段落字号/字体偏离 + {n_sv} 样式偏离")
+        if has_schedule_violation:
+            log.error(f"工期超招标硬顶（超期废标风险）：{len(schedule_check['violations'])} 处")
+            for v in schedule_check["violations"]:
+                log.error(f"    - {v['detail']}")
         log.error("存在合规风险，退出码 1")
         sys.exit(1)
     log.info("合规扫描通过 ✓")

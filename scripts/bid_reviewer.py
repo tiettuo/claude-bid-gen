@@ -235,6 +235,36 @@ def scan_placeholders(text: str) -> list[str]:
     return hits
 
 
+# ─── 提示词/指令泄漏扫描(写作模型把"给它的指令"误写进正文)─────────────
+# 这些是 LLM prompt 残渣,出现在投标正文里既不专业、又可能被评委察觉是机器生成。
+_PROMPT_LEAK_RULES = [
+    ("写作指令", re.compile(
+        r"严禁(?:编造|出现虚假)|不得编造|请确保(?:每)?|本章(?:必须|应当?)(?:覆盖|包含|展开|围绕)"
+        r"|字数(?:要求|不少于|约为?\s*\d)|须?围绕[^。\n]{0,10}展开论述|按(?:上述|指定)维度切分")),
+    ("元注释", re.compile(r"（注[:：][^）\n]{0,40}(?:不降效|占位|示例|按.*配置|此处|仅供|本工程不)[^）\n]*）")),
+    ("悬空引图", re.compile(
+        r"(?:详见下文[^。\n]{0,6}(?:流程)?图|如下图所示|见下图|流程图如下|具体[^。\n]{0,8}如下图"
+        r"|层级关系(?:如下|分析)|以下为[^。\n]{0,16}(?:分析|层级))[：:。]?\s*$")),
+]
+
+
+def scan_prompt_leak(text: str) -> list[str]:
+    """扫描指令泄漏 + 删图后悬空引图句(逐行,末尾型悬空引用)。返回去重命中。"""
+    hits, seen = [], set()
+    for raw in text.split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        for kind, rx in _PROMPT_LEAK_RULES:
+            m = rx.search(line)
+            if m:
+                frag = m.group(0).strip()
+                if (kind, frag) not in seen:
+                    seen.add((kind, frag))
+                    hits.append(f"[{kind}] {frag[:28]}")
+    return hits[:10]
+
+
 # ─── 单章审校 ────────────────────────────────────────────────────────
 
 def review_chapter(
@@ -462,6 +492,17 @@ def review_chapter(
                       + "; ".join(ph_hits[:6]),
         })
 
+    # 7.5 提示词/指令泄漏 + 悬空引图句(组装前应清)
+    leak_hits = scan_prompt_leak(text)
+    result["prompt_leaks"] = leak_hits
+    if leak_hits:
+        result["issues"].append({
+            "type": "prompt_leak",
+            "severity": "moderate",
+            "detail": f"疑似提示词/指令泄漏或悬空引图 {len(leak_hits)} 处(组装前清除): "
+                      + "; ".join(leak_hits[:6]),
+        })
+
     # 8. 严重性分级
     types_present = {i["type"] for i in result["issues"]}
     sk_sev = next((i.get("severity") for i in result["issues"] if i["type"] == "skeleton_mismatch"), None)
@@ -474,7 +515,8 @@ def review_chapter(
             or sk_sev == "major" or sub_sev == "major" or bp_sev == "moderate" \
             or pg_sev == "major" or std_sev == "moderate":
         result["severity"] = "major"
-    elif "title_mismatch" in types_present or sk_sev == "moderate" or sub_sev == "moderate" \
+    elif "title_mismatch" in types_present or "prompt_leak" in types_present \
+            or sk_sev == "moderate" or sub_sev == "moderate" \
             or pg_sev == "moderate":
         result["severity"] = "moderate"
     elif "chars_short" in types_present or "keyword_coverage_low" in types_present \

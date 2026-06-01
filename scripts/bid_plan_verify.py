@@ -433,16 +433,23 @@ def verify(tender_dir: Path, strict: bool | None = None) -> int:
             warnings.append(cpp_warning)
             print(f"{WARN} {cpp_warning}")
         if target_pages:
+            n_charts = sum(r["chart_count"] for r in rows)
             est_text_pages = sum(r["target_chars"] for r in rows) / cpp
-            est_chart_pages = sum(r["chart_count"] for r in rows) * 0.4
-            est_total = est_text_pages + est_chart_pages
-            if est_total <= target_pages * 1.05:
-                print(f"{OK} 估算 {est_total:.1f} 页 ≤ 目标 {target_pages:.0f} × 1.05")
-                print(f"    文字 {est_text_pages:.1f} 页 + 图表 {est_chart_pages:.1f} 页")
+            # ★ 每张渲染图表(graphviz/matplotlib PNG)在 docx 实测约占 0.7~0.9 整页(带标题+空白),
+            #   远高于旧系数 0.4——历史超页废标根因(普兰食堂首装 76-78 页超 70)。
+            #   这是写前【估算】(权威值是组装时 Word 实测),故超限只【警告】提醒削图,不硬阻断 Step2。
+            est_chart_pages = n_charts * 0.85
+            cover_toc = 4  # 封面+目录约 4 页
+            est_with_front = est_text_pages + est_chart_pages + cover_toc
+            if est_with_front <= target_pages * 1.05:
+                print(f"{OK} 估算 {est_with_front:.1f} 页 ≤ 目标 {target_pages:.0f} × 1.05")
+                print(f"    文字 {est_text_pages:.1f} + 图表 {est_chart_pages:.1f}({n_charts}张×0.85) + 封面目录 {cover_toc} 页")
             else:
-                msg = f"估算 {est_total:.1f} 页超出目标 {target_pages:.0f} × 1.05"
-                errors.append(msg)
-                print(f"{FAIL} {msg}")
+                msg = (f"估算 {est_with_front:.1f} 页(文字{est_text_pages:.0f}+图表{est_chart_pages:.0f}/{n_charts}张+封面目录{cover_toc})"
+                       f"可能超目标 {target_pages:.0f}×1.05 — 写前建议削减图表数(每张≈0.85页)或下调章节字数;"
+                       f"以组装时 Word 实测页数为准")
+                warnings.append(msg)
+                print(f"{WARN} {msg}")
         else:
             warnings.append("总量预算未声明'目标页数'")
             print(f"{WARN} 未找到总量预算'目标页数'")
