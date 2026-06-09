@@ -1227,56 +1227,53 @@ def _img_anchors_to_inline(doc, log):
 
 
 def _img_wrap_landscape(body, para_elem, page_w_cm, page_h_cm, ml, mr, mt, mb):
-    """在图片段落前后插入连续分节符：前段=竖→横, 后段=横→竖, 让大图独占横版页。"""
+    """让图片段独占一张横版页。
+
+    OpenXML 语义：段落 pPr 里的 sectPr 描述「以该段结尾的 section」的属性。因此：
+      - 图片段【前】插一空段，其 sectPr=竖版 → 闭合前面正文(保持竖版)；
+      - 图片段【后】插一空段，其 sectPr=横版 → 图片所在 section 横版。
+    旧实现把横版 sectPr 放在前段，会把前面正文也带成横版
+    (feedback_openxml_sectpr_direction)。本实现方向已修正。
+    """
     from docx.shared import Cm
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
-    import copy
 
-    # 创建横版的 sectPr
-    sect_landscape = OxmlElement("w:sectPr")
-    pgsz = OxmlElement("w:pgSz")
-    pgsz.set(qn("w:w"), str(int(Cm(page_h_cm).twips)))   # 横版：高→宽
-    pgsz.set(qn("w:h"), str(int(Cm(page_w_cm).twips)))   # 横版：宽→高
-    pgsz.set(qn("w:orient"), "landscape")
-    sect_landscape.append(pgsz)
-    # 横版的边距（左右对调因为旋转）
-    pgmar = OxmlElement("w:pgMar")
-    pgmar.set(qn("w:top"), str(int(Cm(mt).twips)))
-    pgmar.set(qn("w:bottom"), str(int(Cm(mb).twips)))
-    pgmar.set(qn("w:left"), str(int(Cm(ml).twips)))
-    pgmar.set(qn("w:right"), str(int(Cm(mr).twips)))
-    sect_landscape.append(pgmar)
+    def _sectpr(landscape: bool):
+        sect = OxmlElement("w:sectPr")
+        pgsz = OxmlElement("w:pgSz")
+        if landscape:
+            pgsz.set(qn("w:w"), str(int(Cm(page_h_cm).twips)))   # 横版：高→宽
+            pgsz.set(qn("w:h"), str(int(Cm(page_w_cm).twips)))
+            pgsz.set(qn("w:orient"), "landscape")
+        else:
+            pgsz.set(qn("w:w"), str(int(Cm(page_w_cm).twips)))
+            pgsz.set(qn("w:h"), str(int(Cm(page_h_cm).twips)))
+        sect.append(pgsz)
+        pgmar = OxmlElement("w:pgMar")
+        pgmar.set(qn("w:top"), str(int(Cm(mt).twips)))
+        pgmar.set(qn("w:bottom"), str(int(Cm(mb).twips)))
+        pgmar.set(qn("w:left"), str(int(Cm(ml).twips)))
+        pgmar.set(qn("w:right"), str(int(Cm(mr).twips)))
+        sect.append(pgmar)
+        return sect
 
-    # 在图片段落前插入一个空段落，把竖版→横版的分节符放在这个空段里
-    pre_break = OxmlElement("w:p")
-    pre_pPr = OxmlElement("w:pPr")
-    pre_pPr.append(copy.deepcopy(sect_landscape))
-    pre_break.append(pre_pPr)
-    body.insert(list(body).index(para_elem), pre_break)
+    def _empty_para(sect):
+        p = OxmlElement("w:p")
+        pPr = OxmlElement("w:pPr")
+        pPr.append(sect)
+        p.append(pPr)
+        return p
 
-    # 在图片段落后插入一个空段落，把横版→竖版的分节符放在里面
-    sect_portrait = OxmlElement("w:sectPr")
-    pgsz2 = OxmlElement("w:pgSz")
-    pgsz2.set(qn("w:w"), str(int(Cm(page_w_cm).twips)))
-    pgsz2.set(qn("w:h"), str(int(Cm(page_h_cm).twips)))
-    sect_portrait.append(pgsz2)
-    pgmar2 = OxmlElement("w:pgMar")
-    pgmar2.set(qn("w:top"), str(int(Cm(mt).twips)))
-    pgmar2.set(qn("w:bottom"), str(int(Cm(mb).twips)))
-    pgmar2.set(qn("w:left"), str(int(Cm(ml).twips)))
-    pgmar2.set(qn("w:right"), str(int(Cm(mr).twips)))
-    sect_portrait.append(pgmar2)
-
-    post_break = OxmlElement("w:p")
-    post_pPr = OxmlElement("w:pPr")
-    post_pPr.append(sect_portrait)
-    post_break.append(post_pPr)
-    para_idx = list(body).index(para_elem)
-    if para_idx + 1 < len(list(body)):
-        body.insert(para_idx + 1, post_break)
+    # 前：竖版 sectPr 闭合前面正文（保持竖版）
+    body.insert(list(body).index(para_elem), _empty_para(_sectpr(False)))
+    # 后：横版 sectPr → 图片段所在 section 横版
+    idx = list(body).index(para_elem)
+    post = _empty_para(_sectpr(True))
+    if idx + 1 < len(list(body)):
+        body.insert(idx + 1, post)
     else:
-        body.append(post_break)
+        body.append(post)
 
 
 def _img_normalize_para(para, new_h):
@@ -1320,9 +1317,16 @@ def _img_normalize_para(para, new_h):
     jc.set(qn("w:val"), "center")
 
 
-def _fit_images(doc, fmt: dict, log) -> None:
+# 招标常要求「平面布置图、进度图横向编辑」(西藏简易综合评估法等强制格式)。
+# 这些图表类型即使竖版放得下也应独占横版页, 由 _chart_order.json 按文档顺序识别。
+_LANDSCAPE_CHART_KINDS = {"site_layout", "schedule", "aoa_network"}
+
+
+def _fit_images(doc, fmt: dict, log, chart_order: list | None = None) -> None:
     """扫描文档中的图片，约束尺寸并为大图切换横版（编排）。
     1. 宽不超版心，等比缩放  2. 缩放后仍超版心高 85% → 切横版  3. 横版后恢复竖版
+    4. 平面布置图/进度图(site_layout/schedule/aoa_network)强制横版(招标要求)
+    chart_order: 图表预处理写出的图表类型顺序清单, 与文档图片顺序一一对应。
     具体步骤见 _img_anchors_to_inline / _img_wrap_landscape / _img_normalize_para。
     """
     from docx.shared import Cm
@@ -1368,21 +1372,27 @@ def _fit_images(doc, fmt: dict, log) -> None:
         # 先尝试竖版缩放
         new_w = min(orig_w, int(content_w_portrait))
         new_h = int(new_w * aspect)
-        need_landscape = (not fmt.get("force_portrait")) and (new_h > int(content_h_portrait * threshold))
+        # 平面布置图/进度图: 招标常要求横版编辑, 即使竖版放得下也强制横版
+        kind = chart_order[img_count - 1] if (chart_order and img_count - 1 < len(chart_order)) else None
+        force_ls = kind in _LANDSCAPE_CHART_KINDS
+        need_landscape = force_ls or (
+            (not fmt.get("force_portrait")) and (new_h > int(content_h_portrait * threshold)))
 
         if need_landscape:
-            # 横版缩放
+            # 横版缩放：等比适配横版版心, 留余量避免溢出到第二页
+            cap_h = int(content_h_landscape * 0.90)
             new_w = min(orig_w, int(content_w_landscape))
             new_h = int(new_w * aspect)
-            if new_h > int(content_h_landscape):
-                new_h = int(content_h_landscape)
+            if new_h > cap_h:
+                new_h = cap_h
                 new_w = int(new_h / aspect)
             _img_wrap_landscape(body, para._element, page_w_cm, page_h_cm, ml, mr, mt, mb)
             landscape_count += 1
         else:
-            # 竖版：超高则缩放
-            if new_h > int(content_h_portrait):
-                new_h = int(content_h_portrait)
+            # 竖版：高度封顶 ~65% 版心, 使示意图(组织/体系/流程图)不独占整页、可与正文共享页面
+            cap_h = int(content_h_portrait * 0.65)
+            if new_h > cap_h:
+                new_h = cap_h
                 new_w = int(new_h / aspect)
 
         # 更新图片尺寸
@@ -1784,7 +1794,8 @@ def _pp_strip_lists_and_fonts(doc, fmt, body_size, log):
 
 def postprocess_docx(docx_path: Path, fmt: dict, project_name: str,
                      company_name: str, log: logging.Logger,
-                     variant_style: dict | None = None) -> None:
+                     variant_style: dict | None = None,
+                     chapter_dir: Path | None = None) -> None:
     """pandoc 产出的 DOCX 后处理（编排）。各步实现见 _pp_* / _postproc_* / _prepend_* 函数：
     0. 样式级规范化   1. 去列表黑点 + run 字体   2. 表格   3. 封面（非暗标）
     4. 目录   5. 页眉禁止   6. 页码   7. 软层指纹   8. 图片   9. settings 语言
@@ -1832,7 +1843,15 @@ def postprocess_docx(docx_path: Path, fmt: dict, project_name: str,
         _apply_doc_soft_layer(doc, fmt, variant_style, log)
 
     # ─── 8. 图片尺寸约束 + 大图横版（必须最后执行，防止被覆盖）──
-    _fit_images(doc, fmt, log)
+    chart_order = None
+    if chapter_dir is not None:
+        try:
+            _cof = Path(chapter_dir) / "charts" / "_chart_order.json"
+            if _cof.is_file():
+                chart_order = json.loads(_cof.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            chart_order = None
+    _fit_images(doc, fmt, log, chart_order=chart_order)
 
     # ─── 9. settings.xml 修正：东亚语言 ja-JP → zh-CN + 隐藏拼写/语法标记 ──
     _fix_settings_lang_and_proofing(doc, log)
@@ -2763,7 +2782,7 @@ def _assemble_one(
     # ─── 后处理：字体/去黑点/封面/目录/页码 ─────────────
     vstyle = variant.get("chart_style") if variant else None
     postprocess_docx(out_path, fmt, info["project_name"], info["company_name"], log,
-                     variant_style=vstyle)
+                     variant_style=vstyle, chapter_dir=chapter_dir)
 
     log.info(f"  文档已保存: {out_path.name}  大小: {out_path.stat().st_size:,} 字节")
 

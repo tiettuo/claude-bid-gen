@@ -259,8 +259,18 @@ def _strip_json_fence(text: str) -> str:
 
 
 def _parse_json_with_retry(client: LLMClient, model: str, system: str, user: str,
-                          max_attempts: int = 2, log=None) -> dict | None:
-    """调 LLM 拿 JSON,失败时重试一次,提示更严格。"""
+                          max_attempts: int = 2, log=None,
+                          max_tokens: int = 12000) -> dict | None:
+    """调 LLM 拿 JSON,失败时重试一次,提示更严格。
+
+    max_tokens 默认 12000(B1/B2 够用);B3 需枚举全文 28+ 条废标条款,输出会撑爆
+    12000 → 被截断 → JSONDecodeError,故 B3 调用处传更大值。
+    注意:bid_llm_client._call_with_retry 用 `mt = max_tokens or m.get("max_tokens")`,
+    传入值直接透传给 API,不会被模型 config 的 max_tokens 夹住。骨架默认模型 deepseek
+    (deepseek-v4-flash)config max_tokens 已是 16000,支持本处更大值;若改用其它模型
+    (多数 config 仅 8000),调用方须自行确认目标模型真实 API 输出上限,勿盲目放大。
+    """
+    cur_max_tokens = max_tokens
     for attempt in range(1, max_attempts + 1):
         try:
             resp = client.chat(
@@ -268,7 +278,7 @@ def _parse_json_with_retry(client: LLMClient, model: str, system: str, user: str
                 system=system,
                 user=user,
                 temperature=0.2,  # 低温,稳定
-                max_tokens=12000,
+                max_tokens=cur_max_tokens,
             )
             raw = _strip_json_fence(resp.text)
             return json.loads(raw)
@@ -277,7 +287,8 @@ def _parse_json_with_retry(client: LLMClient, model: str, system: str, user: str
                 log.warning(f"  [{model}] JSON 解析失败 (尝试 {attempt}/{max_attempts}): {e}")
                 log.debug(f"  原文前 500 字: {raw[:500] if 'raw' in dir() else resp.text[:500]}")
             if attempt < max_attempts:
-                # 第二次 prompt 加更严格的提示
+                # 第二次:既加严格提示,也抬高 max_tokens(常见根因就是输出被截断)
+                cur_max_tokens = int(cur_max_tokens * 1.5)
                 user = user + "\n\n上次输出无法解析为 JSON,请严格遵守"
                 user += "「只输出 JSON,无任何 markdown 标记」的要求重新生成。"
         except Exception as e:
@@ -1001,9 +1012,22 @@ def _grep_result_disqualifications(
 def extract_b3_disqualification(tender_text: str, client: LLMClient, model: str, log) -> dict:
     log.info("[B3] 抽取废标条款...")
     user = B3_USER_TEMPLATE.format(tender_text=tender_text)
-    payload = _parse_json_with_retry(client, model, SYSTEM_PROMPT, user, log=log)
-    if not payload:
-        raise RuntimeError("B3 废标条款抽取失败")
+    # B3 要枚举全文废标条款,输出远超 B1/B2;大型招标文件(如 218 页西藏项目)会撑爆
+    # 默认 12000 token → 截断 → JSONDecodeError。这里抬到 16000(deepseek-v4-flash 支持)。
+    payload = _parse_json_with_retry(
+        client, model, SYSTEM_PROMPT, user, log=log, max_tokens=16000
+    )
+
+    llm_failed = not payload
+    if llm_failed:
+        # LLM 抽取失败(常见根因是输出超 max_tokens 被截断)→ 不直接 abort,
+        # 改用 grep-only 兜底:类二隐含硬约束 + 类一结果性废标全靠正则补回。
+        # 实测对 218 页西藏项目 grep-only 可产出 34 条可用条款(含"总页数≤70页")。
+        log.warning(
+            "[B3] LLM 废标条款抽取失败(可能被 max_tokens 截断),"
+            "降级为 grep-only 兜底,仅靠正则从原文补抽条款。"
+        )
+        payload = {"clauses": [], "summary": {}, "_grep_only_fallback": True}
 
     clauses = payload.setdefault("clauses", [])
     grep_count = 0
@@ -1024,8 +1048,12 @@ def extract_b3_disqualification(tender_text: str, client: LLMClient, model: str,
         clauses.extend(result_disq)
         grep_count += len(result_disq)
 
-    # 同步 summary
-    if grep_count:
+    # grep-only 降级时若连正则也抓不到任何条款,才真正判定失败(LLM 与 grep 双失败)。
+    if llm_failed and not clauses:
+        raise RuntimeError("B3 废标条款抽取失败:LLM 失败且 grep 兜底 0 条")
+
+    # 同步 summary(grep 有补抽,或走 grep-only 降级时,都需重建 summary)
+    if grep_count or llm_failed:
         summary = payload.setdefault("summary", {})
         summary["total_count"] = len(clauses)
         by_cat: dict[str, int] = {}

@@ -987,12 +987,22 @@ def _sl_draw_zones(ax, tpl, zones_data, line_w, fs_off, ss=None):
                        hatch=(_ZONE_HATCHES.get(zone_name, "") if ss["zone_hatch"] else ""),
                        zorder=1)
         ax.add_patch(bg)
+        # 竖向边(东/西 高>宽)沿高度堆叠, 横向边(北/南)沿宽度排列。
+        # 否则窄竖向边被横向切成 n 个超窄格子, 标签互相挤叠(feedback: 3项竖边碰撞)。
+        vertical = zh > zw
         sub_w = zw / max(n, 1)
+        sub_h = zh / max(n, 1)
         for i, item_label in enumerate(items):
-            ix = zx + i * sub_w + 0.5
-            iw = sub_w - 1
-            iy = zy + 0.5
-            ih = zh - 1
+            if vertical:
+                ix = zx + 0.5
+                iw = zw - 1
+                iy = zy + i * sub_h + 0.5
+                ih = sub_h - 1
+            else:
+                ix = zx + i * sub_w + 0.5
+                iw = sub_w - 1
+                iy = zy + 0.5
+                ih = zh - 1
             r = Rectangle((ix, iy), iw, ih, linewidth=line_w,
                           edgecolor="black", facecolor=ss["zone_fc"], zorder=2)
             ax.add_patch(r)
@@ -1026,16 +1036,22 @@ def _sl_draw_main_building(ax, tpl, data, line_w, fs_off, ss=None):
                                b["w"] * 0.76, b["h"] * 0.24,
                                linewidth=0, facecolor="white", alpha=0.85, zorder=4))
     cy_text = b["y"] + b["h"] / 2
+    # 长主体标签自动换行 + 缩字号, 防止横向溢出建筑框、压住东西区标签
+    # (feedback: DeepSeek 写 "村委会阳光棚780.79㎡及院内阳光棚878.4㎡" 22字横向溢出)
+    max_per_line = max(4, int(b["w"] / 4.5))
+    main_label = _wrap_text(str(main_label), max_per_line)
+    n_lines = main_label.count("\n") + 1
+    fs_main = max(7, (10 + fs_off) - (1 if n_lines >= 2 else 0) - (1 if n_lines >= 3 else 0))
     if main_type or main_area:
         ax.text(b["x"] + b["w"] / 2, cy_text + 2.5, main_label,
-                ha="center", va="center", fontsize=10 + fs_off,
+                ha="center", va="center", fontsize=fs_main,
                 fontweight="bold", zorder=5)
         sub = " ".join(s for s in (main_type, main_area) if s)
         ax.text(b["x"] + b["w"] / 2, cy_text - 2.5, sub,
                 ha="center", va="center", fontsize=8 + fs_off, zorder=5)
     else:
         ax.text(b["x"] + b["w"] / 2, cy_text, main_label,
-                ha="center", va="center", fontsize=10 + fs_off,
+                ha="center", va="center", fontsize=fs_main,
                 fontweight="bold", zorder=5)
 
 
@@ -3021,10 +3037,12 @@ def preprocess_md(
     chapter_idx: int = 0,
     chart_style: dict | None = None,
     heading_style: str = "B",
+    chart_order: list | None = None,
 ) -> Path:
     """处理单个 md，返回临时 md 的 Path。
 
     原文件保持不变；所有剥离/替换发生在临时副本上。
+    chart_order: 若传入,按文档顺序追加每张成功嵌入的图表 ctype(供组装阶段判横版)。
     """
     text = src_md.read_text(encoding="utf-8")
     text = _normalize_md_lists(text)
@@ -3101,6 +3119,8 @@ def preprocess_md(
                     if ok:
                         rel = Path("..") / charts_dir.name / png_name
                         replacement = f"\n![{chart_title}]({rel.as_posix()})\n"
+                        if chart_order is not None:
+                            chart_order.append(ctype)  # 按文档顺序记录成功嵌入的图表类型
                     else:
                         replacement = ""
                         log.warning(f"  [{src_md.name}] {ctype} 渲染失败，已剥离")
@@ -3183,6 +3203,7 @@ def preprocess_chapter_dir(
 
     log.info(f"图表预处理: {chapter_dir.name}  ({len(md_files)} 个章节)")
     tmp_paths = []
+    chart_order: list[str] = []  # 按文档顺序记录成功嵌入的图表类型
     for idx, src in enumerate(md_files, start=1):
         if add_chapter_prefix:
             m = re.match(r"(\d+)[_-]", src.stem)
@@ -3191,8 +3212,14 @@ def preprocess_chapter_dir(
             chapter_idx = 0
         tmp = preprocess_md(src, tmp_dir, charts_dir, data_dir, variant_id, log,
                             chapter_idx=chapter_idx, chart_style=chart_style,
-                            heading_style=heading_style)
+                            heading_style=heading_style, chart_order=chart_order)
         tmp_paths.append(tmp)
+    # 写出图表顺序清单，供 bid_assemble._fit_images 判定哪些图需横版(平面布置图/进度图)
+    try:
+        (charts_dir / "_chart_order.json").write_text(
+            json.dumps(chart_order, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"  写 _chart_order.json 失败(不影响主流程): {e}")
     return tmp_paths
 
 
