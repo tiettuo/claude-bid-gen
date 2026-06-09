@@ -2625,12 +2625,28 @@ def _check_page_count(docx_path: Path, fmt: dict, log: logging.Logger) -> int | 
     return pages
 
 
+def _backfill_chart_theme(style: dict, variant_id: str) -> None:
+    """旧项目 chart_style 缺图表主题字段时，按 variant 序号补一套互异主题(无彩色灰阶)。
+
+    早期 bid_variants 生成的 variants.json 没有 chart_accent/box_shape 等主题字段，
+    导致 _theme_from_style 全回退默认黑框、各家撞脸。这里在组装阶段按 variant_id
+    序号补全，老项目不刷 variants.json 也能拿到按家互异的图表主题。
+    """
+    try:
+        from bid_variants import variant_chart_theme, _variant_index
+    except Exception:  # noqa: BLE001
+        return
+    idx = _variant_index(variant_id, sum(ord(c) for c in str(variant_id)) if variant_id else 0)
+    style.update(variant_chart_theme(idx))
+
+
 def _make_chart_style(variant_id: str, variant: dict = None) -> dict:
     """按 variant 生成不同的图表视觉风格，防串标。
 
     优先从 variant["chart_style"] 读取完整样式（由 bid_variants.py 的
     generate_variant_style() 生成，包含 org_direction/box_shape/gantt 等
     全部差异化参数）。若不存在则回退到 V01/V02/V03 硬编码样式。
+    缺主题字段(旧项目)统一由 _backfill_chart_theme 按序号补齐。
     """
     # 优先使用 variant.chart_style 的完整字段
     if variant and isinstance(variant.get("chart_style"), dict):
@@ -2666,6 +2682,9 @@ def _make_chart_style(variant_id: str, variant: dict = None) -> dict:
                   "chart_node_rounded", "chart_edge_spline"):
             if k in cs:
                 style[k] = cs[k]
+        # 旧项目 chart_style 缺主题字段 → 按 variant 序号自动补全(无需手动刷 variants.json)
+        if "chart_accent" not in style:
+            _backfill_chart_theme(style, variant_id)
         return style
 
     # 兜底：V01/V02/V03 硬编码
@@ -2713,7 +2732,9 @@ def _make_chart_style(variant_id: str, variant: dict = None) -> dict:
             "gantt_date_fmt": "%Y-%m",
         },
     }
-    return styles.get(str(variant_id).upper(), styles["V01"])
+    fb = dict(styles.get(str(variant_id).upper(), styles["V01"]))
+    _backfill_chart_theme(fb, variant_id)  # 硬编码兜底也补主题字段, 各家不撞脸
+    return fb
 
 
 def _assemble_one(
