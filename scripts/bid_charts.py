@@ -451,6 +451,10 @@ def render_org_chart(data: dict, out_png: Path, title: str,
 
     style = style or {}
     root = data.get("root")
+    if isinstance(root, list):
+        # LLM(尤其 deepseek)偶发把 root 写成顶层节点数组而非单根 dict,
+        # 会让 _add_org_node 对 list 调 .get 崩溃;自动包一个默认根兜底。
+        root = {"label": "项目部", "children": root} if root else None
     if not root:
         log.warning(f"  org_chart 无 root 节点，跳过 {out_png.name}")
         return False
@@ -2124,7 +2128,7 @@ def _adapt_site_layout_data(data: dict) -> dict:
         for i, name in enumerate(rest[:16]):
             normed[_SITE_DIRECTIONS[i % 4]].append(name)
         d["zones"] = normed
-        d["template"] = "rectangular_center"
+        d.setdefault("template", "rectangular_center")
         return d
 
     # 没 zones,塞个空
@@ -2319,9 +2323,9 @@ def _normalize_heading_numbers(text: str, chapter_idx: int,
     ch_str = str(chapter_idx).zfill(2)
 
     style = _HEADING_STYLES.get(style_id, _HEADING_STYLES["B"])
-    h2_fmt, h3_fmt, _ = style[1], style[2], style[3]
+    h2_fmt, h3_fmt, h4_fmt = style[1], style[2], style[3]
 
-    # 检测标题行
+    # 检测标题行（#### 先于 ### 先于 ##，避免误判层级）
     h2_pat = re.compile(r'^(##)\s+')
     h3_pat = re.compile(r'^(###)\s+')
     h4_pat = re.compile(r'^(####)\s+')
@@ -2331,12 +2335,26 @@ def _normalize_heading_numbers(text: str, chapter_idx: int,
     lines = text.split("\n")
     h2_counter = 0
     h3_counter = 0
+    h4_counter = 0
 
     for i, line in enumerate(lines):
+        # H4（#### 必须先检测——历史上漏处理,H4 保留模型原编号导致全篇编号混用）
+        m4 = h4_pat.match(line)
+        if m4:
+            h4_counter += 1
+            title = line[m4.end():]
+            nm = any_num.match(title)
+            if nm:
+                title = title[nm.end():]
+            prefix = h4_fmt(ch_str, h2_counter, h3_counter, h4_counter)
+            lines[i] = f"#### {prefix} {title}"
+            continue
+
         # H3（要先于 H2 检测，因为 ### 也匹配 ##）
         m3 = h3_pat.match(line)
         if m3:
             h3_counter += 1
+            h4_counter = 0
             title = line[m3.end():]
             # 剥离已有编号
             nm = any_num.match(title)
@@ -2351,6 +2369,7 @@ def _normalize_heading_numbers(text: str, chapter_idx: int,
         if m2 and not h3_pat.match(line):
             h2_counter += 1
             h3_counter = 0
+            h4_counter = 0
             title = line[m2.end():]
             # 剥离已有编号
             nm = any_num.match(title)

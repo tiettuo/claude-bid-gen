@@ -228,7 +228,7 @@
     "backoff_seconds": 30,
     "timeout_seconds": 180
   },
-  "default_model": "kimi",
+  "default_model": "deepseek",
   "fallback_order": [
     "kimi",
     "deepseek",

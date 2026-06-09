@@ -1385,6 +1385,14 @@ def _fit_images(doc, fmt: dict, log) -> None:
                 new_h = int(content_h_portrait)
                 new_w = int(new_h / aspect)
 
+        # ★ 统一图表最大高度上限：避免高窄图(组织图等)撑满整页、与宽扁图(流程图)尺寸悬殊。
+        #   所有插图收敛到 ≤ chart_max_h_cm(默认 11cm ≈ 0.45 页),视觉协调。
+        chart_max_h = int(Cm(min(fmt.get("chart_max_h_cm", 13.0),
+                                 page_h_cm - mt - mb)))
+        if new_h > chart_max_h:
+            new_h = chart_max_h
+            new_w = int(new_h / aspect)
+
         # 更新图片尺寸
         extent.set("cx", str(new_w))
         extent.set("cy", str(new_h))
@@ -1973,6 +1981,46 @@ def _prepend_cover(doc, project_name: str, company_name: str, fmt: dict, log):
         for _ in range(9): _insert_para()
         _insert_para(bidder, ms, align="left")
         _insert_para(date_line, ms, align="left")
+    elif style == "D":  # 上下双线庄重居中式
+        for _ in range(6): _insert_para()
+        _insert_para(rule=True)
+        _insert_para()
+        _insert_para("施 工 组 织 设 计", ts, bold=True, cn_font=tf)
+        _insert_para()
+        _insert_para(rule=True)
+        for _ in range(4): _insert_para()
+        _insert_para(project_name, ps, bold=True)
+        for _ in range(8): _insert_para()
+        _insert_para(bidder, ms)
+        _insert_para(date_line, ms)
+    elif style == "E":  # 简约右对齐落款式
+        for _ in range(9): _insert_para()
+        _insert_para("施工组织设计", ts, cn_font=tf)
+        for _ in range(5): _insert_para()
+        _insert_para(project_name, ps)
+        for _ in range(8): _insert_para()
+        _insert_para(bidder, ms, align="right")
+        _insert_para(date_line, ms, align="right")
+    elif style == "F":  # 项目名置顶突出式
+        for _ in range(4): _insert_para()
+        _insert_para(project_name, ps, bold=True)
+        _insert_para()
+        _insert_para(rule=True)
+        for _ in range(5): _insert_para()
+        _insert_para("施  工  组  织  设  计", ts, bold=True, cn_font=tf)
+        for _ in range(9): _insert_para()
+        _insert_para(bidder, ms)
+        _insert_para(date_line, ms)
+    elif style == "G":  # 标题居上 + 项目名上下双线夹持式
+        for _ in range(5): _insert_para()
+        _insert_para("施 工 组 织 设 计", ts, bold=True, cn_font=tf)
+        for _ in range(5): _insert_para()
+        _insert_para(rule=True)
+        _insert_para(project_name, ps, bold=True)
+        _insert_para(rule=True)
+        for _ in range(7): _insert_para()
+        _insert_para(bidder, ms)
+        _insert_para(date_line, ms)
     else:               # A 居中经典
         for _ in range(8): _insert_para()
         _insert_para("施  工  组  织  设  计", ts, bold=True, cn_font=tf)
@@ -2439,8 +2487,11 @@ def _strip_docx_fingerprints(docx_path: Path, log: logging.Logger) -> None:
         log.warning(f"  指纹清理失败（非致命）: {e}")
 
 
-# 用户传 --no-word 时置 True,完全跳过 Word 自动化(目录预渲染 + 页数检查)。
-_SKIP_WORD = False
+# 默认 True：跳过 Word 自动化(目录预渲染 + 页数检查)。
+# 根因：Word 打开大文档(数百页)更新整本目录+全文分页可达数分钟,而组装本身仅 ~15s;
+# 且页数检查仅在有页数硬顶时才有意义,目录靠 docx 自带 updateFields 打开按 F9 即更新。
+# 需要 Word 渲染页数/预更新目录时显式传 --word 开启。
+_SKIP_WORD = True
 
 # 探测 Word 是否被占用:不经 application tell 直接问 System Events,不会启动 Word。
 # 返回 "notrunning"(未运行,可放心新开) / 整数字符串(已打开的文档数) / 出错。
@@ -2512,7 +2563,7 @@ def _check_page_count(docx_path: Path, fmt: dict, log: logging.Logger) -> int | 
     跳过不影响 docx 可用:文档已带 updateFields,用户打开按 F9 即更新目录。
     """
     if _SKIP_WORD:
-        log.info("  页数检查: 跳过(--no-word)")
+        log.info("  页数检查: 跳过(默认不调 Word;如需页数核验加 --word)")
         return None
     if sys.platform != "darwin":
         log.info("  页数检查: 跳过(仅 macOS 支持 Word AppleScript)")
@@ -2738,11 +2789,14 @@ def _assemble_one(
     # ─── 图表预处理：剥离 JSON/mermaid，渲染进度甘特图 PNG ──
     variant_id = variant["id"] if variant else ""
     chart_style = _make_chart_style(variant_id, variant=variant) if variant else None
+    # variants.json 可显式指定每变体的标题编号风格(A-L);缺省则按变体序号轮转派发(反串标)
+    heading_style = (variant or {}).get("heading_style", "") if variant else ""
     try:
         tmp_md_files = preprocess_chapter_dir(
             chapter_dir, md_files, log, variant_id,
             add_chapter_prefix=fmt.get("heading_chapter_prefix", True),
             chart_style=chart_style,
+            heading_style=heading_style,
         )
     except Exception as e:
         log.warning(f"图表预处理失败，回退到原 md：{e}")
@@ -2780,13 +2834,18 @@ def main():
     parser.add_argument("output_dir", help="output 目录路径")
     parser.add_argument("--batch", action="store_true",
                         help="批量模式：扫描 output/V*/ 为每家单位生成独立 DOCX")
+    parser.add_argument("--word", action="store_true",
+                        help="启用 Word 自动化(目录预渲染+真实页数检查)。默认关闭——"
+                             "大文档 Word 开档分页可达数分钟,而组装本身仅 ~15s。"
+                             "仅在需要 Word 渲染页数核验时使用。")
     parser.add_argument("--no-word", action="store_true",
-                        help="跳过 Word 自动化(目录预渲染+页数检查);docx 仍正常生成,"
-                             "打开后按 F9 更新目录。Word 开着文档时本就会自动跳过。")
+                        help="（已为默认行为,保留兼容）跳过 Word 自动化;docx 仍正常生成,"
+                             "打开后按 F9 更新目录。")
     args = parser.parse_args()
 
     global _SKIP_WORD
-    _SKIP_WORD = args.no_word
+    # 默认跳过 Word;仅当显式 --word 且未同时传 --no-word 时才启用。
+    _SKIP_WORD = args.no_word or (not args.word)
 
     try:
         from docx import Document  # noqa: F401
