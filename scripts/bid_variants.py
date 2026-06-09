@@ -185,21 +185,33 @@ _GV_ACCENTS = ["#000000", "#1A1A1A", "#333333", "#4D4D4D"]   # 描边/字色(全
 _GV_FILLS = ["#FFFFFF", "#ECECEC", "#DBDBDB", "#F4F4F4"]      # 节点填充(白/浅灰,无彩色)
 _GV_BOX = ["box", "rounded", "doubleframe"]                  # 框型
 _GV_SPLINE = ["ortho", "polyline", "curved", "spline"]       # 连线走线
-_GV_DIR = ["TB", "LR"]                                       # 版面方向
+# ★ 布局范式：换 graphviz 引擎 → 同一组织数据出完全不同的图形结构(不是换皮)。
+#   dot=层级树 / twopi=辐射 / circo=环形 / fdp=力导聚簇。这是"看不出同一风格"的最大杠杆。
+_ORG_PARADIGMS = [
+    ("dot", "TB"),    # 自上而下层级树
+    ("dot", "LR"),    # 左右横向树
+    ("twopi", ""),    # 项目经理居中、各级辐射散开
+    ("circo", ""),    # 环形/星形布散
+    ("fdp", ""),      # 力导有机聚簇
+]
 
 
 def variant_chart_theme(idx: int) -> dict:
     """按方案序号(0-based)派发一套确定且互不相同的图表主题。
 
-    主区分维度 box×spline×direction = 3×4×2 = 24 套互异(覆盖 20 家上限);
-    填充/描边灰阶随序号联动叠加增强可分辨度。全灰阶,满足无彩色硬约束。
+    一级区分=布局范式(引擎/方向, 5 种);二级=框型×连线×填充。
+    5×3×4 远超 20 家上限, N 个方案 N 套互异。全灰阶, 满足无彩色硬约束。
+    框架图(org_chart)按范式换引擎 → 结构层面就不同;体系/流程图保持 dot(需 rank 分层),
+    靠框型/连线/方向区分。
     """
     idx = max(0, int(idx))
-    box = _GV_BOX[idx % 3]
-    spline = _GV_SPLINE[(idx // 3) % 4]
-    direction = _GV_DIR[(idx // 12) % 2]
+    engine, edir = _ORG_PARADIGMS[idx % len(_ORG_PARADIGMS)]
+    box = _GV_BOX[(idx // len(_ORG_PARADIGMS)) % 3]   # 引擎循环一轮后换框型
+    spline = _GV_SPLINE[(idx // 2) % 4]
     filled = (idx % 4 != 0)  # 序号 0/4/8.. 白底, 其余浅灰填充
+    direction = edir or _GV_DIR_FALLBACK[(idx // 3) % 2]
     return {
+        "org_engine": engine,
         "chart_accent": _GV_ACCENTS[idx % 4],
         "chart_node_fill": _GV_FILLS[idx % 4],
         "chart_node_filled": filled,
@@ -209,6 +221,9 @@ def variant_chart_theme(idx: int) -> dict:
         "org_direction": direction,
         "flow_direction": direction,
     }
+
+
+_GV_DIR_FALLBACK = ["TB", "LR"]
 
 
 def _variant_index(variant_id: str, fallback: int) -> int:

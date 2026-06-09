@@ -470,13 +470,21 @@ def render_org_chart(data: dict, out_png: Path, title: str,
     theme = _theme_from_style(style)
     gv_size = _graphviz_size_str(prefer_landscape=False)
     gdpi = max(100, int(_RENDER_DPI * style.get("chart_scale", 1.0)))
-    g = graphviz.Digraph(format="png")
+    # ★ 布局范式：按变体换引擎(dot 层级树 / twopi 辐射 / circo 环形 / fdp 力导聚簇),
+    #   同一组织数据出完全不同的结构, 多家"看不出同一风格"。引擎不存在则回退 dot。
+    engine = str(style.get("org_engine", "dot") or "dot")
+    if engine not in ("dot", "twopi", "circo", "fdp", "neato", "sfdp"):
+        engine = "dot"
+    g = graphviz.Digraph(format="png", engine=engine)
     g.attr(rankdir=direction, dpi=str(gdpi), bgcolor="white",
-           size=gv_size,
+           size=gv_size, overlap="false",
            ranksep=str(round(0.6 * spacing, 2)),
            nodesep=str(round(0.4 * spacing, 2)))
-    if theme["spline"]:
+    # 连线走线只对 dot 套主题值(ortho/polyline 不适合放射/环形);非 dot 引擎用曲线避免压线
+    if engine == "dot" and theme["spline"]:
         g.attr(splines=theme["spline"])
+    elif engine != "dot":
+        g.attr(splines="true")
     g.attr("node", fontname="SimHei", fontsize=fs,
            penwidth=line_w, margin="0.15,0.08",
            color=theme["accent"], fontcolor=theme["accent"])
@@ -906,11 +914,29 @@ _SITE_STYLES = {
         "road_dash": True, "compass": "star", "compass_xy": (93, 80),
         "legend_x": 2, "title_x": 60, "scale_kind": "block",
     },
+    "D": {  # CAD 测绘:白底建筑 + 描边无纹分区 + 背景方格网 + 左上箭头 + 刻度比例尺
+        "building_fc": "white", "building_hatch": "",
+        "zone_fc": "white", "zone_hatch": False, "zone_edge": "#444444", "zone_double": False,
+        "road_dash": False, "compass": "arrow", "compass_xy": (8, 82),
+        "legend_x": 64, "title_x": 2, "scale_kind": "tick", "bg_grid": True,
+    },
+    "E": {  # 重墨块:深灰实底建筑 + 灰底分区 + 右上星形 + 图块比例尺(粗重风)
+        "building_fc": "#BFBFBF", "building_hatch": "",
+        "zone_fc": "#E0E0E0", "zone_hatch": False, "zone_edge": "black", "zone_double": False,
+        "road_dash": True, "compass": "star", "compass_xy": (93, 80),
+        "legend_x": 2, "title_x": 60, "scale_kind": "block",
+    },
+    "F": {  # 双线测绘:点纹建筑 + 双线斜纹分区 + 背景细网 + 左上圆盘 + 刻度比例尺
+        "building_fc": "white", "building_hatch": "...",
+        "zone_fc": "white", "zone_hatch": True, "zone_edge": "#555555", "zone_double": True,
+        "road_dash": False, "compass": "circle", "compass_xy": (8, 80),
+        "legend_x": 64, "title_x": 2, "scale_kind": "tick", "bg_grid": True,
+    },
 }
 
 # 多变体总平面图自动差异化轮换池(按变体序号取):形状/视觉风格/图号前缀/比例
 _SITE_TEMPLATE_ROTATION = ["rectangular_center", "L_shape", "U_shape"]
-_SITE_STYLE_ROTATION = ["A", "B", "C"]
+_SITE_STYLE_ROTATION = ["A", "B", "C", "D", "E", "F"]
 _SITE_DRAWING_PREFIX = ["SZ-PM", "GC-ZP", "ZB-S", "PM-SG", "SG-ZP", "ZP-PM"]
 _SITE_SCALE_ROTATION = ["1:200", "1:150", "1:250"]
 
@@ -923,8 +949,11 @@ def _auto_diff_site_layout(data: dict, variant_id: str) -> dict:
     if not m:
         return data
     i = max(0, int(m.group(1)) - 1)
-    data.setdefault("template", _SITE_TEMPLATE_ROTATION[i % len(_SITE_TEMPLATE_ROTATION)])
+    # 视觉风格走快(每家换一套, 6 套), 模板走慢(每 6 家换一种建筑位形): 二者解耦,
+    # 否则 template 与 site_style 同为 i%3 时只剩 3 种真实组合 → 各家总平面图雷同。
     data.setdefault("site_style", _SITE_STYLE_ROTATION[i % len(_SITE_STYLE_ROTATION)])
+    data.setdefault("template",
+                    _SITE_TEMPLATE_ROTATION[(i // len(_SITE_STYLE_ROTATION)) % len(_SITE_TEMPLATE_ROTATION)])
     data.setdefault("scale", _SITE_SCALE_ROTATION[i % len(_SITE_SCALE_ROTATION)])
     data.setdefault("drawing_no", f"{_SITE_DRAWING_PREFIX[i % len(_SITE_DRAWING_PREFIX)]}-{i + 1:02d}")
     return data
@@ -1306,6 +1335,13 @@ def render_site_layout(data: dict, out_png: Path, title: str,
     # 视觉风格(反串标):A/B/C 换建筑填充/分区底色/指北针/图例-图签位置
     sskey = str(data.get("site_style") or style.get("site_style") or "A").upper()
     ss = _SITE_STYLES.get(sskey, _SITE_STYLES["A"])
+
+    # 背景方格网(CAD/测绘风):某些风格独有, 与纯白底风格一眼区分
+    if ss.get("bg_grid"):
+        for gx in range(0, 101, 10):
+            ax.plot([gx, gx], [0, 90], color="#CFCFCF", linewidth=0.3, zorder=0)
+        for gy in range(0, 91, 10):
+            ax.plot([0, 100], [gy, gy], color="#CFCFCF", linewidth=0.3, zorder=0)
 
     _sl_draw_fence(ax, tpl, line_w)
     used_zones = _sl_draw_zones(ax, tpl, data.get("zones") or {}, line_w, fs_off, ss)

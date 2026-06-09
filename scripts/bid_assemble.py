@@ -2672,6 +2672,7 @@ def _make_chart_style(variant_id: str, variant: dict = None) -> dict:
         # org chart
         style["org_direction"] = cs.get("org_direction", "TB")
         style["org_box_shape"] = cs.get("org_box_shape", "box")
+        style["org_engine"] = cs.get("org_engine", "dot")  # 布局范式(dot/twopi/circo/fdp)
         # 资源曲线/网络图
         style["resource_bar_width"] = cs.get("resource_bar_width", 0.6)
         style["resource_hatches"] = cs.get("resource_hatches", ["", "//", "\\\\", "xx"])
