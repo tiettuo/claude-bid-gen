@@ -130,6 +130,16 @@ def _assign_model(idx: int, total: int, pool: list[str],
 
 def _data_fingerprint(company: str, idx: int, total: int, rng: random.Random) -> dict:
     """为一家单位生成数据指纹"""
+    # 单份投标无反串标需求：中和指纹。否则 bid_writer 会把差异化参数
+    # （劳动力系数1.08 / 装载机较常规+1台 / 规范优先2020年版 / 差异化资源配置说明）
+    # 当成内容成段写进单份标正文，既荒唐又像作弊痕迹（feedback_bid_writer_param_leak）。
+    if total <= 1:
+        return {
+            "schedule_offset_days": 0,
+            "labor_factor": 1.0,
+            "equip_delta": {},
+            "standard_year_preference": "",
+        }
     amplify = 1.0 if total <= 12 else 1.5
 
     schedule_offset = rng.randint(int(SCHEDULE_OFFSET_RANGE[0] * amplify),

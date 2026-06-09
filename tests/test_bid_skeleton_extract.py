@@ -5,9 +5,30 @@ from bid_skeleton_extract import (
     _grep_implicit_constraints,
     auto_detect_hybrid,
     choose_skeleton_model,
+    extract_b3_disqualification,
     validate_b1,
     validate_b3,
 )
+
+
+class _FakeResp:
+    def __init__(self, text):
+        self.text = text
+
+
+class _FakeClient:
+    """返回固定文本的桩 client,用于驱动 extract_b3 的降级路径。"""
+    def __init__(self, text):
+        self._text = text
+
+    def chat(self, **kwargs):
+        return _FakeResp(self._text)
+
+
+class _NullLog:
+    def info(self, *a, **k):
+        pass
+    warning = debug = error = info
 
 
 # ─── B3 grep fallback ───
@@ -54,6 +75,27 @@ def test_b3_grep_skip_existing():
     existing = {"总页数不得超过 70 页|5"}
     out = _grep_implicit_constraints(text, existing, None)
     assert len(out) == 0
+
+
+# ─── B3 LLM 失败时的 grep-only 降级 ───
+
+def test_b3_llm_fail_degrades_to_grep_only():
+    """LLM 返回不可解析 JSON 时不 abort,改 grep-only 兜底并返回可用 payload。"""
+    tender = "[第5页]\n本项目投标文件总页数不得超过 70 页。"
+    client = _FakeClient("这不是 JSON,完全无法解析")  # 触发 JSONDecodeError → 降级
+    payload = extract_b3_disqualification(tender, client, "deepseek", _NullLog())
+    assert payload.get("_grep_only_fallback") is True
+    assert payload["clauses"], "grep 应至少补回 1 条"
+    assert any(c["constraint_type"] == "page_limit" for c in payload["clauses"])
+    assert payload["summary"]["total_count"] == len(payload["clauses"])
+
+
+def test_b3_llm_fail_and_grep_empty_raises():
+    """LLM 失败且原文无任何可 grep 的硬约束/废标词时,才真正抛错。"""
+    tender = "[第1页]\n本段为普通描述性文字,不含任何约束或废标关键词。"
+    client = _FakeClient("依然不是 JSON")
+    with pytest.raises(RuntimeError):
+        extract_b3_disqualification(tender, client, "deepseek", _NullLog())
 
 
 def test_validate_b3_warns_no_constraint_type():
