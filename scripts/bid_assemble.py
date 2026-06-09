@@ -2669,6 +2669,7 @@ def _make_chart_style(variant_id: str, variant: dict = None) -> dict:
         style["gantt_grays"] = cs.get("gantt_grays", ["#4A4A4A", "#6E6E6E", "#929292", "#B6B6B6", "#8A8A8A"])
         style["gantt_bar_hatch"] = cs.get("gantt_bar_hatch", "///")
         style["gantt_bar_height"] = cs.get("gantt_bar_height", 0.55)
+        style["gantt_bar_lw"] = cs.get("gantt_bar_lw", 0.9)  # 横道条边线宽
         style["gantt_grid"] = cs.get("gantt_grid", "dashed")
         _ms = cs.get("gantt_milestone_style", ":")
         _VALID_LS = {"-", "--", "-.", ":", "None", " ", "", "solid", "dashed", "dashdot", "dotted", "none"}

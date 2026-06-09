@@ -220,10 +220,12 @@ def variant_chart_theme(idx: int) -> dict:
         "org_box_shape": box,
         "org_direction": direction,
         "flow_direction": direction,
+        "gantt_bar_lw": _GANTT_BAR_LWS[idx % len(_GANTT_BAR_LWS)],  # 横道条边线宽,按序号互异
     }
 
 
 _GV_DIR_FALLBACK = ["TB", "LR"]
+_GANTT_BAR_LWS = [0.5, 0.9, 1.4, 1.9]
 
 
 def _variant_index(variant_id: str, fallback: int) -> int:
@@ -265,6 +267,7 @@ def generate_variant_style(variant_id: str, seed: int = 0) -> dict:
             ["#0A0A0A", "#303030", "#505050", "#707070", "#909090", "#B5B5B5"],
         ]),
         "gantt_bar_hatch": rng.choice(["", "", "///", "...", "\\\\\\", "|||", "xxx", "+++"]),
+        "gantt_bar_lw": rng.choice([0.5, 0.9, 1.4, 1.9]),   # 横道条边线宽,按家不同
         "gantt_milestone_style": rng.choice([":", "--", "-."]),
         "resource_bar_width": round(rng.uniform(0.5, 0.75), 2),
         "resource_hatches": rng.sample(

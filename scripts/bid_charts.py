@@ -1158,11 +1158,13 @@ def _sl_draw_cranes(ax, tpl, cranes, line_w, fs_off):
                 fontsize=7 + fs_off, fontweight="bold", zorder=5)
 
 
-def _sl_draw_compass(ax, line_w, fs_off, ss=None):
-    """指北针。ss 控制样式(circle 圆盘/arrow 简箭头/star 星形)与位置。"""
+def _sl_draw_compass(ax, line_w, fs_off, ss=None, cx=None):
+    """指北针。ss 控制样式(circle 圆盘/arrow 简箭头/star 星形);cx 覆盖横坐标(横版重映射)。"""
     from matplotlib.patches import Circle, Polygon
     ss = ss or _SITE_STYLES["A"]
     n_cx, n_cy = ss["compass_xy"]
+    if cx is not None:
+        n_cx = cx
     n_r = 4
     kind = ss["compass"]
     if kind == "circle":  # 圆环 + 黑白双三角
@@ -1191,10 +1193,10 @@ def _sl_draw_compass(ax, line_w, fs_off, ss=None):
             fontsize=10 + fs_off, fontweight="bold", zorder=5)
 
 
-def _sl_draw_scale_bar(ax, scale_str, line_w, fs_off):
+def _sl_draw_scale_bar(ax, scale_str, line_w, fs_off, sx0=38):
     """比例尺(底部横向通道)。"""
     from matplotlib.patches import Rectangle
-    sx0, sy0 = 38, -2.6
+    sy0 = -2.6   # sx0 由参数传入(横版居中)
     seg = 5
     for i in range(4):
         x0 = sx0 + i * seg
@@ -1289,12 +1291,35 @@ def _sl_draw_title_block(ax, data, title, scale_str, line_w, fs_off, sig_x=60):
                 ha="center", va="center", fontsize=7 + fs_off, zorder=4)
 
 
+# 真实施工总平面图多为横向长方形(宽>高), 把 0-100 见方的模板按此系数拉伸 X。
+_SITE_X_STRETCH = 1.5
+
+
+def _stretch_tpl_x(tpl: dict, sx: float) -> dict:
+    """把模板所有 x 方向坐标(zones/building/gate/road)按 sx 拉伸为长方形。"""
+    import copy
+    t = copy.deepcopy(tpl)
+    for z in t.get("zones", {}).values():
+        z["x"] *= sx
+        z["w"] *= sx
+    for k in ("building", "gate"):
+        if isinstance(t.get(k), dict):
+            t[k]["x"] *= sx
+            t[k]["w"] *= sx
+    # 点列类(围墙轮廓/道路中线)x 坐标整体拉伸
+    for k in ("road_spine", "fence"):
+        if k in t:
+            t[k] = [(x * sx, y) for x, y in t[k]]
+    return t
+
+
 def render_site_layout(data: dict, out_png: Path, title: str,
                        log: logging.Logger, style: dict | None = None) -> bool:
     """把 site_layout JSON 渲染成专业施工总平面布置图 PNG。
 
     绘图按阶段拆到 _sl_draw_* helper(P3.3 重构,行为不变):
     围墙→功能区→主建筑→道路→大门→塔吊→指北针→比例尺→图例→图签栏。
+    画布按 _SITE_X_STRETCH 横向拉伸为长方形(aspect=equal 不变, 故指北针/塔吊仍为正圆)。
     """
     try:
         import matplotlib
@@ -1313,20 +1338,25 @@ def render_site_layout(data: dict, out_png: Path, title: str,
     line_w = style.get("line_width", 0.8)
     fs_off = style.get("font_size_offset", 0)
 
+    # ★ 横向拉伸为长方形:模板 X 整体放大, aspect 仍 equal(指北针/塔吊保持正圆)
+    sx = _SITE_X_STRETCH
+    tpl = _stretch_tpl_x(tpl, sx)
+    xmax = 100 * sx   # 加宽后正图区右边界
+
     # 画布布局:
-    #   正图区          0~95 高
+    #   正图区          0~95 高, 0~xmax 宽
     #   比例尺通道      -4 ~ -1 (3 单位)
-    #   图例 / 图签栏   -16 ~ -5 (并排在底部,11 单位高)
+    #   图例 / 图签栏   -16 ~ -5 (并排在底部)
     fw, fh = _figsize_for_content(8, 1.15, prefer_landscape=True)
     fig, ax = plt.subplots(figsize=(fw, fh), dpi=_RENDER_DPI)
     ax.set_aspect("equal")
     ax.axis("off")
-    ax.set_xlim(-3, 103)
+    ax.set_xlim(-3, xmax + 3)
     ax.set_ylim(-18, 96)
 
-    # 图标题(顶部)
+    # 图标题(顶部居中)
     if title:
-        ax.text(50, 94, title, ha="center", va="top",
+        ax.text(xmax / 2, 94, title, ha="center", va="top",
                 fontsize=12 + fs_off, fontweight="bold")
 
     scale_str = str(data.get("scale") or "1:200")
@@ -1338,10 +1368,16 @@ def render_site_layout(data: dict, out_png: Path, title: str,
 
     # 背景方格网(CAD/测绘风):某些风格独有, 与纯白底风格一眼区分
     if ss.get("bg_grid"):
-        for gx in range(0, 101, 10):
+        for gx in range(0, int(xmax) + 1, 10):
             ax.plot([gx, gx], [0, 90], color="#CFCFCF", linewidth=0.3, zorder=0)
         for gy in range(0, 91, 10):
-            ax.plot([0, 100], [gy, gy], color="#CFCFCF", linewidth=0.3, zorder=0)
+            ax.plot([0, xmax], [gy, gy], color="#CFCFCF", linewidth=0.3, zorder=0)
+
+    # 装饰元素 X 锚点按拉伸重映射(保留 ss 的左/右朝向, 固定宽度元素不溢出)
+    compass_x = min(ss["compass_xy"][0] * sx, xmax - 5)
+    legend_x = 2 if ss["legend_x"] < 50 else (xmax - 32 - 2)
+    title_x = 2 if ss["title_x"] < 50 else (xmax - 38 - 2)
+    scale_sx0 = xmax / 2 - 10
 
     _sl_draw_fence(ax, tpl, line_w)
     used_zones = _sl_draw_zones(ax, tpl, data.get("zones") or {}, line_w, fs_off, ss)
@@ -1349,10 +1385,10 @@ def render_site_layout(data: dict, out_png: Path, title: str,
     _sl_draw_road(ax, tpl, line_w, ss["road_dash"])
     _sl_draw_gate(ax, tpl, line_w, fs_off)
     _sl_draw_cranes(ax, tpl, cranes, line_w, fs_off)
-    _sl_draw_compass(ax, line_w, fs_off, ss)
-    _sl_draw_scale_bar(ax, scale_str, line_w, fs_off)
-    _sl_draw_legend(ax, used_zones, line_w, fs_off, ss["legend_x"])
-    _sl_draw_title_block(ax, data, title, scale_str, line_w, fs_off, ss["title_x"])
+    _sl_draw_compass(ax, line_w, fs_off, ss, cx=compass_x)
+    _sl_draw_scale_bar(ax, scale_str, line_w, fs_off, sx0=scale_sx0)
+    _sl_draw_legend(ax, used_zones, line_w, fs_off, legend_x)
+    _sl_draw_title_block(ax, data, title, scale_str, line_w, fs_off, title_x)
 
     plt.tight_layout()
     out_png.parent.mkdir(parents=True, exist_ok=True)
@@ -1500,7 +1536,8 @@ def render_schedule_png(data: dict, out_png: Path, title: str,
         if not phases:
             color = gantt_grays[i % len(gantt_grays)]
         dur = (t["end"] - t["start"]).days or 1
-        bar_kw = dict(height=bar_h, color=color, edgecolor="#333333", linewidth=line_w * 0.6)
+        bar_lw = style.get("gantt_bar_lw", line_w * 0.6)  # 横道条边线宽,按家不同
+        bar_kw = dict(height=bar_h, color=color, edgecolor="#333333", linewidth=bar_lw)
         if bar_hatch:
             bar_kw["hatch"] = bar_hatch
         ax.barh(i, dur, left=mdates.date2num(t["start"]), **bar_kw)
