@@ -177,29 +177,44 @@ NUMBERING_SCHEMES = [
 ]
 
 # ── 图表视觉主题（反串标）──────────────────────────────────────────────
-# 旧实现各变体流程图全是白底黑框,本质同源。按变体序号确定性派发独立主题,
-# 在彩印与黑白打印下都可区分(颜色 + 填充 + 形状 + 连线走线同时变)。
-# bid_charts._theme_from_style 读取这些键。
-CHART_THEMES = [
-    {  # A：黑白描边、直角、正交连线
-        "chart_accent": "#1A1A1A", "chart_node_fill": "#FFFFFF",
-        "chart_node_filled": False, "chart_node_rounded": False,
-        "chart_edge_spline": "ortho",
-        "flow_direction": "TB", "org_direction": "TB",
-    },
-    {  # B：深蓝填充、圆角、曲线连线、横向
-        "chart_accent": "#1F4E79", "chart_node_fill": "#DCE9F5",
-        "chart_node_filled": True, "chart_node_rounded": True,
-        "chart_edge_spline": "spline",
-        "flow_direction": "LR", "org_direction": "LR",
-    },
-    {  # C：墨绿填充、直角、折线连线
-        "chart_accent": "#375623", "chart_node_fill": "#E2EFDA",
-        "chart_node_filled": True, "chart_node_rounded": False,
-        "chart_edge_spline": "polyline",
-        "flow_direction": "TB", "org_direction": "TB",
-    },
-]
+# 一个标做几个方案就用几套主题：按方案序号(0-based)确定性派发，N 个方案 N 套互异，
+# 不写死套数。无彩色硬约束下靠「灰阶描边 + 节点填充 + 框型 + 连线走线 + 版面方向」
+# 五维区分，黑白打印仍可分辨（深蓝/墨绿等彩色会违反"整体不得出现彩色"，故全用灰阶）。
+# bid_charts._theme_from_style / 渲染器读取 chart_accent/chart_node_*/chart_edge_spline/org_box_shape。
+_GV_ACCENTS = ["#000000", "#1A1A1A", "#333333", "#4D4D4D"]   # 描边/字色(全深灰,无彩色)
+_GV_FILLS = ["#FFFFFF", "#ECECEC", "#DBDBDB", "#F4F4F4"]      # 节点填充(白/浅灰,无彩色)
+_GV_BOX = ["box", "rounded", "doubleframe"]                  # 框型
+_GV_SPLINE = ["ortho", "polyline", "curved", "spline"]       # 连线走线
+_GV_DIR = ["TB", "LR"]                                       # 版面方向
+
+
+def variant_chart_theme(idx: int) -> dict:
+    """按方案序号(0-based)派发一套确定且互不相同的图表主题。
+
+    主区分维度 box×spline×direction = 3×4×2 = 24 套互异(覆盖 20 家上限);
+    填充/描边灰阶随序号联动叠加增强可分辨度。全灰阶,满足无彩色硬约束。
+    """
+    idx = max(0, int(idx))
+    box = _GV_BOX[idx % 3]
+    spline = _GV_SPLINE[(idx // 3) % 4]
+    direction = _GV_DIR[(idx // 12) % 2]
+    filled = (idx % 4 != 0)  # 序号 0/4/8.. 白底, 其余浅灰填充
+    return {
+        "chart_accent": _GV_ACCENTS[idx % 4],
+        "chart_node_fill": _GV_FILLS[idx % 4],
+        "chart_node_filled": filled,
+        "chart_node_rounded": (box == "rounded"),
+        "chart_edge_spline": spline,
+        "org_box_shape": box,
+        "org_direction": direction,
+        "flow_direction": direction,
+    }
+
+
+def _variant_index(variant_id: str, fallback: int) -> int:
+    """从 variant_id(如 V01/V12)取 0-based 方案序号;无数字则回退 hash 派生值。"""
+    digits = "".join(c for c in str(variant_id) if c.isdigit())
+    return (int(digits) - 1) if digits else (fallback % 24)
 
 # 排版套（对应 disqualification_rules.md 的 format_sets A-F,
 # bid_rules_synthesize._FORMAT_SET_PRESETS 生成同名 6 套,≤6 变体可两两不同)
@@ -207,10 +222,15 @@ FORMAT_SET_KEYS = ["A", "B", "C", "D", "E", "F"]
 
 
 def generate_variant_style(variant_id: str, seed: int = 0) -> dict:
-    """用 variant_id 的 hash 确定性生成视觉风格参数（图表 + 文档软层）。"""
+    """用 variant_id 的 hash 确定性生成视觉风格参数（图表 + 文档软层）。
+
+    图表视觉主题(描边/填充/框型/连线/方向)按方案序号派发,N 个方案 N 套互异;
+    其余细节(线宽/字号/间距/甘特灰阶)沿用 hash 随机,叠加增强差异。
+    """
     h = int(hashlib.md5(f"{seed}_{variant_id}".encode()).hexdigest()[:8], 16)
     rng = random.Random(h)
-    return {
+    idx = _variant_index(variant_id, h)
+    style = {
         # ── 序号方案 ──
         "numbering_scheme": rng.choice(NUMBERING_SCHEMES),
         # ── 图表层（原 chart_style） ──
@@ -252,6 +272,9 @@ def generate_variant_style(variant_id: str, seed: int = 0) -> dict:
         "doc_page_num_font_size_pt": round(rng.uniform(9.0, 10.5), 1),
         "doc_toc_indent_per_level_twips": rng.randint(300, 450),
     }
+    # 按方案序号注入互异的图表视觉主题(覆盖上面随机的 org_direction/box_shape/flow_direction)
+    style.update(variant_chart_theme(idx))
+    return style
 
 
 def _metadata(company: str, idx: int, rng: random.Random) -> dict:
