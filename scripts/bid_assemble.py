@@ -517,6 +517,9 @@ def _normalize_rule_param_keys(params: dict, log: logging.Logger) -> None:
         params["no_page_numbers"] = not _coerce_bool(params["page_numbers"])
     if "cover_page" in params and "no_cover" not in params:
         params["no_cover"] = not _coerce_bool(params["cover_page"])
+    # cover_required: true → 必须有封面(no_cover: False); false → no_cover: True
+    if "cover_required" in params and "no_cover" not in params:
+        params["no_cover"] = not _coerce_bool(params["cover_required"])
     if "color_allowed" in params and "no_color" not in params:
         params["no_color"] = not _coerce_bool(params["color_allowed"])
     if "header_footer_company_info" in params and "no_company_info" not in params:
@@ -754,10 +757,12 @@ def parse_format_rules(rules_path: Path, log: logging.Logger) -> dict:
     if "font_size_title_style" not in fmt:
         fmt["font_size_title_style"] = body_size
 
-    # 暗标时自动启用关联项（如果未显式设置）—— 仅 no_cover / no_company_info / header_disabled
-    # no_page_numbers 不再跟随 blind_bid 自动开（很多暗标恰恰要求"页脚仅页码"）
+    # 暗标时自动启用关联项（如果未显式设置）—— 仅 no_company_info / header_disabled
+    # ★ no_cover 不再跟随 blind_bid：blind≠无封面，封面身份无关(投标人留空下划线)，
+    #   封面由 cover_required/cover_page/no_cover 单控(feedback_bid_blind_needs_cover)。
+    # no_page_numbers 也不跟随 blind（很多暗标恰恰要求"页脚仅页码"）。
     if fmt["blind_bid"]:
-        for k in ("no_cover", "no_company_info"):
+        for k in ("no_company_info",):
             if k not in params:
                 fmt[k] = True
                 specified.add(k)
