@@ -1557,81 +1557,131 @@ def render_schedule_png(data: dict, out_png: Path, title: str,
         log.warning(f"  schedule JSON 无有效 tasks，跳过渲染 {out_png.name}")
         return False
 
-    # 分配灰度色（暗标只能黑白，用灰度梯度 + hatch 区分）
+    # ── 传统"表格网格式"施工进度横道图(序号/项目列 + 年/月/旬表头 + 带边框网格 + 横道条) ──
+    import calendar
+    import itertools
+    from matplotlib.patches import Rectangle
     gantt_grays = style.get("gantt_grays") or _FALLBACK_GANTT_GRAYS
     bar_hatch = style.get("gantt_bar_hatch", "")
-    ms_linestyle = style.get("gantt_milestone_style", ":")
-
-    phases = []
-    for t in parsed_tasks:
-        if t["phase"] and t["phase"] not in phases:
-            phases.append(t["phase"])
-    phase_color = {ph: gantt_grays[i % len(gantt_grays)] for i, ph in enumerate(phases)}
-    default_color = gantt_grays[0]
-
-    parsed_tasks = list(reversed(parsed_tasks))
-
-    bar_h = style.get("gantt_bar_height", 0.55)
-    date_fmt = style.get("gantt_date_fmt", "%Y-%m")
-    grid_style = style.get("gantt_grid", "dashed")
+    bar_lw = style.get("gantt_bar_lw", 0.9)
     line_w = style.get("line_width", 0.8)
     fs_off = style.get("font_size_offset", 0)
 
+    parsed_tasks.sort(key=lambda t: (t["start"], t["end"]))
     n = len(parsed_tasks)
-    cscale = style.get("chart_scale", 1.0)
-    fw, fh = _figsize_for_content(n, 0.38 * cscale, prefer_landscape=True)
-    rdpi = max(100, int(_RENDER_DPI * cscale))
-    fig, ax = plt.subplots(figsize=(fw, fh), dpi=rdpi)
+    d0 = min(t["start"] for t in parsed_tasks)
+    d1 = max(t["end"] for t in parsed_tasks)
 
+    # 时间轴:从 d0 当月起到 d1 当月,按 月×旬(每月3旬,以10/20/月末分界)分列
+    months = []
+    cur = datetime(d0.year, d0.month, 1)
+    while cur <= d1:
+        months.append(cur)
+        cur = datetime(cur.year + (1 if cur.month == 12 else 0),
+                       1 if cur.month == 12 else cur.month + 1, 1)
+    start_month = months[0]
+    n_cols = len(months) * 3
+
+    def _xun_pos(d):
+        mi = (d.year - start_month.year) * 12 + (d.month - start_month.month)
+        dim = calendar.monthrange(d.year, d.month)[1]
+        if d.day <= 10:
+            xun, frac = 0, (d.day - 1) / 10.0
+        elif d.day <= 20:
+            xun, frac = 1, (d.day - 11) / 10.0
+        else:
+            xun, frac = 2, (d.day - 21) / max(1, (dim - 20))
+        return mi * 3 + xun + frac
+
+    # 画布:x 0-100;序号 0-5,施工项目 5-30,时间网格 30-100
+    gx0, gx1 = 30.0, 100.0
+    col_w = (gx1 - gx0) / max(1, n_cols)
+    row_h = 1.0
+    hdr_rows, note_rows = 3, 1
+    total_rows = hdr_rows + n + note_rows
+    top = total_rows * row_h
+    y_year, y_month, y_xun = top - row_h, top - 2 * row_h, top - 3 * row_h
+    body_top = top - hdr_rows * row_h
+    note_bot = body_top - n * row_h - note_rows * row_h
+    note_top = note_bot + note_rows * row_h
+
+    cscale = style.get("chart_scale", 1.0)
+    fw = max(10.0, min(n_cols * 0.46 + 4, 26.0))
+    fh = max(4.0, total_rows * 0.33)
+    rdpi = max(110, int(_RENDER_DPI * cscale))
+    fig, ax = plt.subplots(figsize=(fw, fh), dpi=rdpi)
+    ax.axis("off")
+    ax.set_xlim(-1, 101)
+    ax.set_ylim(note_bot - 1, top + 2.5)
+
+    def _rect(x, y, w, h, lw=line_w, fc="none"):
+        ax.add_patch(Rectangle((x, y), w, h, fill=(fc != "none"),
+                               facecolor=fc, edgecolor="black", linewidth=lw, zorder=2))
+
+    def _t(x, y, s, fs=8, weight="normal", rot=0, ha="center"):
+        ax.text(x, y, s, ha=ha, va="center", fontsize=fs + fs_off,
+                fontweight=weight, rotation=rot, zorder=3)
+
+    _t(50, top + 1.2, title or "施工进度计划横道图", fs=12, weight="bold")
+    _rect(0, note_bot, 100, top - note_bot, lw=line_w + 0.7)  # 外框
+
+    # 左侧表头:序号 / 施工项目(跨3行)
+    _rect(0, body_top, 5, hdr_rows * row_h, lw=line_w + 0.3)
+    _t(2.5, body_top + hdr_rows * row_h / 2, "序号", fs=7, weight="bold", rot=90)
+    _rect(5, body_top, 25, hdr_rows * row_h, lw=line_w + 0.3)
+    _t(17.5, body_top + hdr_rows * row_h / 2, "施工项目", fs=9, weight="bold")
+
+    # 时间表头:年 / 月 / 旬
+    ci = 0
+    for yr, grp in itertools.groupby(months, key=lambda m: m.year):
+        span = len(list(grp)) * 3
+        xa = gx0 + ci * col_w
+        _rect(xa, y_year, span * col_w, row_h, lw=line_w + 0.2)
+        _t(xa + span * col_w / 2, y_year + row_h / 2, f"{yr}年", fs=8, weight="bold")
+        ci += span
+    for mi_, m in enumerate(months):
+        xa = gx0 + mi_ * 3 * col_w
+        _rect(xa, y_month, 3 * col_w, row_h, lw=line_w + 0.2)
+        _t(xa + 1.5 * col_w, y_month + row_h / 2, f"{m.month}月", fs=7.5, weight="bold")
+        for k in range(3):
+            xc = xa + k * col_w
+            _rect(xc, y_xun, col_w, row_h, lw=line_w * 0.6)
+            _t(xc + col_w / 2, y_xun + row_h / 2, ("10", "20", "30")[k], fs=6)
+
+    # 主体:每行 序号/名称/网格 + 横道条
     for i, t in enumerate(parsed_tasks):
-        color = phase_color.get(t["phase"], default_color)
-        if not phases:
-            color = gantt_grays[i % len(gantt_grays)]
-        dur = (t["end"] - t["start"]).days or 1
-        bar_lw = style.get("gantt_bar_lw", line_w * 0.6)  # 横道条边线宽,按家不同
-        bar_kw = dict(height=bar_h, color=color, edgecolor="#333333", linewidth=bar_lw)
+        ry = body_top - (i + 1) * row_h
+        rcy = ry + row_h / 2
+        _rect(0, ry, 5, row_h, lw=line_w * 0.6)
+        _t(2.5, rcy, str(i + 1), fs=7)
+        _rect(5, ry, 25, row_h, lw=line_w * 0.6)
+        _t(6, rcy, _wrap_text(t["name"], 11), fs=7, ha="left")
+        for c in range(n_cols + 1):  # 网格竖线
+            xc = gx0 + c * col_w
+            ax.plot([xc, xc], [ry, ry + row_h], color="#9A9A9A", lw=line_w * 0.35, zorder=1)
+        xs = gx0 + _xun_pos(t["start"]) * col_w
+        xe = gx0 + _xun_pos(t["end"]) * col_w
+        if xe - xs < col_w * 0.4:
+            xe = xs + col_w * 0.4
+        bar_kw = dict(facecolor=gantt_grays[i % len(gantt_grays)],
+                      edgecolor="#1A1A1A", linewidth=bar_lw, zorder=4)
         if bar_hatch:
             bar_kw["hatch"] = bar_hatch
-        ax.barh(i, dur, left=mdates.date2num(t["start"]), **bar_kw)
+        ax.add_patch(Rectangle((xs, rcy - row_h * 0.22), xe - xs, row_h * 0.44, **bar_kw))
 
-    ax.set_yticks(range(n))
-    ax.set_yticklabels([t["name"] for t in parsed_tasks], fontsize=9 + fs_off)
-    ax.xaxis_date()
-    ax.xaxis.set_major_formatter(mdates.DateFormatter(date_fmt))
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=10))
-    ax.tick_params(axis="x", labelsize=8 + fs_off, rotation=30)
-    if grid_style != "none":
-        ax.grid(axis="x", linestyle="--" if grid_style == "dashed" else ":",
-                linewidth=0.4, alpha=0.5)
-    ax.set_axisbelow(True)
-    ax.set_title(title, fontsize=12 + fs_off, pad=10)
-
-    # milestones：竖虚线 + 标注
-    for ms in milestones:
-        if not isinstance(ms, dict):
-            continue
-        date_raw = ms.get("date") or ms.get("deadline")
-        day_raw = ms.get("day") if ms.get("day") is not None else ms.get("day_offset")
-        d = _resolve_dt(date_raw, day_raw if day_raw is not None else date_raw)
-        if d is None:
-            continue
-        ax.axvline(mdates.date2num(d), color="#333333", linestyle=ms_linestyle, linewidth=0.9, alpha=0.8)
-        ax.annotate(
-            _clean_label(ms.get("name", "")),
-            xy=(mdates.date2num(d), n - 0.5),
-            xytext=(2, -6), textcoords="offset points",
-            fontsize=7.5, color="#333333", rotation=0, ha="left", va="top",
-        )
-
-    if phases:
-        handles = [Patch(facecolor=phase_color[ph], edgecolor="#333333", label=_clean_label(ph)) for ph in phases]
-        ax.legend(handles=handles, loc="lower right", fontsize=8, framealpha=0.9)
+    # 备注行
+    _rect(0, note_bot, 100, note_rows * row_h, lw=line_w + 0.2)
+    note = (data.get("note") or data.get("remark")
+            or (data.get("project") or {}).get("note")
+            or f"计划总工期 {(d1 - d0).days + 1} 日历天，"
+               f"{d0.strftime('%Y年%m月%d日')} 至 {d1.strftime('%Y年%m月%d日')}。")
+    _t(1.5, note_bot + note_rows * row_h / 2, "备注：" + str(note)[:70], fs=7, ha="left")
 
     plt.tight_layout()
     out_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_png, bbox_inches="tight")
     plt.close(fig)
-    log.info(f"  ✓ 渲染横道图: {out_png.name}  任务={n}  里程碑={len(milestones)}")
+    log.info(f"  ✓ 渲染横道图(表格式): {out_png.name}  任务={n}  月数={len(months)}")
     return True
 
 
