@@ -1222,39 +1222,65 @@ def _sl_draw_scale_bar(ax, scale_str, line_w, fs_off, sx0=38):
             fontweight="bold", zorder=5)
 
 
+# 工程标准图例条目(符号 + 说明), 与 _sl_draw_utilities 在图上画的符号对应
+_SL_LEGEND_ITEMS = ["fence", "water", "power", "panel", "mixer", "hydrant"]
+_SL_LEGEND_LABELS = {
+    "fence": "施工围墙", "water": "临时用水", "power": "临时用电",
+    "panel": "配电箱", "mixer": "砼搅拌机", "hydrant": "消火栓", "road": "临时道路",
+}
+
+
+def _sl_legend_symbol(ax, key, x0, x1, cy, line_w, fs_off):
+    """在 (x0~x1, cy) 处画一个图例小符号。"""
+    from matplotlib.patches import Rectangle, Ellipse, Circle
+    xm = (x0 + x1) / 2
+    if key == "fence":  # 施工围墙: 实线 + 斜剖线
+        ax.plot([x0, x1], [cy, cy], color="black", lw=line_w * 0.8, zorder=5)
+        for xx in (x0 + 1, x0 + 3, x0 + 5):
+            ax.plot([xx - 0.4, xx + 0.4], [cy - 0.5, cy + 0.5], color="black", lw=line_w * 0.5, zorder=5)
+    elif key == "water":  # 临时用水: 虚线 + W
+        ax.plot([x0, x1], [cy, cy], color="black", lw=line_w * 0.7, linestyle=(0, (4, 2)), zorder=5)
+        ax.text(xm, cy + 0.6, "W", ha="center", va="bottom", fontsize=5 + fs_off, zorder=5)
+    elif key == "power":  # 临时用电: 点划线 + V
+        ax.plot([x0, x1], [cy, cy], color="black", lw=line_w * 0.7, linestyle=(0, (5, 1.5, 1, 1.5)), zorder=5)
+        ax.text(xm, cy + 0.6, "V", ha="center", va="bottom", fontsize=5 + fs_off, zorder=5)
+    elif key == "panel":  # 配电箱: 实心小方块
+        ax.add_patch(Rectangle((xm - 1.6, cy - 0.7), 3.2, 1.4, facecolor="black", edgecolor="black", zorder=5))
+    elif key == "mixer":  # 砼搅拌机: 椭圆
+        ax.add_patch(Ellipse((xm, cy), 3.6, 2.0, fill=False, edgecolor="black", lw=line_w * 0.7, zorder=5))
+    elif key == "hydrant":  # 消火栓: 圆环 + 心点
+        ax.add_patch(Circle((xm, cy), 1.1, fill=False, edgecolor="black", lw=line_w * 0.7, zorder=5))
+        ax.add_patch(Circle((xm, cy), 0.35, facecolor="black", edgecolor="black", zorder=6))
+    elif key == "road":  # 临时道路: 双线
+        ax.plot([x0, x1], [cy + 0.4, cy + 0.4], color="black", lw=line_w * 0.6, zorder=5)
+        ax.plot([x0, x1], [cy - 0.4, cy - 0.4], color="black", lw=line_w * 0.6, zorder=5)
+
+
 def _sl_draw_legend(ax, used_zones, line_w, fs_off, leg_x=2):
-    """图例框(底部,leg_x 控制左/右)。"""
+    """工程标准图例框: 围墙/临时水电/配电箱/搅拌机/消火栓/道路 符号 + 说明。"""
     from matplotlib.patches import Rectangle
-    if not used_zones:
-        return
-    leg_y = -16
-    leg_w, leg_h = 32, 11
+    leg_y, leg_w, leg_h = -18.5, 42, 17
     ax.add_patch(Rectangle((leg_x, leg_y), leg_w, leg_h,
-                           linewidth=line_w + 0.3,
-                           edgecolor="black",
+                           linewidth=line_w + 0.3, edgecolor="black",
                            facecolor="white", zorder=3))
-    ax.text(leg_x + leg_w / 2, leg_y + leg_h - 0.8, "图  例",
-            ha="center", va="top", fontsize=8 + fs_off,
-            fontweight="bold", zorder=4)
-    item_h = (leg_h - 2.5) / max(len(used_zones), 1)
-    for i, zn in enumerate(used_zones):
-        ix = leg_x + 1.5
-        iy = leg_y + leg_h - 2.5 - (i + 0.7) * item_h
-        ax.add_patch(Rectangle((ix, iy), 4, item_h * 0.6,
-                               linewidth=line_w * 0.7,
-                               edgecolor="black", facecolor="white",
-                               hatch=_ZONE_HATCHES.get(zn, ""),
-                               zorder=4))
-        label = _ZONE_NAMES_CN.get(zn, zn)
-        ax.text(ix + 5, iy + item_h * 0.3, label,
-                ha="left", va="center", fontsize=7 + fs_off, zorder=4)
+    ax.text(leg_x + leg_w / 2, leg_y + leg_h - 0.5, "图  例",
+            ha="center", va="top", fontsize=8 + fs_off, fontweight="bold", zorder=4)
+    items = _SL_LEGEND_ITEMS
+    top_gap = 3.0  # 标题下留白
+    row_h = (leg_h - top_gap - 0.5) / len(items)
+    sym_x0, sym_x1 = leg_x + 2, leg_x + 10
+    for i, key in enumerate(items):
+        cy = leg_y + leg_h - top_gap - (i + 0.5) * row_h
+        _sl_legend_symbol(ax, key, sym_x0, sym_x1, cy, line_w, fs_off)
+        ax.text(sym_x1 + 2.5, cy, _SL_LEGEND_LABELS[key],
+                ha="left", va="center", fontsize=6.5 + fs_off, zorder=4)
 
 
 def _sl_draw_title_block(ax, data, title, scale_str, line_w, fs_off, sig_x=60):
     """图签栏(底部,sig_x 控制左/右:图名/比例/图号/日期)。"""
     from matplotlib.patches import Rectangle
-    sig_y = -16
-    sig_w, sig_h = 38, 11
+    sig_y = -18.5
+    sig_w, sig_h = 38, 17
     ax.add_patch(Rectangle((sig_x, sig_y), sig_w, sig_h,
                            linewidth=line_w + 0.5,
                            edgecolor="black", facecolor="white", zorder=3))
@@ -1293,6 +1319,31 @@ def _sl_draw_title_block(ax, data, title, scale_str, line_w, fs_off, sig_x=60):
 
 # 真实施工总平面图多为横向长方形(宽>高), 把 0-100 见方的模板按此系数拉伸 X。
 _SITE_X_STRETCH = 1.5
+
+
+def _sl_draw_utilities(ax, line_w, fs_off, xmax):
+    """在图上画临时水电线路(点划线=电/虚线=水, 带 V/W 标)及配电箱/消火栓符号,
+    与图例对应,使总平面图具备真实施工现场的管线信息。位置取顶/底/道路边的空白带,避开功能区。"""
+    from matplotlib.patches import Rectangle, Circle
+    # 临时用电:沿道路(y≈20)点划线 + V 标 + 配电箱
+    py = 20.0
+    ax.plot([8, xmax - 8], [py, py], color="black", lw=line_w * 0.6,
+            linestyle=(0, (5, 1.5, 1, 1.5)), zorder=3)
+    for vx in (xmax * 0.22, xmax * 0.5, xmax * 0.78):
+        ax.text(vx, py + 0.7, "V", ha="center", va="bottom", fontsize=5 + fs_off, zorder=3)
+    for bx in (xmax * 0.33, xmax * 0.66):  # 配电箱(实心小方块)
+        ax.add_patch(Rectangle((bx - 1.5, py - 0.9), 3, 1.8, facecolor="black",
+                               edgecolor="black", zorder=4))
+    # 临时用水:沿顶部内侧(y≈88)虚线 + W 标
+    wy = 88.0
+    ax.plot([8, xmax - 8], [wy, wy], color="black", lw=line_w * 0.55,
+            linestyle=(0, (4, 2)), zorder=3)
+    for wx in (xmax * 0.22, xmax * 0.5, xmax * 0.78):
+        ax.text(wx, wy - 1.1, "W", ha="center", va="top", fontsize=5 + fs_off, zorder=3)
+    # 消火栓(底部两角空白带)
+    for hx, hy in ((5, 3.5), (xmax - 5, 3.5)):
+        ax.add_patch(Circle((hx, hy), 1.2, fill=False, edgecolor="black", lw=line_w * 0.7, zorder=4))
+        ax.add_patch(Circle((hx, hy), 0.4, facecolor="black", edgecolor="black", zorder=5))
 
 
 def _stretch_tpl_x(tpl: dict, sx: float) -> dict:
@@ -1352,7 +1403,7 @@ def render_site_layout(data: dict, out_png: Path, title: str,
     ax.set_aspect("equal")
     ax.axis("off")
     ax.set_xlim(-3, xmax + 3)
-    ax.set_ylim(-18, 96)
+    ax.set_ylim(-20, 96)
 
     # 图标题(顶部居中)
     if title:
@@ -1383,6 +1434,7 @@ def render_site_layout(data: dict, out_png: Path, title: str,
     used_zones = _sl_draw_zones(ax, tpl, data.get("zones") or {}, line_w, fs_off, ss)
     _sl_draw_main_building(ax, tpl, data, line_w, fs_off, ss)
     _sl_draw_road(ax, tpl, line_w, ss["road_dash"])
+    _sl_draw_utilities(ax, line_w, fs_off, xmax)  # 临时水电线路 + 配电箱/消火栓符号
     _sl_draw_gate(ax, tpl, line_w, fs_off)
     _sl_draw_cranes(ax, tpl, cranes, line_w, fs_off)
     _sl_draw_compass(ax, line_w, fs_off, ss, cx=compass_x)
