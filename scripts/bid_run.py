@@ -460,6 +460,326 @@ def enforce_similarity_gate(tender_dir: Path, state: dict, log, max_retries: int
     return not violations
 
 
+# ─── loop-mode 门禁(--loop-mode 启用;策略 configs/bid_loop_policy.json)──────
+
+def load_loop_policy() -> dict:
+    from bid_common import get_bid_gen_home
+    p = get_bid_gen_home() / "configs" / "bid_loop_policy.json"
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _read_verify_report(output: Path) -> dict:
+    try:
+        return json.loads((output / "verify_report.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def enforce_verify_gate(tender_dir: Path, state: dict, log, policy: dict) -> bool:
+    """verify 硬失败的自动修复环(--loop-mode)。
+
+    读 verify_report.json(bid_verify 落盘的结构化报告):
+      cover_missing  → bid_assemble 重装该变体(内部含完整后处理链)
+      page_over_cap  → bid_concise 一轮精简(实测一轮饱和)→ 重装
+      requires_human 类(format_identical/缺产物等)→ 直接 False 转人工
+    每轮修复后 bid_verify 复验;决策记入 state.steps.verify.gate_decisions。
+    """
+    output = tender_dir / "output"
+    vp = (policy.get("retry_policy") or {}).get("verify") or {}
+    fixable = vp.get("auto_fixable") or {}
+    max_rounds = int(vp.get("max_retries", 2))
+    decisions = state["steps"].setdefault("verify", {}).setdefault("gate_decisions", [])
+    attempts: dict[tuple, int] = {}
+
+    def _reassemble(vid: str) -> int:
+        if vid and vid != "单份":
+            return run_script("bid_assemble.py", [str(tender_dir), "--variant", vid], log)
+        return run_script("bid_assemble.py", [str(output)], log)
+
+    for round_idx in range(1, max_rounds + 1):
+        report = _read_verify_report(output)
+        if not report:
+            log.error("verify gate: verify_report.json 缺失,无法自动处理")
+            return False
+        fails = [f for f in report.get("findings", []) if f.get("severity") == "fail"]
+        if not fails:
+            log.info("verify gate ✓ 无硬失败")
+            return True
+        humans = [f for f in fails if f.get("class") not in fixable]
+        if humans:
+            for f in humans[:5]:
+                log.error(f"  verify 需人工: [{f.get('class')}] {f.get('check')}: "
+                          f"{str(f.get('detail'))[:100]}")
+            return False
+
+        acted = False
+        for f in fails:
+            cls = f.get("class")
+            vid = f.get("variant") or "单份"
+            key = (cls, vid)
+            if attempts.get(key, 0) >= int((fixable.get(cls) or {}).get("max", 1)):
+                continue
+            attempts[key] = attempts.get(key, 0) + 1
+            acted = True
+            log.warning(f"verify gate: 修复 [{cls}] {vid}(第 {attempts[key]} 次)")
+            if cls == "cover_missing":
+                code = _reassemble(vid)
+            elif cls == "page_over_cap":
+                # 精简比例 = 硬顶/实测页数,留 5% 余量;精简后 docx 已 stale,必须重装
+                ratio = 0.85
+                cap = report.get("page_cap")
+                pages = ((report.get("per_variant") or {}).get(vid) or {}).get("pages")
+                if cap and pages:
+                    ratio = max(0.5, round(cap / pages * 0.95, 2))
+                cmd = [str(tender_dir), "--ratio", str(ratio)]
+                if vid != "单份":
+                    cmd += ["--variant", vid]
+                code = run_script("bid_concise.py", cmd, log)
+                if code == 0:
+                    code = _reassemble(vid)
+            else:
+                continue
+            decisions.append({"gate": "verify", "class": cls, "variant": vid,
+                              "attempt": attempts[key], "exit_code": code,
+                              "at": datetime.now().isoformat(timespec="seconds")})
+        if not acted:
+            log.error("verify gate: 剩余硬失败均已达修复上限,放弃")
+            return False
+        run_script("bid_verify.py", [str(tender_dir)], log)
+
+    report = _read_verify_report(output)
+    fails = [f for f in report.get("findings", []) if f.get("severity") == "fail"]
+    if fails:
+        log.error(f"verify gate ✗ 终态仍有 {len(fails)} 项硬失败")
+        return False
+    log.info("verify gate ✓ 终态复验通过")
+    return True
+
+
+def _read_compliance_scans(output: Path, mode: str) -> dict[str, dict]:
+    """返回 {variant_id|'单份': scan}。扫描固定在 <章节目录>/reports/compliance_scan.json
+    (旧项目兼容根目录平铺路径)。"""
+    scans: dict[str, dict] = {}
+
+    def _load(p_new: Path, p_old: Path) -> dict | None:
+        for p in (p_new, p_old):
+            if p.exists():
+                try:
+                    return json.loads(p.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    return None
+        return None
+
+    if mode == "batch":
+        for v_dir in sorted(output.iterdir()):
+            if not (v_dir.is_dir() and re.fullmatch(r"V\d{2}", v_dir.name)):
+                continue
+            scan = _load(v_dir / "reports" / "compliance_scan.json",
+                         v_dir / "compliance_scan.json")
+            if scan is not None:
+                scans[v_dir.name] = scan
+    else:
+        scan = _load(output / "reports" / "compliance_scan.json",
+                     output / "compliance_scan.json")
+        if scan is not None:
+            scans["单份"] = scan
+    return scans
+
+
+def _classify_compliance(scan: dict) -> list[dict]:
+    """scan → [{class, detail, ...}];分支与 bid_compliance 的 has_violation 一一对应。"""
+    issues: list[dict] = []
+    for b in scan.get("blind_violations") or []:
+        issues.append({"class": "blind_violation", "detail": str(b)[:120]})
+    for r in scan.get("response_check") or []:
+        if r.get("required") and not r.get("present"):
+            issues.append({"class": "response_keyword_miss",
+                           "detail": f"{r.get('label')}:{r.get('keyword')}",
+                           "label": str(r.get("label") or ""),
+                           "keyword": str(r.get("keyword") or "")})
+    for a in scan.get("plan_alignment") or []:
+        if not a.get("file_exists") or not a.get("title_match"):
+            issues.append({"class": "alignment_failure",
+                           "detail": str(a.get("file") or a)[:120]})
+    cc = scan.get("chart_coverage") or {}
+    if cc.get("loaded"):
+        for m in cc.get("missing") or []:
+            issues.append({"class": "chart_missing",
+                           "chapter": str(m.get("chapter") or ""),
+                           "detail": f"章{m.get('chapter')}.{m.get('section')} "
+                                     f"type={m.get('type')}"})
+    if (scan.get("format_audit") or {}).get("exit_code", 0) >= 2:
+        issues.append({"class": "format_severe", "detail": "DOCX 格式实测层硬违规"})
+    if (scan.get("standards_check") or {}).get("fabricated", 0) > 0:
+        issues.append({"class": "standards_fabricated", "detail": "标准编号疑似杜撰"})
+    for v in (scan.get("schedule_check") or {}).get("violations") or []:
+        issues.append({"class": "schedule_violation",
+                       "detail": str(v.get("detail") if isinstance(v, dict) else v)[:120]})
+    return issues
+
+
+def _pick_chapter_for_keyword(tender_dir: Path, vid: str, label: str, keyword: str) -> str:
+    """response_check 是全文级检查,无章节定位 → 按标题 bigram 重合度选最相关章节。"""
+    from bid_common import parse_chapter_plan
+    rows = []
+    if vid and vid != "单份":
+        vp = tender_dir / "output" / vid / "chapter_plan_variant.md"
+        if vp.exists():
+            rows = parse_chapter_plan(vp)
+    if not rows:
+        rows = parse_chapter_plan(tender_dir / "extracted" / "chapter_plan.md")
+    if not rows:
+        return ""
+    probe = "".join(c for c in f"{label}{keyword}" if "一" <= c <= "鿿")
+
+    def score(row) -> int:
+        title = row.get("title", "")
+        return sum(1 for i in range(len(probe) - 1) if probe[i:i + 2] in title)
+
+    best = max(rows, key=score)
+    return best["num"] if score(best) > 0 else rows[0]["num"]
+
+
+def enforce_compliance_gate(tender_dir: Path, mode: str, state: dict, log, policy: dict) -> bool:
+    """compliance 违规的自动修复环(--loop-mode)。
+
+    response_keyword_miss / chart_missing → 定位目标章节 --force 重写(默认 1 次,
+    重写本身是占位/泄漏源)→ bid_reviewer 复扫 → 重装该变体(docx 已 stale)→ 复查。
+    blind/alignment/format/standards/schedule → False 转人工。
+    """
+    output = tender_dir / "output"
+    cp = (policy.get("retry_policy") or {}).get("compliance") or {}
+    fixable = cp.get("auto_fixable") or {}
+    max_rounds = int(cp.get("max_retries", 1))
+    decisions = state["steps"].setdefault("compliance", {}).setdefault("gate_decisions", [])
+    attempts: dict[tuple, int] = {}
+
+    def _all_issues() -> list[tuple[str, dict]]:
+        scans = _read_compliance_scans(output, mode)
+        return [(vid, i) for vid, scan in scans.items() for i in _classify_compliance(scan)]
+
+    for round_idx in range(1, max_rounds + 1):
+        issues = _all_issues()
+        if not issues:
+            log.info("compliance gate ✓ 无违规")
+            return True
+        humans = [(v, i) for v, i in issues if i["class"] not in fixable]
+        if humans:
+            for v, i in humans[:8]:
+                log.error(f"  compliance 需人工: [{i['class']}] {v}: {i['detail']}")
+            return False
+
+        acted = False
+        for vid, issue in issues:
+            cls = issue["class"]
+            cn = issue.get("chapter") or _pick_chapter_for_keyword(
+                tender_dir, vid, issue.get("label", ""), issue.get("keyword", ""))
+            if not cn:
+                log.error(f"  compliance: [{cls}] 无法定位目标章节,转人工")
+                return False
+            cn = cn.zfill(2)
+            key = (cls, vid, cn)
+            if attempts.get(key, 0) >= int((fixable.get(cls) or {}).get("max", 1)):
+                continue
+            attempts[key] = attempts.get(key, 0) + 1
+            acted = True
+            log.warning(f"compliance gate: [{cls}] {vid} 章 {cn} --force 重写"
+                        f"(第 {attempts[key]} 次)")
+            wcmd = [str(tender_dir), "--chapter", cn, "--force"]
+            rcmd = [str(tender_dir)]
+            if vid != "单份":
+                wcmd += ["--variant", vid]
+                rcmd += ["--variant", vid]
+            code = run_script("bid_writer.py", wcmd, log)
+            # 重写后必须复扫(占位符/参数泄漏历史上正是重写引入的)+ 重装(docx 已 stale)
+            run_script("bid_reviewer.py", rcmd, log)
+            if vid != "单份":
+                run_script("bid_assemble.py", [str(tender_dir), "--variant", vid], log)
+            else:
+                run_script("bid_assemble.py", [str(output)], log)
+            decisions.append({"gate": "compliance", "class": cls, "variant": vid,
+                              "chapter": cn, "attempt": attempts[key], "exit_code": code,
+                              "at": datetime.now().isoformat(timespec="seconds")})
+        if not acted:
+            log.error("compliance gate: 违规均已达重写上限,放弃")
+            return False
+        cmd = [str(tender_dir)]
+        if mode == "batch":
+            cmd.append("--all-variants")
+        run_script("bid_compliance.py", cmd, log)
+
+    remaining = _all_issues()
+    if remaining:
+        log.error(f"compliance gate ✗ 终态仍有 {len(remaining)} 项违规")
+        return False
+    log.info("compliance gate ✓ 终态复查通过")
+    return True
+
+
+def enforce_assemble_gate(tender_dir: Path, assemble_cmd: list[str],
+                          state: dict, log, policy: dict) -> bool:
+    """assemble 非零退出(pandoc 偶发/超时)→ backoff 后原命令重跑。"""
+    ap = (policy.get("retry_policy") or {}).get("assemble") or {}
+    max_retries = int(ap.get("max_retries", 2))
+    backoff = int(ap.get("backoff_seconds", 15))
+    decisions = state["steps"].setdefault("assemble", {}).setdefault("gate_decisions", [])
+    for n in range(1, max_retries + 1):
+        log.warning(f"assemble gate: {backoff}s 后重试(第 {n}/{max_retries} 次)")
+        time.sleep(backoff)
+        code = run_script("bid_assemble.py", assemble_cmd, log)
+        decisions.append({"gate": "assemble", "attempt": n, "exit_code": code,
+                          "at": datetime.now().isoformat(timespec="seconds")})
+        if code == 0:
+            return True
+    return False
+
+
+def _check_budget(output: Path, policy: dict, run_t0: float, log) -> bool:
+    """--loop-mode 每步后调用。读 output/logs/llm_stats.json(writer/concise 分桶 flush),
+    超 caps 且 action_on_exceed=abort → False(run_pipeline 返回 3 熔断)。
+    覆盖范围:writer/concise 为成本大头;synthesize 链小调用未计(policy.coverage_note)。
+    """
+    bp = (policy or {}).get("budget_policy") or {}
+    if not bp:
+        return True
+    pricing = bp.get("pricing_yuan_per_mtok") or {}
+    default_pr = pricing.get("default") or {"in": 4.0, "out": 12.0}
+    total = 0
+    cost = 0.0
+    p = output / "logs" / "llm_stats.json"
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        for s in (data.get("buckets") or {}).values():
+            for model, d in (s.get("by_model") or {}).items():
+                pi, po = int(d.get("prompt", 0)), int(d.get("completion", 0))
+                total += pi + po
+                pr = next((v for k, v in pricing.items()
+                           if k != "default" and k in model), default_pr)
+                cost += pi / 1e6 * float(pr.get("in", 4.0)) + po / 1e6 * float(pr.get("out", 12.0))
+    wall_min = (time.time() - run_t0) / 60
+    over = []
+    if bp.get("max_tokens_per_run") and total > int(bp["max_tokens_per_run"]):
+        over.append(f"tokens {total:,} > {int(bp['max_tokens_per_run']):,}")
+    if bp.get("max_cost_yuan") and cost > float(bp["max_cost_yuan"]):
+        over.append(f"费用 ¥{cost:.1f} > ¥{bp['max_cost_yuan']}")
+    if bp.get("max_wall_clock_minutes") and wall_min > float(bp["max_wall_clock_minutes"]):
+        over.append(f"耗时 {wall_min:.0f}min > {bp['max_wall_clock_minutes']}min")
+    if not over:
+        return True
+    msg = "预算超限: " + "; ".join(over)
+    if (bp.get("action_on_exceed") or "abort") == "abort":
+        log.error(f"⛔ {msg} — 熔断(exit 3)")
+        return False
+    log.warning(f"⚠ {msg}(action=warn,继续)")
+    return True
+
+
 def reseed_variant(variants_json: Path, variant_id: str, log) -> None:
     """把指定 variant 的 section_order_seed 与常量异或，持久化回 JSON。"""
     if not variants_json.exists():
@@ -509,7 +829,9 @@ def _write_compliance_summary_md(output: Path, log) -> None:
     for v_dir in sorted(output.iterdir()):
         if not (v_dir.is_dir() and v_dir.name.startswith("V")):
             continue
-        scan = v_dir / "compliance_scan.json"
+        scan = v_dir / "reports" / "compliance_scan.json"
+        if not scan.exists():
+            scan = v_dir / "compliance_scan.json"  # 旧项目兼容
         if not scan.exists():
             continue
         data = json.loads(scan.read_text(encoding="utf-8"))
@@ -571,7 +893,9 @@ def _write_overview_md(tender_dir: Path, output: Path, ext: Path, mode: str, log
                     if md.name not in ("review.md",):
                         total_chars += sum(1 for c in md.read_text(encoding="utf-8") if "\u4e00" <= c <= "\u9fff")
             rev_sev = rev_map.get(vid, {}).get("overall_severity", "-")
-            scan = v_dir / "compliance_scan.json"
+            scan = v_dir / "reports" / "compliance_scan.json"
+            if not scan.exists():
+                scan = v_dir / "compliance_scan.json"  # 旧项目兼容
             if scan.exists():
                 d = json.loads(scan.read_text(encoding="utf-8"))
                 comp = "✓" if not d.get("blind_violations") and all(
@@ -809,6 +1133,12 @@ def run_pipeline(tender_dir: Path, args, log) -> int:
         "args": vars(args),
     })
     save_state(state_path, state)
+
+    run_t0 = time.time()
+    loop_mode = bool(getattr(args, "loop_mode", False))
+    loop_policy = load_loop_policy() if loop_mode else {}
+    if loop_mode:
+        log.info("loop-mode 启用: verify/compliance/assemble 门禁自动重试 + 预算熔断")
 
     # 决定要跑哪些步骤
     mode = detect_mode(tender_dir) if (ext / "variants.json").exists() or args.batch else "single"
@@ -1136,9 +1466,15 @@ def run_pipeline(tender_dir: Path, args, log) -> int:
                 if mode == "batch":
                     cmd.append("--batch")
                 code = run_script("bid_assemble.py", cmd, log)
+                if code != 0 and loop_mode and not args.force_continue:
+                    if enforce_assemble_gate(tender_dir, cmd, state, log, loop_policy):
+                        code = 0
             elif step == "verify":
                 # 组装产物验证门:exit 2=硬失败(封面缺失/三家排版雷同/超硬顶)→ abort
                 vcode = run_script("bid_verify.py", [str(tender_dir)], log)
+                if vcode == 2 and loop_mode and not args.force_continue:
+                    if enforce_verify_gate(tender_dir, state, log, loop_policy):
+                        vcode = 1  # 自动修复通过,余项降级为警告继续
                 if vcode == 2 and not args.force_continue:
                     log.error("verify 门禁:产物硬失败,abort(详见 output/verify_report.md)")
                     mark_step(state, step, "fail", exit_code=2, error="verify gate failed")
@@ -1152,6 +1488,10 @@ def run_pipeline(tender_dir: Path, args, log) -> int:
                 if mode == "batch":
                     cmd.append("--all-variants")
                 code = run_script("bid_compliance.py", cmd, log)
+                # exit 1=合规违规(可分类处理);exit 2=用法/结构错误,不进门禁
+                if code == 1 and loop_mode and not args.force_continue:
+                    if enforce_compliance_gate(tender_dir, mode, state, log, loop_policy):
+                        code = 0
             elif step == "similarity":
                 code = run_script("bid_similarity.py", [str(tender_dir)], log)
                 if not args.force_continue:
@@ -1184,6 +1524,11 @@ def run_pipeline(tender_dir: Path, args, log) -> int:
             return 1
         save_state(state_path, state)
 
+        if loop_mode and not _check_budget(output, loop_policy, run_t0, log):
+            mark_step(state, "budget", "fail", error="budget exceeded")
+            save_state(state_path, state)
+            return 3
+
     log.info("=" * 60)
     log.info("pipeline 完成 ✓")
     return 0
@@ -1204,6 +1549,9 @@ def main() -> int:
     p.add_argument("--force", action="store_true", help="写入阶段覆盖已存在章节")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--force-continue", action="store_true", help="忽略 review / similarity 门禁")
+    p.add_argument("--loop-mode", action="store_true",
+                   help="启用 verify/compliance/assemble 门禁自动重试 + 预算熔断"
+                        "(策略: configs/bid_loop_policy.json)")
     p.add_argument("--manual-step2", action="store_true",
                    help="不自动生成 Step 2 三件套,等 Claude 手工生成后 --resume")
     p.add_argument("--target-pages", type=int, default=None,

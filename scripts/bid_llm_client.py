@@ -111,6 +111,9 @@ class LLMStats:
         }
 
 
+_FLUSH_LOCK = threading.Lock()
+
+
 def _provider_key(endpoint: str) -> str:
     """从 endpoint 域名派生厂商标识,用于按厂商(而非按模型)限并发。
 
@@ -168,6 +171,26 @@ class LLMClient:
             raise FileNotFoundError(f"配置文件不存在: {config_path}")
         cfg = json.loads(config_path.read_text(encoding="utf-8"))
         return cls(cfg, log=log)
+
+    def flush_stats_to_json(self, path: Path, label: str) -> None:
+        """把当前累计 stats 按 label 分桶合并写入 path(供 --loop-mode 预算追踪)。
+
+        写的是累计值,同 label 重复 flush 幂等覆盖;跨脚本不同 label 累加。
+        writer 每章完成调一次(成本大头不能等全部写完),concise 收尾调一次。
+        """
+        with _FLUSH_LOCK:
+            data: dict = {}
+            try:
+                if path.exists():
+                    data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                data = {}
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data.setdefault("buckets", {})[label] = self.stats.summary()
+            data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(path)
 
     def _get_openai_client(self, model_key: str):
         """获取或创建 openai SDK client（懒加载，缓存）"""

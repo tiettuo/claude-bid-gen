@@ -1747,6 +1747,8 @@ def main() -> int:
                     ok_count += 1
                 else:
                     fail_count += 1
+                # 预算追踪:每章完成即落盘——写作是成本大头,熔断不能等全部写完才看到数据
+                client.flush_stats_to_json(output / "logs" / "llm_stats.json", "writer")
 
     # 统计
     stats = client.stats.summary()
@@ -1760,6 +1762,7 @@ def main() -> int:
     (output / "writer_stats.json").write_text(
         json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    client.flush_stats_to_json(output / "logs" / "llm_stats.json", "writer")
 
     return 0 if fail_count == 0 else 1
 

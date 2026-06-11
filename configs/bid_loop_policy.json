@@ -1,0 +1,41 @@
+{
+  "retry_policy": {
+    "verify": {
+      "max_retries": 2,
+      "backoff_seconds": 15,
+      "auto_fixable": {
+        "cover_missing": { "fix": "reassemble_variant", "max": 2 },
+        "page_over_cap": { "fix": "concise_then_reassemble", "max": 1 }
+      },
+      "requires_human": ["format_identical", "mandated_format_drift", "missing_artifact"]
+    },
+    "compliance": {
+      "max_retries": 1,
+      "auto_fixable": {
+        "response_keyword_miss": { "fix": "rewrite_chapter_then_rescan", "max": 1 },
+        "chart_missing": { "fix": "rewrite_chapter_then_rescan", "max": 1 }
+      },
+      "requires_human": [
+        "blind_violation", "alignment_failure", "format_severe",
+        "standards_fabricated", "schedule_violation"
+      ]
+    },
+    "assemble": { "max_retries": 2, "backoff_seconds": 15 }
+  },
+  "budget_policy": {
+    "max_tokens_per_run": 2000000,
+    "max_cost_yuan": 50.0,
+    "max_wall_clock_minutes": 180,
+    "action_on_exceed": "abort",
+    "pricing_yuan_per_mtok": {
+      "deepseek": { "in": 2.0, "out": 8.0 },
+      "default": { "in": 4.0, "out": 12.0 }
+    },
+    "coverage_note": "token 追踪覆盖 writer/concise(成本大头);synthesize 链单次小调用未计,误差<5%"
+  },
+  "escalation_policy": {
+    "feishu_chat_ids": [],
+    "notify_on": ["failure", "loop_exhausted"]
+  },
+  "failure_ledger": { "enabled": true, "dedup_lookback_days": 30 }
+}

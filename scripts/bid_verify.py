@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import subprocess
 import sys
@@ -340,10 +341,46 @@ def verify(tender_dir: Path, check_pages: bool, log) -> int:
     return 0
 
 
+def classify_finding(check: str, sev: str) -> str:
+    """check 名 → 机器可读失败类别(供 --loop-mode 门禁分类,见 configs/bid_loop_policy.json)。"""
+    if "封面" in check:
+        return "cover_missing"
+    if "页数" in check:
+        return "page_over_cap" if sev == "fail" else "page_count_unknown"
+    if check.startswith("强制格式"):
+        return "mandated_format_drift"
+    if check.startswith("反串标"):
+        return "format_identical" if sev == "fail" else "format_similarity_warn"
+    if check == "产物存在性":
+        return "missing_artifact"
+    if check == "组装日志":
+        return "assemble_log_danger"
+    return "other"
+
+
+def _finding_variant(check: str) -> str:
+    m = re.match(r"(V\d{2}|单份)\s", check)
+    return m.group(1) if m else ""
+
+
 def _write_report(output: Path, findings, log, per=None, cap=None) -> None:
     lines = ["# 组装产物验证报告", ""]
     n_fail = sum(1 for s, _, _ in findings if s == "fail")
     n_warn = sum(1 for s, _, _ in findings if s == "warn")
+    payload = {
+        "status": "fail" if n_fail else ("warn" if n_warn else "ok"),
+        "n_fail": n_fail,
+        "n_warn": n_warn,
+        "page_cap": cap,
+        "findings": [
+            {"severity": s, "check": c, "detail": d,
+             "class": classify_finding(c, s), "variant": _finding_variant(c)}
+            for s, c, d in findings
+        ],
+        "per_variant": per or {},
+    }
+    (output / "verify_report.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     status = "❌ 硬失败" if n_fail else ("⚠ 有警告" if n_warn else "✅ 通过")
     lines += [f"**结论:** {status}(硬失败 {n_fail} / 警告 {n_warn})", ""]
     if per:
