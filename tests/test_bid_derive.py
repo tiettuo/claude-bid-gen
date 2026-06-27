@@ -28,10 +28,10 @@ def test_font_size_numeric():
 
 
 def test_chars_per_page_14pt_15():
-    """14pt + 1.5倍 → 550-700(西藏简易综合评估法基准)"""
+    """14pt + 1.5倍 → 400-450(全文档有效密度,聂荣实测415;用户指定 2026-06-11)"""
     lo, hi = chars_per_page(14, "multiple", 1.5)
-    assert lo == 550
-    assert hi == 700
+    assert lo == 400
+    assert hi == 450
 
 
 def test_chars_per_page_12pt_15():
@@ -50,11 +50,11 @@ def test_chars_per_page_fallback():
 def test_recommend_target_chars_14pt_70p():
     """14pt + 1.5倍 + 70 页(西藏 70 页硬顶常见场景)"""
     rec = recommend_target_chars(70, 14, "multiple", 1.5, figure_ratio=0.25)
-    assert rec["density_lo"] == 550
-    assert rec["density_hi"] == 700
-    assert rec["density_mid"] == 625
-    # 70 × 0.75 文字页 × 625 中位 ≈ 32K
-    assert 25000 < rec["target_chars_mid"] < 40000
+    assert rec["density_lo"] == 400
+    assert rec["density_hi"] == 450
+    assert rec["density_mid"] == 425
+    # 70 × 0.75 文字页 × 425 中位 ≈ 22K
+    assert 18000 < rec["target_chars_mid"] < 26000
 
 
 def test_parse_format_spec_yaml_style():

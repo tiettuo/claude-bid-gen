@@ -469,7 +469,7 @@ def build_variants(
         vstyle = generate_variant_style(vid, seed=base_seed)
         # 确定性派发图表主题(覆盖 generate_variant_style 的随机方向),保证 N 变体
         # 拿到结构不同的主题而非随机撞色;format_set 同序派发。
-        vstyle.update(CHART_THEMES[idx % len(CHART_THEMES)])
+        vstyle.update(variant_chart_theme(idx))
 
         v_entry = {
             "id": vid,

@@ -510,10 +510,12 @@ def check_outline_coverage(
         log.info("  ✓ 大纲主题全部命中")
 
     # 附表只做软核查（出现于正文任意位置即算命中）
+    # 正文同样按 CJK 过滤后比对,避免附表名含顿号/标点时(如"计划开、竣工日期")永远搜不到
+    cjk_full_text = "".join(c for c in full_text if "一" <= c <= "鿿")
     for att in attachments:
         # 取关键词前 4 个汉字做包含搜索
         key_chars = "".join(c for c in att if "一" <= c <= "鿿")[:4]
-        if key_chars and key_chars in full_text:
+        if key_chars and (key_chars in full_text or key_chars in cjk_full_text):
             out["attachments_referenced"][att] = True
         else:
             out["attachments_referenced"][att] = False

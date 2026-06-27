@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """
-bid-gen Flask MVP
-=================
+bid-gen Flask 服务
+==================
 
-单文件 Web 服务,提供:
-  GET  /             首页(上传表单 + 任务列表)
-  POST /upload       上传 zip → 解压 → 启动 bid_run.py 后台进程 → 返回 job_id
-  GET  /status/<id>  返回 JSON {step, progress, log_tail}
-  GET  /download/<id>  下载 docx (单/多)的 zip 打包
-  GET  /jobs         列出最近任务
+两部分：
+  1. job 上传流程（既有）：
+       GET  /             首页(上传表单 + 任务列表 + 仪表盘入口)
+       POST /upload       上传 zip → 解压 → 启动 bid_run.py 后台进程 → 返回 job_id
+       GET  /status/<id>  返回 JSON {step, progress, log_tail}（+ ?json=1）
+       GET  /download/<id>  下载 docx (单/多)的 zip 打包
+       GET  /jobs         列出最近任务
+  2. dashboard 检视器（见 dashboard.py / _readers.py）：
+       GET  /dashboard    项目选择页 / 检视器单页（blueprint）
+       GET  /api/dashboard/*  只读聚合（blueprint）
+       POST /api/dashboard/control  Start/Stop（本文件，与 _pid_alive 同处 app 命名空间
+                                     便于 tests monkeypatch）
 
-无 Celery/Redis 依赖,subprocess.Popen + 文件系统状态。
+无 Celery/Redis 依赖，subprocess.Popen + 文件系统状态。
 
 用法:
   python web/app.py            # localhost:5000
@@ -24,7 +30,7 @@ import io
 import json
 import os
 import shutil
-import subprocess
+import subprocess  # 模块级：tests monkeypatch web_app.subprocess.Popen
 import sys
 import time
 import uuid
@@ -32,22 +38,37 @@ import zipfile
 from pathlib import Path
 
 from flask import (
-    Flask, request, jsonify, send_file, abort, redirect, url_for, render_template_string,
+    Flask, request, jsonify, send_file, abort, redirect, url_for, render_template,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
 JOBS_DIR = Path.home() / ".bid_gen_jobs"
 JOBS_DIR.mkdir(exist_ok=True)
 
-STEP_LIST = [
-    "extract", "template", "facts", "derive", "skeleton", "special",
-    "input_assemble", "fingerprint", "variants", "chart_specs",
-    "write", "review", "assemble", "compliance", "similarity", "summary",
-]
+# 18 步单一真值取自 bid_run（修正原先陈旧的 16 步硬编码）
+from bid_run import STEPS  # noqa: E402
+STEP_LIST = STEPS
+
+from _readers import resolve_tender  # noqa: E402
+from dashboard import dashboard_bp, _render_console  # noqa: E402
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB
+app.register_blueprint(dashboard_bp)
+
+
+def _pid_alive(pid) -> bool:
+    """进程是否存活（os.kill 0 探测）。模块级：tests monkeypatch web_app._pid_alive 目标。"""
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (ProcessLookupError, PermissionError, ValueError, OSError):
+        return False
 
 
 # ─── Job 状态管理 ───────────────────────────────────────────────────────
@@ -122,13 +143,7 @@ def current_progress(job_id: str) -> dict:
                 pass
 
     pid = meta.get("pid")
-    alive = False
-    if pid:
-        try:
-            os.kill(pid, 0)
-            alive = True
-        except (ProcessLookupError, PermissionError):
-            alive = False
+    alive = _pid_alive(pid)
 
     # 终态:有 summary 或所有 step ok
     finished = False
@@ -137,7 +152,7 @@ def current_progress(job_id: str) -> dict:
     elif state.get("steps", {}).get("assemble", {}).get("status") == "ok":
         # 用户可能 --to assemble 提前停
         finished = not alive
-    if not alive and progress_n >= 13:
+    if not alive and progress_n >= len(STEP_LIST) - 1:
         finished = True
 
     return {
@@ -154,166 +169,19 @@ def current_progress(job_id: str) -> dict:
     }
 
 
-# ─── 路由 ──────────────────────────────────────────────────────────────
-
-INDEX_HTML = """<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<title>bid-gen</title>
-<style>
-  body { font-family: -apple-system, sans-serif; max-width: 880px; margin: 30px auto; padding: 0 20px; color: #222; }
-  h1 { font-size: 22px; border-bottom: 1px solid #ddd; padding-bottom: 8px; }
-  .card { border: 1px solid #ddd; border-radius: 6px; padding: 16px; margin: 16px 0; }
-  input[type=file], input[type=text], input[type=number] { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
-  button { padding: 10px 18px; border: none; border-radius: 4px; background: #2563eb; color: white; cursor: pointer; font-size: 14px; }
-  button:hover { background: #1d4ed8; }
-  label { display: block; margin: 8px 0 4px; font-weight: 500; font-size: 13px; color: #555; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid #eee; }
-  th { background: #f7f7f7; font-weight: 500; }
-  .ok { color: #16a34a; }
-  .fail { color: #dc2626; }
-  .running { color: #2563eb; }
-  small { color: #888; }
-  a { color: #2563eb; text-decoration: none; }
-  a:hover { text-decoration: underline; }
-</style>
-</head>
-<body>
-<h1>bid-gen — 投标技术文件生成</h1>
-
-<div class="card">
-  <form method="post" action="/upload" enctype="multipart/form-data">
-    <label>招标文件压缩包 (.zip)</label>
-    <input type="file" name="zipfile" accept=".zip" required>
-    <label>投标公司名(可选;空则用占位符,后期替换)</label>
-    <input type="text" name="company_name" placeholder="如:某某建筑工程有限公司">
-    <label>目标页数(可选;空则按规模自动判档)</label>
-    <input type="number" name="target_pages" placeholder="留空 → 自动判档(35/70/120 etc.)" min="20" max="300">
-    <label style="margin-top: 16px;">
-      <input type="checkbox" name="manual_step2"> 走人工 Step 2(等 Claude 手工生成 brain/plan/rules)
-    </label>
-    <p style="margin-top: 16px;">
-      <button type="submit">开始生成</button>
-      <small style="margin-left: 12px;">将启动后台进程,完成约 8-15 分钟</small>
-    </p>
-  </form>
-</div>
-
-<div class="card">
-  <h3 style="margin-top: 0;">最近任务</h3>
-  {% if jobs %}
-  <table>
-    <thead><tr><th>项目</th><th>进度</th><th>状态</th><th>操作</th></tr></thead>
-    <tbody>
-    {% for j in jobs %}
-      <tr>
-        <td>{{ j.tender_name }}</td>
-        <td>{{ j.progress|default(0) }}/16</td>
-        <td>
-          {% if j.finished %}<span class="ok">完成</span>
-          {% elif j.alive %}<span class="running">运行中</span>
-          {% else %}<span class="fail">中断</span>
-          {% endif %}
-        </td>
-        <td>
-          <a href="/status/{{ j.job_id }}">详情</a>
-          {% if j.finished %}| <a href="/download/{{ j.job_id }}">下载</a>{% endif %}
-        </td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p><small>(暂无任务)</small></p>
-  {% endif %}
-</div>
-</body>
-</html>"""
-
-STATUS_HTML = """<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<title>{{ data.tender_name }} — bid-gen</title>
-<style>
-  body { font-family: -apple-system, sans-serif; max-width: 1000px; margin: 30px auto; padding: 0 20px; }
-  .progress { background: #eee; height: 24px; border-radius: 4px; overflow: hidden; margin: 10px 0; }
-  .progress-bar { height: 100%; background: #2563eb; transition: width 0.3s; color: white; text-align: center; line-height: 24px; font-size: 12px; }
-  pre { background: #1e293b; color: #f1f5f9; padding: 16px; border-radius: 6px; overflow-x: auto; font-size: 12px; line-height: 1.4; max-height: 500px; overflow-y: auto; }
-  a { color: #2563eb; }
-  .ok { color: #16a34a; font-weight: bold; }
-  .fail { color: #dc2626; font-weight: bold; }
-</style>
-</head>
-<body>
-<a href="/">← 返回</a>
-<h2>{{ data.tender_name }}</h2>
-<p><small>Job: {{ data.job_id }}</small></p>
-
-<div class="progress">
-  <div class="progress-bar" id="pbar" style="width: {{ (data.progress/data.total*100)|round(0) }}%;">
-    {{ data.progress }}/{{ data.total }}
-  </div>
-</div>
-
-<p>
-  当前步骤:<b id="step">{{ data.current_step or "-" }}</b>
-  | 状态:
-  {% if data.finished %}<span class="ok" id="state">完成 ✓</span>
-  {% elif data.alive %}<span id="state">运行中</span>
-  {% else %}<span class="fail" id="state">已中断</span>
-  {% endif %}
-</p>
-
-{% if data.finished %}
-<p><a href="/download/{{ data.job_id }}"><button style="padding: 10px 20px;">下载 DOCX</button></a></p>
-{% endif %}
-
-<h3>实时日志</h3>
-<pre id="log">{{ data.log_tail }}</pre>
-
-<script>
-const jobId = "{{ data.job_id }}";
-let finished = {{ "true" if data.finished else "false" }};
-function poll() {
-  if (finished) return;
-  fetch(`/status/${jobId}?json=1`).then(r => r.json()).then(d => {
-    document.getElementById("pbar").style.width = (d.progress/d.total*100).toFixed(0) + "%";
-    document.getElementById("pbar").textContent = d.progress + "/" + d.total;
-    document.getElementById("step").textContent = d.current_step || "-";
-    document.getElementById("log").textContent = d.log_tail;
-    document.getElementById("log").scrollTop = document.getElementById("log").scrollHeight;
-    if (d.finished) {
-      document.getElementById("state").textContent = "完成 ✓";
-      document.getElementById("state").className = "ok";
-      setTimeout(() => location.reload(), 1500);
-      finished = true;
-    } else if (!d.alive) {
-      document.getElementById("state").textContent = "已中断";
-      document.getElementById("state").className = "fail";
-      finished = true;
-    }
-  });
-}
-setInterval(poll, 3000);
-</script>
-</body>
-</html>"""
-
+# ─── 路由：job 上传流程 ─────────────────────────────────────────────────
 
 @app.route("/")
 def index():
-    jobs = list_jobs()
-    # 补 alive/finished/progress(每次列表刷新)
-    for j in jobs:
-        try:
-            p = current_progress(j["job_id"])
-            j.update(p)
-        except Exception:
-            pass
-    return render_template_string(INDEX_HTML, jobs=jobs)
+    # 统一运行控制台（GitHub Actions 风格）；无 project_dir 时默认定位到最近 job
+    pd = request.args.get("project_dir", "").strip()
+    if not pd:
+        for j in list_jobs(1):
+            td = j.get("tender_dir")
+            if td and Path(td).is_dir():
+                pd = td
+                break
+    return _render_console(pd)
 
 
 @app.route("/upload", methods=["POST"])
@@ -369,17 +237,21 @@ def upload():
                pid=proc.pid,
                cmd=cmd)
 
-    return redirect(url_for("status", job_id=job_id))
+    return redirect(f"/?project_dir={tender_dir}")
 
 
 @app.route("/status/<job_id>")
 def status(job_id):
-    if not job_dir(job_id).exists():
-        abort(404)
-    data = current_progress(job_id)
+    meta = read_meta(job_id)
+    # ?json=1 保留为程序化轮询契约；否则重定向到统一控制台
     if request.args.get("json"):
-        return jsonify(data)
-    return render_template_string(STATUS_HTML, data=data)
+        if not job_dir(job_id).exists():
+            abort(404)
+        return jsonify(current_progress(job_id))
+    td = meta.get("tender_dir", "")
+    if td and Path(td).is_dir():
+        return redirect(f"/?project_dir={td}")
+    abort(404)
 
 
 @app.route("/download/<job_id>")
@@ -414,7 +286,81 @@ def download(job_id):
 
 @app.route("/jobs")
 def jobs():
-    return jsonify(list_jobs())
+    items = list_jobs()
+    for j in items:  # 补 progress/finished/alive，供控制台左侧运行列表用
+        try:
+            j.update(current_progress(j["job_id"]))
+        except Exception:
+            pass
+    return jsonify(items)
+
+
+# ─── 路由：dashboard 控制（唯一变更端点，与 _pid_alive 同处 app 命名空间） ───
+
+@app.route("/api/dashboard/control", methods=["POST"])
+def dashboard_control():
+    """Start / Stop 一个 project_dir 的 bid_run。tests monkeypatch _pid_alive/subprocess.Popen。"""
+    body = request.get_json(silent=True) or {}
+    project_dir = (body.get("project_dir") or "").strip()
+    p = resolve_tender(project_dir)
+    if p is None:
+        return jsonify({"error": "project_dir 缺失或非目录"}), 400
+    action = body.get("action")
+    if action not in ("start", "stop"):
+        return jsonify({"error": f"unknown action: {action}"}), 400
+
+    output = p / "output"
+    output.mkdir(parents=True, exist_ok=True)
+    control_path = output / ".dashboard_control.json"
+
+    if action == "start":
+        # 校验 from/to step 必须在 STEPS 内（防注入）
+        for key in ("from_step", "to_step"):
+            val = body.get(key)
+            if val and val not in STEPS:
+                return jsonify({"error": f"invalid {key}: {val}"}), 400
+        cmd = [sys.executable, str(SCRIPTS / "bid_run.py"), str(p)]
+        if body.get("resume", True):
+            cmd.append("--resume")
+        if body.get("from_step"):
+            cmd += ["--from", body["from_step"]]
+        if body.get("to_step"):
+            cmd += ["--to", body["to_step"]]
+        if body.get("force_continue"):
+            cmd.append("--force-continue")
+
+        log_p = output / "logs" / "dashboard_control.log"
+        log_p.parent.mkdir(parents=True, exist_ok=True)
+        proc = subprocess.Popen(cmd, stdout=open(log_p, "w"),
+                                stderr=subprocess.STDOUT,
+                                env={**os.environ, "PYTHONUNBUFFERED": "1"})
+        now = time.strftime("%Y-%m-%dT%H:%M:%S")
+        existing = {}
+        if control_path.exists():
+            try:
+                existing = json.loads(control_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                existing = {}
+        runs = existing.get("runs", [])
+        runs.append({"at": now, "pid": proc.pid, "action": "start", "cmd": cmd})
+        control = {"pid": proc.pid, "status": "running", "cmd": cmd, "runs": runs}
+        control_path.write_text(json.dumps(control, ensure_ascii=False, indent=2), encoding="utf-8")
+        return jsonify({"alive": _pid_alive(proc.pid), "status": "running",
+                        "pid": proc.pid, "cmd": cmd})
+
+    # action == "stop"：MVP 仅标记 stopped（不真发 SIGTERM），返回探测结果
+    existing = {}
+    if control_path.exists():
+        try:
+            existing = json.loads(control_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+    pid = existing.get("pid")
+    alive = _pid_alive(pid)
+    existing["status"] = "stopped"
+    existing["stopped_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    control_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify({"alive": alive, "status": "stopped"})
 
 
 # ─── 入口 ──────────────────────────────────────────────────────────────

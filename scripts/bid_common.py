@@ -424,7 +424,14 @@ def check_boq_chapter_coverage(ext_dir: "Path", chapter_titles: list[str]) -> di
     for c in cats:
         n = c.get("name","") if isinstance(c,dict) else str(c)
         if not n: continue
-        (cov if any(n in (t or"") or (t or"") in n for t in chapter_titles) else mis).append(n)
+        # 类目基名:专业前缀("建筑装饰工程-门窗工程" → "建筑装饰工程")。
+        # 合格制章标题锁大纲原文,清单专业靠子项标题括注覆盖,故按基名匹配。
+        base = n.split("-", 1)[0]
+        hit = any(
+            n in (t or "") or (t or "") in n or base in (t or "")
+            for t in chapter_titles
+        )
+        (cov if hit else mis).append(n)
     return {"covered":cov,"missing":mis,"ratio":round(len(cov)/len(cats),3) if cats else 1.0}
 
 

@@ -1,0 +1,57 @@
+/* bid-gen 共享基础样式（首页 / 任务详情 / 仪表盘入口） */
+:root {
+  --ok: #16a34a; --fail: #dc2626; --running: #2563eb; --warn: #d97706;
+  --bg: #f6f7f9; --card: #fff; --border: #e2e5ea; --text: #1f2430; --muted: #7a8290;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg); color: var(--text); margin: 0; line-height: 1.5;
+}
+.topnav {
+  display: flex; gap: 18px; align-items: center;
+  background: #111827; padding: 10px 24px;
+}
+.topnav a { color: #d1d5db; text-decoration: none; font-size: 14px; }
+.topnav a:hover, .topnav .brand { color: #fff; font-weight: 600; }
+.topnav .brand { font-size: 16px; }
+.container { max-width: 1200px; margin: 24px auto; padding: 0 24px; }
+h1 { font-size: 22px; margin: 0 0 12px; }
+h2 { font-size: 15px; margin: 0; }
+h3 { font-size: 15px; margin: 0 0 10px; }
+.card {
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  padding: 16px 18px; margin: 14px 0;
+}
+label { display: block; margin: 10px 0 4px; font-weight: 500; font-size: 13px; color: #475569; }
+label.inline { display: inline-flex; align-items: center; gap: 6px; }
+input[type=file], input[type=text], input[type=number] {
+  width: 100%; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px;
+}
+.row { display: flex; gap: 8px; align-items: center; }
+button, .btn-primary, .btn-danger, .btn-ghost {
+  padding: 9px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;
+}
+button, .btn-primary { background: var(--running); color: #fff; }
+button:hover { filter: brightness(1.07); }
+.btn-danger { background: var(--fail); color: #fff; }
+.btn-ghost { background: #e5e7eb; color: #374151; }
+.btn-danger:disabled, .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+.actions { margin-top: 14px; display: flex; align-items: center; gap: 12px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 7px 8px; text-align: left; border-bottom: 1px solid #eef0f3; }
+th { background: #f8fafc; font-weight: 600; color: #475569; }
+code { background: #eef2f7; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+a { color: var(--running); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.ok { color: var(--ok); } .fail { color: var(--fail); } .running { color: var(--running); }
+.muted { color: var(--muted); font-size: 12px; }
+.progress { background: #e5e7eb; height: 22px; border-radius: 6px; overflow: hidden; margin: 8px 0; }
+.progress-bar {
+  height: 100%; background: var(--running); transition: width .3s;
+  color: #fff; text-align: center; line-height: 22px; font-size: 12px; white-space: nowrap;
+}
+pre {
+  background: #0f172a; color: #e2e8f0; padding: 14px; border-radius: 8px;
+  overflow: auto; font-size: 12px; line-height: 1.5; max-height: 460px;
+}

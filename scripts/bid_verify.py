@@ -189,6 +189,17 @@ def detect_page_cap(extracted: Path) -> int | None:
     return None
 
 
+def detect_cover_required(extracted: Path) -> bool:
+    """从 disqualification_rules.md 读取 cover_required 设置，默认 True。"""
+    dq = extracted / "disqualification_rules.md"
+    if dq.exists():
+        txt = dq.read_text(encoding="utf-8")
+        m = re.search(r"cover_required:\s*(true|false)", txt)
+        if m:
+            return m.group(1) == "true"
+    return True
+
+
 def detect_mandated_format(extracted: Path) -> bool:
     """判断招标是否强制规定统一排版格式(字体/字号/行距/页边距/颜色)。
 
@@ -242,6 +253,7 @@ def verify(tender_dir: Path, check_pages: bool, log) -> int:
 
     # 2. 单份逐份检查
     cap = detect_page_cap(extracted)
+    cover_required = detect_cover_required(extracted)
     per: dict[str, dict] = {}
     for dx in docxs:
         vid = dx.name.split("_")[0] if is_batch else "单份"
@@ -252,8 +264,10 @@ def verify(tender_dir: Path, check_pages: bool, log) -> int:
             "margin": margins(dx),
             "pages": None,
         }
-        if not info["cover"]:
+        if cover_required and not info["cover"]:
             add("fail", f"{vid} 封面", f"{dx.name} 开头未检出封面")
+        elif not cover_required and not info["cover"]:
+            pass  # 招标不要求封面，跳过
         if info["font"] in ("?", ""):
             add("warn", f"{vid} 字体", f"{dx.name} 正文字体无法识别")
         if check_pages:

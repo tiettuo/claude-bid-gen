@@ -1,6 +1,6 @@
 # bid-gen Web (Flask MVP)
 
-单文件 Flask app,把 bid-gen 命令行流水线包装成浏览器可用的服务。
+Flask app,把 bid-gen 命令行流水线包装成浏览器可用的服务：上传跑标 + 项目检视器（dashboard）。
 
 ## 启动
 
@@ -20,9 +20,33 @@ python3 web/app.py --port 8080
 | `GET /` | 首页:上传表单 + 任务列表 |
 | `POST /upload` | 上传 zip → 启动后台 bid_run.py → 重定向到 status |
 | `GET /status/<job_id>` | 任务详情页(进度条 + 实时日志,3 秒轮询) |
-| `GET /status/<job_id>?json=1` | JSON 状态(给前端/n8n 等程序调用) |
+| `GET /status/<job_id>?json=1` | JSON 状态(给前端/程序化调用) |
 | `GET /download/<job_id>` | 下载 docx (单份)或打包 zip(含 brain/plan/rules + 合规报告) |
 | `GET /jobs` | JSON 任务列表 |
+
+### Dashboard（项目检视器）
+
+`web/dashboard.py`（blueprint）+ `web/_readers.py`（只读聚合）+ `web/app.py`（POST control）。
+
+| 路由 | 说明 |
+|---|---|
+| `GET /dashboard` | 项目选择页；带 `?project_dir=` → 完整检视器单页 |
+| `GET /api/dashboard/state` | 18 步进度 / runtime / 失败步 / 重跑建议 |
+| `GET /api/dashboard/step2` | Step2 三件套 + 3 个骨架 JSON 是否就绪 |
+| `GET /api/dashboard/compliance` | 逐 variant 合规风险（红/黄/绿）+ 违规计数 |
+| `GET /api/dashboard/verify` | 组装验证 findings（封面/页数/格式） |
+| `GET /api/dashboard/similarity` | 相似度防围标矩阵 + 超阈对 |
+| `GET /api/dashboard/review` | 机器审校严重性 |
+| `GET /api/dashboard/budget` | Token/费用/耗时 vs 预算上限 |
+| `GET /api/dashboard/loop` | 循环重试 cycles + 失败台账 |
+| `GET /api/dashboard/gates` | 质量门禁自动修复决策 |
+| `GET /api/dashboard/charts` | 图表画廊清单（PNG 经 `/asset` 取） |
+| `GET /api/dashboard/file?path=` | 项目内文本预览（路径围栏 + `.env` 拒绝） |
+| `GET /api/dashboard/asset?path=` | 项目内图片/JSON 取（围栏同 `/file`） |
+| `GET /api/dashboard/inspect` | 校验 project_dir 是否有效目录 |
+| `POST /api/dashboard/control` | Start/Stop bid_run（`--resume --from --to --force-continue`） |
+
+检视器可指向磁盘上任意投标目录（不限于上传的 job）；面板由原生 JS 轮询，无构建步骤。合规扫描路径单份/批量不一致，聚合层防御性 glob（`output/reports/`、`output/V*/reports/` 及旧平铺路径）。
 
 ## 上传字段
 

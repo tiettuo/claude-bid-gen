@@ -88,8 +88,8 @@ def _is_tier_a(ch: dict) -> bool:
 
 
 def _est_pages(target_chars: int, chart_count: int) -> float:
-    """字数 + 图表估算页数(约 625 字/页[14pt 四号 1.5 倍],每图 0.4 页)。"""
-    return round(target_chars / 625.0 + chart_count * 0.4, 1)
+    """字数 + 图表估算页数(约 425 字/页[14pt 四号 1.5 倍全文档有效密度],每渲染图 0.85 页)。"""
+    return round(target_chars / 425.0 + chart_count * 0.85, 1)
 
 
 # ── 评分标准 / 项目背景加载 ────────────────────────────────────────

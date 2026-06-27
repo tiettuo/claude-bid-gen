@@ -581,7 +581,7 @@ def render_chapter_plan(
         lo = int(chars * 0.85)
         hi = int(chars * 1.15)
         figs = ch["figures"]
-        pages = chars / chars_per_page_mid + figs * 0.4
+        pages = chars / chars_per_page_mid + figs * 0.85  # 渲染图每张≈0.85-1页(feedback_chart_page_cost)
         total_chars += chars
         total_subitems += len(subs)
         total_figs += figs

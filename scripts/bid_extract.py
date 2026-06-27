@@ -193,40 +193,17 @@ def _is_boq_file(file_path: Path) -> bool:
 
 
 def _filter_boq_summary_pages(page_meta: list[dict], log: logging.Logger) -> list[dict]:
-    """清单 PDF 只保留汇总表相关页，跳过分部分项明细行。
+    """清单 PDF 全量识别（v3：明细页也提取，不再只抽汇总表）。
 
-    策略：
-    - 全页均为扫描页（无文字）→ 只取前 15 页（封面+汇总表通常在此范围）
-    - 有文字的页：包含汇总关键词或前 5 页 → 保留；命中明细表头且无汇总词 → 跳过
+    历史（feedback_boq_summary_only）曾只抽汇总表省 token，但两件事推翻了它：
+    1. 明细行是施组正文按分项展开的唯一可靠工程量数据源，丢掉=下游凭印象写
+    2. cid 损坏清单的全部页 is_scanned=True，旧 all_scanned 分支会把整本误砍到前 30 页
+
+    现改为全量保留：明细页（分部分项/措施项目等）一律送 vision OCR，
+    解析交给下游 bid_boq_extract.py。
     """
-    all_scanned = all(meta.get("is_scanned", False) or not meta.get("text", "").strip()
-                      for meta in page_meta)
-    if all_scanned:
-        # 全扫描清单：先只送前 25 页进 vision OCR，vision 完成后在阶段4再按"汇总表"过滤
-        kept = [m for m in page_meta if m["idx"] < 30]
-        log.info(f"  清单文件（全扫描）：送前 30 页做 Vision OCR，跳过 {len(page_meta) - len(kept)} 页明细，"
-                 f"阶段4将按'汇总表'关键词二次过滤")
-        return kept
-
-    kept = []
-    for meta in page_meta:
-        idx = meta["idx"]
-        text = meta.get("text", "")
-        is_summary = any(kw in text for kw in _BOQ_SUMMARY_KEYWORDS)
-        is_detail_only = (
-            any(kw in text for kw in _BOQ_DETAIL_HEADER)
-            and not is_summary
-        )
-        if idx < 5 or is_summary:
-            kept.append(meta)
-        elif is_detail_only:
-            pass  # 跳过明细页
-        else:
-            kept.append(meta)
-    skipped = len(page_meta) - len(kept)
-    if skipped:
-        log.info(f"  清单文件：保留 {len(kept)}/{len(page_meta)} 页（跳过 {skipped} 页明细）")
-    return kept
+    log.info(f"  清单文件：全量识别，保留全部 {len(page_meta)} 页（含分部分项明细）")
+    return page_meta
 
 
 def extract_pdf(file_path: Path, log: logging.Logger, vision_report: dict | None = None) -> str:
@@ -393,18 +370,7 @@ def extract_pdf(file_path: Path, log: logging.Logger, vision_report: dict | None
                 log.info(f"    第{idx+1}页 [{reason}] 模型={model_used} 字符={len(vision_text)}")
 
         # === 阶段 4：汇总输出文本 ===
-        # 清单全扫描文件：vision 完成后按"汇总表"二次过滤
-        if _is_boq_file(file_path):
-            filtered_meta = []
-            for meta in page_meta:
-                final_text = meta.get("vision_text") or meta.get("text", "")
-                if "汇总表" in final_text:
-                    filtered_meta.append(meta)
-            if filtered_meta:
-                log.info(f"  清单文件：二次过滤后保留 {len(filtered_meta)}/{len(page_meta)} 页（含'汇总表'）")
-                page_meta = filtered_meta
-            else:
-                log.warning(f"  清单文件：二次过滤无命中，保留全部 {len(page_meta)} 页（'汇总表'未识别到）")
+        # 清单文件 v3 起全量识别，不再按"汇总表"二次过滤（明细页全部保留）
 
         for meta in page_meta:
             i = meta["idx"]

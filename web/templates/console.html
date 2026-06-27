@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}bid-gen Dashboard{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='console.css') }}">{% endblock %}
+{% block content %}
+<div class="console">
+  <!-- ── 左侧 rail：上传 / 运行列表 / 路径打开 ── -->
+  <aside class="rail">
+    <div class="rail-sec">
+      <button id="toggle-upload" class="rail-btn">＋ 上传新标</button>
+      <form id="upload-form" class="upload-form" method="post" action="/upload" enctype="multipart/form-data" hidden>
+        <label>招标 zip 包</label>
+        <input type="file" name="zipfile" accept=".zip" required>
+        <input type="text" name="company_name" placeholder="投标公司名(可选)">
+        <input type="number" name="target_pages" placeholder="目标页数(可选)" min="20" max="300">
+        <label class="inline"><input type="checkbox" name="manual_step2"> 人工 Step2</label>
+        <button type="submit">开始生成</button>
+      </form>
+    </div>
+
+    <div class="rail-sec grow">
+      <h3>运行列表</h3>
+      <ul id="run-list" class="run-list"></ul>
+    </div>
+
+    <div class="rail-sec">
+      <h3>按路径打开</h3>
+      <form id="open-form" class="row">
+        <input type="text" id="path-input" placeholder="项目目录绝对路径">
+        <button type="submit">→</button>
+      </form>
+      <p id="open-err" class="fail" hidden></p>
+    </div>
+  </aside>
+
+  <!-- ── 主区 ── -->
+  <main class="main">
+    <header class="run-head">
+      <div class="run-title">
+        <h1 id="proj-name">{{ project_name or "未选择项目" }}</h1>
+        <code id="proj-dir" class="muted">{{ project_dir or "（左侧选一个运行，或粘贴路径打开）" }}</code>
+      </div>
+      <div class="run-controls">
+        <span id="alive-badge" class="badge badge-idle">—</span>
+        <span id="runtime" class="muted"></span>
+        <button id="btn-start" class="btn-primary">▶ 续跑</button>
+        <button id="btn-stop" class="btn-danger" disabled>■ 停止</button>
+        <button id="btn-refresh" class="btn-ghost" title="刷新全部">↻</button>
+      </div>
+    </header>
+
+    <!-- 问题标注 -->
+    <section id="problems" class="problems" hidden></section>
+
+    <!-- 步骤清单（点一步展开该步日志） -->
+    <section class="panel">
+      <header><h2>管道步骤</h2><span id="step-progress" class="muted"></span></header>
+      <ul id="step-list" class="step-list"></ul>
+    </section>
+
+    <!-- 全局实时日志终端 -->
+    <section class="panel">
+      <header><h2>实时日志</h2><span id="log-path" class="muted"></span></header>
+      <pre id="log-term" class="log-term"></pre>
+    </section>
+
+    <!-- 结果面板（折叠） -->
+    <div class="results">
+      <details class="panel"><summary>💰 预算 / Token</summary><div data-panel="budget" class="body"></div></details>
+      <details class="panel"><summary>🛡 合规扫描</summary><div data-panel="compliance" class="body"></div></details>
+      <details class="panel"><summary>🔍 组装验证</summary><div data-panel="verify" class="body"></div></details>
+      <details class="panel"><summary>📐 相似度（防围标）</summary><div data-panel="similarity" class="body"></div></details>
+      <details class="panel"><summary>📝 机器审校</summary><div data-panel="review" class="body"></div></details>
+      <details class="panel"><summary>🧩 Step2 三件套 + 骨架</summary><div data-panel="step2" class="body"></div></details>
+      <details class="panel"><summary>📊 图表画廊</summary><div data-panel="charts" class="body"></div></details>
+      <details class="panel"><summary>♻ 循环重试 + 失败台账</summary><div data-panel="loop" class="body"></div></details>
+      <details class="panel"><summary>🚦 质量门禁决策</summary><div data-panel="gates" class="body"></div></details>
+    </div>
+  </main>
+</div>
+
+<!-- 文件预览模态 -->
+<div id="modal" class="modal" hidden>
+  <div class="modal-card">
+    <header><span id="modal-title">文件</span><button id="modal-close">✕</button></header>
+    <pre id="modal-body"></pre>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>const PROJECT_DIR = {{ project_dir|tojson }}; const STEPS = {{ steps|tojson }};</script>
+<script src="{{ url_for('static', filename='console.js') }}"></script>
+{% endblock %}

@@ -744,8 +744,17 @@ def verify(tender_dir: Path, strict: bool | None = None) -> int:
             print(f"{OK} 目标页数 {pages} ≤ 硬顶 {hard_limit}")
 
     # 规则 5: 清单→章节覆盖（v3: boq.json 反向校验）
+    # 合格制章标题锁大纲原文,清单专业通常体现在子项标题(含括注),
+    # 故覆盖判定用 章标题 ∪ 子项标题。
     from bid_common import check_boq_chapter_coverage
-    boq_cov = check_boq_chapter_coverage(ext, plan_titles)
+    plan_text_for_cov = ""
+    cp_path = ext / "chapter_plan.md"
+    if cp_path.exists():
+        plan_text_for_cov = cp_path.read_text(encoding="utf-8")
+    subitem_titles = re.findall(
+        r"^\s*[-•]\s+\d+\.\d+\s+([^:：\n]+)", plan_text_for_cov, re.MULTILINE
+    )
+    boq_cov = check_boq_chapter_coverage(ext, plan_titles + subitem_titles)
     if boq_cov.get("ratio", 1.0) < 1.0:
         missing = boq_cov.get("missing", [])
         if missing:

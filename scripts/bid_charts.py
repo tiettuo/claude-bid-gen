@@ -499,7 +499,7 @@ def render_org_chart(data: dict, out_png: Path, title: str,
     out_png.parent.mkdir(parents=True, exist_ok=True)
     stem = str(out_png.with_suffix(""))
     g.render(stem, cleanup=True)
-    _rotate_png_if_wide(out_png, log)
+    # 不旋转: org_chart 宽图由 bid_assemble 分配横版页面展示
     log.info(f"  ✓ 渲染组织机构图: {out_png.name}  节点={counter[0]}")
     return True
 

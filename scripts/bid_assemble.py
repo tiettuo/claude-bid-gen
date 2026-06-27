@@ -73,6 +73,7 @@ DEFAULT_FORMAT = {
     "blind_bid": False,
     "no_color": False,
     "no_cover": False,
+    "no_toc": False,                     # 显式"不需要目录"才置 True(暗标常见)
     "no_page_numbers": False,            # 显式"无页码/不编页"才置 True
     "no_company_info": False,
     "header_disabled": False,            # 暗标常见：禁止页眉
@@ -520,6 +521,9 @@ def _normalize_rule_param_keys(params: dict, log: logging.Logger) -> None:
     # cover_required: true → 必须有封面(no_cover: False); false → no_cover: True
     if "cover_required" in params and "no_cover" not in params:
         params["no_cover"] = not _coerce_bool(params["cover_required"])
+    # toc_required: false → no_toc: True（暗标"不需要目录"）
+    if "toc_required" in params and "no_toc" not in params:
+        params["no_toc"] = not _coerce_bool(params["toc_required"])
     if "color_allowed" in params and "no_color" not in params:
         params["no_color"] = not _coerce_bool(params["color_allowed"])
     if "header_footer_company_info" in params and "no_company_info" not in params:
@@ -556,7 +560,7 @@ def parse_format_rules(rules_path: Path, log: logging.Logger) -> dict:
 
     _normalize_rule_param_keys(params, log)
 
-    bool_keys = ("blind_bid", "no_color", "no_cover", "no_page_numbers", "no_company_info",
+    bool_keys = ("blind_bid", "no_color", "no_cover", "no_toc", "no_page_numbers", "no_company_info",
                  "header_disabled", "footer_page_number", "page_number_restart_after_toc",
                  "bold_h1", "heading_chapter_prefix")
     for k in bool_keys:
@@ -596,6 +600,18 @@ def parse_format_rules(rules_path: Path, log: logging.Logger) -> dict:
         n = _coerce_number(params["max_pages"], 0)
         fmt["max_pages"] = int(n or 0)
         specified.add("max_pages")
+
+    if "landscape_chart_kinds" in params:
+        fmt["landscape_chart_kinds"] = str(params["landscape_chart_kinds"])
+        specified.add("landscape_chart_kinds")
+        log.info(f"  [结构化] landscape_chart_kinds = {fmt['landscape_chart_kinds']}")
+
+    if "table_line_spacing_pt" in params:
+        n = _coerce_number(params["table_line_spacing_pt"])
+        if n:
+            fmt["table_line_spacing_pt"] = float(n)
+            specified.add("table_line_spacing_pt")
+            log.info(f"  [结构化] table_line_spacing_pt = {n}")
 
     if "line_spacing" in params:
         raw_ls = str(params["line_spacing"])
@@ -639,12 +655,15 @@ def parse_format_rules(rules_path: Path, log: logging.Logger) -> dict:
                 specified.add(pkey)
 
     # 表格/边框线条:thickness 单位是 pt(招标常写 0.5/0.75/1.0)
-    if "line_thickness_pt" in params:
-        n = _coerce_number(params["line_thickness_pt"])
-        if n is not None:
-            fmt["line_thickness_pt"] = float(n)
-            specified.add("line_thickness_pt")
-            log.info(f"  [结构化] line_thickness_pt = {n}pt")
+    # line_weight_pt 是招标文件常用字段名，作为 line_thickness_pt 的别名
+    for _lw_key in ("line_thickness_pt", "line_weight_pt"):
+        if _lw_key in params:
+            n = _coerce_number(params[_lw_key])
+            if n is not None:
+                fmt["line_thickness_pt"] = float(n)
+                specified.add("line_thickness_pt")
+                log.info(f"  [结构化] line_thickness_pt ({_lw_key}) = {n}pt")
+            break
 
     # 颜色:支持中文颜色名 / 十六进制 / 关键词
     _COLOR_CN_TO_HEX = {
@@ -1190,7 +1209,10 @@ def _apply_doc_soft_layer(doc, fmt: dict, vs: dict, log) -> None:
                     el.set(qn("w:w"), str(cell_pad))
                     el.set(qn("w:type"), "dxa")
 
-        if border_pt is not None:
+        # 招标显式指定线宽(line_thickness_pt∈_specified_keys)时软层不得覆盖,
+        # 保留正路 _postproc_normalize_tables 按 fmt.line_thickness_pt 设的值(如0.75pt→sz6);
+        # 仅当招标未指定线宽时,才用多变体随机 doc_table_border_pt 做差异化
+        if border_pt is not None and "line_thickness_pt" not in specified:
             tblPr = tbl._tbl.find(qn("w:tblPr"))
             if tblPr is not None:
                 borders = tblPr.find(qn("w:tblBorders"))
@@ -1200,7 +1222,7 @@ def _apply_doc_soft_layer(doc, fmt: dict, vs: dict, log) -> None:
                         child.set(qn("w:sz"), sz_val)
     if cell_pad is not None:
         touched.append(f"cell_pad={cell_pad}twips")
-    if border_pt is not None:
+    if border_pt is not None and "line_thickness_pt" not in specified:
         touched.append(f"border={border_pt}pt")
 
     if touched:
@@ -1281,6 +1303,71 @@ def _img_wrap_landscape(body, para_elem, page_w_cm, page_h_cm, ml, mr, mt, mb):
         body.append(post)
 
 
+def _exact_spacing_to_direct(doc, fmt: dict, log) -> None:
+    """exact(固定值)行距从 Normal 样式层下沉到段落直接格式。
+
+    实测(Word for Mac, 饲草料类项目)：Normal 样式行距为 exact 时，
+    横版小节(sectPr 包夹)内的纯图片段会被裁成一条，且段落级覆盖
+    (direct auto/atLeast/exact、独立 pStyle)全部无效——只有 Normal 本身
+    不是 exact 才能正常渲染。规避：Normal → auto，再给每个文字段落补
+    direct exact 行距(正文用 line_spacing，表格内用 table_line_spacing_pt，
+    默认 22 磅对应"表格行距22磅"类招标要求)，图片段保持 auto 由
+    _img_normalize_para 接管。仅在 line_spacing_rule=exact 时生效。
+    """
+    if fmt.get("line_spacing_rule") != "exact":
+        return
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    body_tw = int(float(fmt["line_spacing"]) * 20)          # pt → twips
+    table_tw = int(float(fmt.get("table_line_spacing_pt", 22)) * 20)
+
+    # 1. Normal 样式行距改 auto(单倍)
+    st_el = doc.styles["Normal"].element
+    st_ppr = st_el.find(qn("w:pPr"))
+    if st_ppr is not None:
+        sp = st_ppr.find(qn("w:spacing"))
+        if sp is not None:
+            sp.set(qn("w:line"), "240")
+            sp.set(qn("w:lineRule"), "auto")
+
+    # 2. 全部段落补 direct 行距(保留原 before/after)
+    n_body = n_tbl = 0
+    for p in doc.element.body.iter(qn("w:p")):
+        if p.findall(".//" + qn("w:drawing")):
+            continue  # 图片段交给 _img_normalize_para
+        # 判断是否在表格单元格内
+        in_table = False
+        anc = p.getparent()
+        while anc is not None:
+            if anc.tag == qn("w:tc"):
+                in_table = True
+                break
+            anc = anc.getparent()
+        tw = table_tw if in_table else body_tw
+        pPr = p.find(qn("w:pPr"))
+        if pPr is None:
+            pPr = OxmlElement("w:pPr")
+            p.insert(0, pPr)
+        sp = pPr.find(qn("w:spacing"))
+        if sp is None:
+            sp = OxmlElement("w:spacing")
+            # schema 顺序:spacing 须在 ind/jc 之前,插到 pStyle 后或最前
+            pstyle = pPr.find(qn("w:pStyle"))
+            if pstyle is not None:
+                pstyle.addnext(sp)
+            else:
+                pPr.insert(0, sp)
+        sp.set(qn("w:line"), str(tw))
+        sp.set(qn("w:lineRule"), "exact")
+        if in_table:
+            n_tbl += 1
+        else:
+            n_body += 1
+    log.info(f"  exact 行距下沉: Normal→auto, 正文段 {n_body} 个 = {body_tw/20:.0f}磅, "
+             f"表格段 {n_tbl} 个 = {table_tw/20:.0f}磅 (横版图片裁切规避)")
+
+
 def _img_normalize_para(para, new_h):
     """图片段落 pPr：删 pStyle/旧行距 → 重建撑开行距 + 首行缩进归零 + 居中。"""
     from docx.oxml.ns import qn
@@ -1324,7 +1411,7 @@ def _img_normalize_para(para, new_h):
 
 # 招标常要求「平面布置图、进度图横向编辑」(西藏简易综合评估法等强制格式)。
 # 这些图表类型即使竖版放得下也应独占横版页, 由 _chart_order.json 按文档顺序识别。
-_LANDSCAPE_CHART_KINDS = {"site_layout", "schedule", "aoa_network"}
+_LANDSCAPE_CHART_KINDS = {"site_layout", "schedule", "aoa_network", "org_chart"}
 
 
 def _fit_images(doc, fmt: dict, log, chart_order: list | None = None) -> None:
@@ -1378,8 +1465,13 @@ def _fit_images(doc, fmt: dict, log, chart_order: list | None = None) -> None:
         new_w = min(orig_w, int(content_w_portrait))
         new_h = int(new_w * aspect)
         # 平面布置图/进度图: 招标常要求横版编辑, 即使竖版放得下也强制横版
+        # 暗标等强制格式项目可用 rules 的 landscape_chart_kinds 收窄横版类型
+        # (如"仅施工总平面图及进度图可横向编辑" → landscape_chart_kinds: site_layout,schedule)
         kind = chart_order[img_count - 1] if (chart_order and img_count - 1 < len(chart_order)) else None
-        force_ls = kind in _LANDSCAPE_CHART_KINDS
+        ls_kinds = _LANDSCAPE_CHART_KINDS
+        if fmt.get("landscape_chart_kinds"):
+            ls_kinds = {k.strip() for k in str(fmt["landscape_chart_kinds"]).replace("，", ",").split(",") if k.strip()}
+        force_ls = kind in ls_kinds
         need_landscape = force_ls or (
             (not fmt.get("force_portrait")) and (new_h > int(content_h_portrait * threshold)))
 
@@ -1836,8 +1928,11 @@ def postprocess_docx(docx_path: Path, fmt: dict, project_name: str,
     if not fmt["no_cover"]:
         _prepend_cover(doc, project_name, company_name, fmt, log)
 
-    # ─── 4. 插入目录（所有情况都插，暗标也要目录） ─────────────
-    _prepend_toc(doc, fmt, log)
+    # ─── 4. 插入目录（默认都插；招标明示"不需要目录"时 no_toc 跳过） ─────────────
+    if fmt.get("no_toc"):
+        log.info("  跳过目录 (no_toc=True)")
+    else:
+        _prepend_toc(doc, fmt, log)
 
     # ─── 5. 页眉禁止（暗标 / 显式禁用） ─────────────────────────
     if fmt["header_disabled"]:
@@ -1854,6 +1949,9 @@ def postprocess_docx(docx_path: Path, fmt: dict, project_name: str,
     # ─── 7. 文档软层微调（视觉指纹） ─────────────────────────
     if variant_style:
         _apply_doc_soft_layer(doc, fmt, variant_style, log)
+
+    # ─── 7.5 exact 行距下沉到段落直接格式（Word Mac 横版节图片裁切规避）──
+    _exact_spacing_to_direct(doc, fmt, log)
 
     # ─── 8. 图片尺寸约束 + 大图横版（必须最后执行，防止被覆盖）──
     chart_order = None
@@ -2305,6 +2403,8 @@ def _reapply_h1_run_fonts(doc: "Document", fmt: dict, log: logging.Logger) -> No
         for r in p.runs:
             if h1_size:
                 r.font.size = Pt(h1_size)
+            if not fmt.get("bold_h1", True):
+                r.font.bold = False
             rPr = r._element.get_or_add_rPr()
             for old in rPr.findall(qn("w:rFonts")):
                 rPr.remove(old)
@@ -2836,6 +2936,11 @@ def _assemble_one(
     # ─── 图表预处理：剥离 JSON/mermaid，渲染进度甘特图 PNG ──
     variant_id = variant["id"] if variant else ""
     chart_style = _make_chart_style(variant_id, variant=variant) if variant else None
+    # no_color: true → 强制图表纯黑白（无灰色填充/彩色描边）
+    if chart_style and fmt.get("no_color"):
+        chart_style["chart_node_filled"] = False
+        chart_style["chart_node_fill"] = "white"
+        chart_style["chart_accent"] = "#000000"
     # variants.json 可显式指定每变体的标题编号风格(A-L);缺省则按变体序号轮转派发(反串标)
     heading_style = (variant or {}).get("heading_style", "") if variant else ""
     try:
