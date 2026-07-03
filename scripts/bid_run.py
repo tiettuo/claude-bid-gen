@@ -62,6 +62,7 @@ STEPS = [
     "verify",        # bid_verify.py (组装产物验证门:封面/三家排版差异/页数硬顶)
     "compliance",    # bid_compliance.py (--all-variants 批量 / 单份)
     "similarity",    # bid_similarity.py (批量专用)
+    "expert_review", # bid_expert_review.py (评标专家:对照评分表打分,只出报告不阻断)
     "summary",       # 写项目总览.md + compliance_summary.md + review_summary.md
 ]
 
@@ -976,7 +977,7 @@ def doctor(tender_dir: Path | None) -> int:
               "bid_skeleton_extract.py", "bid_special_extract.py", "bid_input_assemble.py",
               "bid_fingerprint.py", "bid_variants.py",
               "bid_writer.py", "bid_reviewer.py", "bid_assemble.py", "bid_compliance.py",
-              "bid_similarity.py", "bid_llm_client.py", "bid_run.py"]:
+              "bid_similarity.py", "bid_expert_review.py", "bid_llm_client.py", "bid_run.py"]:
         p = SCRIPTS / s
         if p.exists():
             print(f"  {OK} {s}")
@@ -1500,6 +1501,12 @@ def run_pipeline(tender_dir: Path, args, log) -> int:
                         mark_step(state, step, "fail", error="similarity gate failed")
                         save_state(state_path, state)
                         return 1
+            elif step == "expert_review":
+                # 评标专家：对照评分表逐项瑕疵制打分 + 符合性/跨章一致性，只出报告，恒不阻断
+                code = run_script("bid_expert_review.py", [str(tender_dir)], log)
+                if code != 0:
+                    log.warning(f"expert_review 退出码 {code}，但不阻断管道")
+                    code = 0
             elif step == "summary":
                 write_summary_reports(tender_dir, mode, log)
                 code = 0

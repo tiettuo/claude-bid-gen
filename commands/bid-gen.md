@@ -41,6 +41,8 @@ python BID_GEN_HOME/scripts/bid_status.py "$ARGUMENTS"
 
 `bid_run.py` 完成后会生成 `output/项目总览.md`（单份或批量通用），批量模式额外生成 `output/compliance_summary.md` 与 `output/review_summary.md`。
 
+**评标专家（Step 6.5，不阻断）**：similarity 之后、summary 之前自动跑 `bid_expert_review.py`，对照评分表逐项瑕疵制打分 + 符合性/废标风险 + 跨章一致性，产出 `output/reports/评标专家评分报告.md`。**只出报告、不阻断、不回 writer**（区别于上面的门禁）。
+
 如果不想用 orchestrator，也可以按下面的 Step 1–6 顺序手工敲命令。
 
 ---
@@ -667,6 +669,30 @@ python BID_GEN_HOME/scripts/bid_similarity.py "$ARGUMENTS" --threshold-overall 0
 - 元数据冲突（author 或 created 相同）也要提示用户重跑 `bid_assemble.py --batch`。
 
 ---
+
+---
+
+### Step 6.5：评标专家评审（★ 自动执行，只出报告不阻断）
+
+similarity 通过后、summary 之前，自动以"评标专家"视角对最终方案做一次模拟评审。区别于 Step 3.5（机器规则审校）与 Step 5（合规红线），这一步是**对照招标评审标准的语义级打分**——模拟真人评委找扣分点。
+
+```bash
+python BID_GEN_HOME/scripts/bid_expert_review.py "$ARGUMENTS"
+python BID_GEN_HOME/scripts/bid_expert_review.py "$ARGUMENTS" --variant V01   # 只评一家
+python BID_GEN_HOME/scripts/bid_expert_review.py "$ARGUMENTS" --model deepseek # 默认 deepseek
+```
+
+**检查维度：**
+1. 逐项瑕疵制打分（LLM 评标专家 persona）：读 `evaluation_method.json` 的 `scoring_items`，按章节同序映射，按招标原文阶梯（0 瑕疵满分 → ≥4 瑕疵 0 分）给每项打分
+2. 符合性/废标风险（规则）：占位符/写手指令泄漏、规范年份伪造、**金额失实**（正文安全文明施工费/暂列金额 vs 清单真值）、总工期矛盾
+3. 跨章数据一致性（LLM）：同一参数跨章是否打架（尺寸/规格/吨位/材料/工期节点）
+
+**产出：**
+- `output/VXX/expert_review.json` + `expert_review.md`（每家逐项打分 + 瑕疵清单）
+- `output/expert_review_summary.json`（排名）
+- `output/reports/评标专家评分报告.md`（最终交付报告，带原文锚点）
+
+**Claude 处理：** 此步**不阻断、不回 writer**（退出码恒 0）。报告用于交付前自查——若发现致命瑕疵（伪造痕迹/金额失实/材料体系矛盾），回到相应章节 `bid_writer.py --force` 修复后重新组装 + 重跑本步。已知局限：LLM 对"量化虚胖"（如材料吨位超控制价）不够敏感，重大数值疑点建议人工再核。
 
 ---
 
