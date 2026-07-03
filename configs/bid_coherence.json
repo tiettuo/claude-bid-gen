@@ -1,0 +1,29 @@
+{
+  "_comment": "连贯性改进(散装→茅台)配置。整体开关 enabled=false 时所有工序不触发,管道行为与改动前完全一致。",
+  "enabled": false,
+  "工序A_mainline_injection": {
+    "_note": "plan 阶段:deployment_synthesize 生成部署纲领 + plan 派生 chapter_narrative.json + writer Block1 精准注入。A2/A3 随 plan_synthesize/writer 自动生效(只要 deployment_outline.json 存在),无需独立开关。",
+    "deployment_synthesize_model": "deepseek",
+    "deployment_synthesize_temperature": 0.3
+  },
+  "intro_chapter": {
+    "_note": "第0章「编制总说明」。true=plan 阶段生成独立第0章;false=退化为注入第一章(避免引入评分表外章节)。",
+    "enabled": true,
+    "count_in_page_budget": false
+  },
+  "chapter_intro": {
+    "_note": "工序B:post-writer 重写每章引言段,回指主线+承接前章。",
+    "enabled": true,
+    "model": "deepseek_chat",
+    "summary_head_chars": 300,
+    "summary_tail_chars": 200,
+    "target_intro_chars": 300
+  },
+  "coherence_pass": {
+    "_note": "工序C:assemble 前跨章勾兑(引用编织+重复检测+矛盾修复)。",
+    "enabled": true,
+    "redundancy_threshold": 0.6,
+    "fix_conflicts": true,
+    "max_fix_rounds": 1
+  }
+}

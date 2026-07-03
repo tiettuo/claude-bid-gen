@@ -130,6 +130,9 @@ def build_chart_spec_block(specs: list[dict]) -> str:
 _AUTHORING_CTX: dict = {}
 _DIFFICULTIES_DATA: dict = {}
 _BRAIN_TEXT: str = ""
+# 连贯性主线(工序A):chapter_narrative.json,plan_synthesize 派生。每章叙事职责 +
+# 聚焦难点 + 主线回指声明。空表示走旧的难点全量 dump 逻辑(降级安全)。
+_CHAPTER_NARRATIVE: dict = {}
 
 
 def parse_authoring_yaml(text: str) -> dict:
@@ -154,7 +157,7 @@ def load_authoring_context(extracted: Path, log: logging.Logger | None = None) -
     返回是否进入 4-块新模式(authoring 解析成功且非空)。
     解析失败或文件不存在 → 回退到 legacy build_user_prompt 旧流程。
     """
-    global _AUTHORING_CTX, _DIFFICULTIES_DATA, _BRAIN_TEXT
+    global _AUTHORING_CTX, _DIFFICULTIES_DATA, _BRAIN_TEXT, _CHAPTER_NARRATIVE
 
     # brain text(为 Block 1 提供 重难点 / 项目类型 等)
     brain_path = extracted / "project_brain.md"
@@ -169,6 +172,16 @@ def load_authoring_context(extracted: Path, log: logging.Logger | None = None) -
             _DIFFICULTIES_DATA = {}
     else:
         _DIFFICULTIES_DATA = {}
+
+    # chapter_narrative.json(工序A2 派生;不存在→空→走旧的全量 dump,降级安全)
+    narr_path = extracted / "chapter_narrative.json"
+    if narr_path.exists():
+        try:
+            _CHAPTER_NARRATIVE = json.loads(narr_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            _CHAPTER_NARRATIVE = {}
+    else:
+        _CHAPTER_NARRATIVE = {}
 
     # authoring_rules.md(优先) 或 disqualification_rules.md(回退)
     try:
@@ -330,26 +343,68 @@ def _build_block1_project(
                 lines.append(f"      - {a}")
         lines.append("")
 
-    # 重难点
+    # 重难点 — 连贯性主线注入(工序 A3)
+    # 有 chapter_narrative 时:只注入本章聚焦的难点 + 主线回指声明(精准,控 context 稀释);
+    # 无聚焦时:走旧的全量 dump 逻辑(降级安全,行为不变)。
     def _title_of(item):
         if isinstance(item, dict):
             return item.get("title") or item.get("name") or ""
         return str(item) if item else ""
 
-    if 重点:
-        lines.append("技术重点：")
-        for r in 重点[:5]:
-            t = _title_of(r)
-            if t and t != "?":
-                lines.append(f"  · {t}")
+    def _find_diff_detail(title: str) -> dict | None:
+        """按标题在 _DIFFICULTIES_DATA.难点 里找完整条目(含 rationale/evidence)。"""
+        for n in 难点:
+            if isinstance(n, dict) and n.get("title", "") == title:
+                return n
+        return None
+
+    # 本章叙事职责(chapter_narrative.json 派生,可能不存在→空)
+    cur_num = str(current_chapter_num or "").zfill(2) if current_chapter_num else ""
+    narr_chapters = (_CHAPTER_NARRATIVE.get("chapters") or {}) if _CHAPTER_NARRATIVE else {}
+    this_narr = narr_chapters.get(cur_num, {}) if cur_num else {}
+    focus_titles: list[str] = this_narr.get("difficulty_focus", []) or []
+    mainline_echo = this_narr.get("mainline_echo", "") or ""
+
+    # 主线回指声明(无论有无聚焦,只要 narrative 存在就注入,强化连贯)
+    if mainline_echo:
+        lines.append(mainline_echo)
         lines.append("")
-    if 难点:
-        lines.append("施工难点：")
-        for n in 难点[:5]:
-            t = _title_of(n)
-            if t and t != "?":
-                lines.append(f"  · {t}")
+
+    if focus_titles:
+        # 精准模式:只列本章聚焦难点(限 3 条)+ 其 rationale(深化,而非标题罗列)
+        lines.append("本章须重点回应的施工难点(从总体部署纲领分配,禁止泛泛而谈)：")
+        for ft in focus_titles[:3]:
+            lines.append(f"  · {ft}")
+            detail = _find_diff_detail(ft)
+            if isinstance(detail, dict):
+                for r in (detail.get("rationale") or [])[:2]:
+                    if r:
+                        lines.append(f"      - {r}")
         lines.append("")
+        # 技术重点仍全量列(重点不分章,是全局背景;只难点做聚焦)
+        if 重点:
+            lines.append("项目技术重点(全局背景,供本章参考)：")
+            for r in 重点[:5]:
+                t = _title_of(r)
+                if t and t != "?":
+                    lines.append(f"  · {t}")
+            lines.append("")
+    else:
+        # 降级:无 chapter_narrative 或本章无聚焦 → 旧的全量 dump(行为不变)
+        if 重点:
+            lines.append("技术重点：")
+            for r in 重点[:5]:
+                t = _title_of(r)
+                if t and t != "?":
+                    lines.append(f"  · {t}")
+            lines.append("")
+        if 难点:
+            lines.append("施工难点：")
+            for n in 难点[:5]:
+                t = _title_of(n)
+                if t and t != "?":
+                    lines.append(f"  · {t}")
+            lines.append("")
 
     # 关键岗位
     if personnel:

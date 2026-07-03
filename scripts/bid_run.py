@@ -58,6 +58,7 @@ STEPS = [
     "chart_specs",   # bid_chart_specs.py (从 chapter_plan 派生 chart_specs.json)
     "write",         # bid_writer.py
     "review",        # bid_reviewer.py
+    "coherence_pass",# bid_coherence_pass.py (连贯性工序C:跨章引用编织+重复检测+矛盾修复,assemble 前)
     "assemble",      # bid_assemble.py (--batch 批量 / 单份)
     "verify",        # bid_verify.py (组装产物验证门:封面/三家排版差异/页数硬顶)
     "compliance",    # bid_compliance.py (--all-variants 批量 / 单份)
@@ -182,6 +183,19 @@ def run_script(script: str, args: list[str], log) -> int:
 def detect_mode(tender_dir: Path) -> str:
     """返回 'batch' 或 'single'"""
     return "batch" if (tender_dir / "extracted" / "variants.json").exists() else "single"
+
+
+def variant_count(tender_dir: Path) -> int:
+    """读取 variants.json 中的有效变体数量；单变体无需相似度交叉检查。"""
+    vj = tender_dir / "extracted" / "variants.json"
+    if not vj.exists():
+        return 0
+    try:
+        payload = json.loads(vj.read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    variants = payload.get("variants", payload) if isinstance(payload, dict) else payload
+    return len(variants) if isinstance(variants, list) else 0
 
 
 def check_step2_ready(tender_dir: Path) -> tuple[bool, list[str]]:
@@ -466,6 +480,19 @@ def enforce_similarity_gate(tender_dir: Path, state: dict, log, max_retries: int
 def load_loop_policy() -> dict:
     from bid_common import get_bid_gen_home
     p = get_bid_gen_home() / "configs" / "bid_loop_policy.json"
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def load_coherence_config() -> dict:
+    """读 configs/bid_coherence.json(连贯性改进总开关)。
+
+    enabled=false 时所有工序不触发,管道行为与改动前完全一致(灰度安全)。
+    """
+    from bid_common import get_bid_gen_home
+    p = get_bid_gen_home() / "configs" / "bid_coherence.json"
     try:
         return json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -1141,6 +1168,11 @@ def run_pipeline(tender_dir: Path, args, log) -> int:
     if loop_mode:
         log.info("loop-mode 启用: verify/compliance/assemble 门禁自动重试 + 预算熔断")
 
+    # 连贯性主线注入(散装→茅台改进):总开关 + 各工序开关
+    coh_cfg = load_coherence_config()
+    if coh_cfg.get("enabled"):
+        log.info("coherence 启用: 工序A(deployment/plan/writer) + 工序B(chapter_intro) + 工序C(coherence_pass)")
+
     # 决定要跑哪些步骤
     mode = detect_mode(tender_dir) if (ext / "variants.json").exists() or args.batch else "single"
     # --batch 强制批量（需要先 variants）
@@ -1224,6 +1256,18 @@ def run_pipeline(tender_dir: Path, args, log) -> int:
             if code not in (0, 1):
                 log.warning(f"  difficulty_synthesize 失败 code={code},"
                             f"brain 第 3/4 节将走旧逻辑")
+
+            # 1.5 deployment_synthesize (连贯性主线注入工序A1;依赖 difficulty,被 plan 消费)
+            # config bid_coherence.json enabled=false 时跳过(灰度)
+            coh_cfg = load_coherence_config()
+            if coh_cfg.get("enabled"):
+                dcode = run_script("bid_deployment_synthesize.py",
+                                   [str(tender_dir), "--force"], log)
+                if dcode not in (0, 1):
+                    log.warning(f"  deployment_synthesize 失败 code={dcode},"
+                                f"连贯性主线降级(plan/writer 走旧逻辑)")
+            else:
+                log.info("  coherence 未启用(bid_coherence.json enabled=false),跳过 deployment_synthesize")
 
             # 2. brain_translate
             code = run_script("bid_brain_translate.py",
@@ -1343,7 +1387,15 @@ def run_pipeline(tender_dir: Path, args, log) -> int:
                 if args.force:
                     cmd.append("--force")
                 code = run_script("bid_skeleton_extract.py", cmd, log)
-                # 骨架提取失败 ≠ 流程中止;只警告,Step 2 校验时再提示
+                # bid_skeleton_extract.py: 0=通过, 1=已产出但有警告, 2=硬失败。
+                if code == 1:
+                    log.warning(
+                        "  skeleton 提取完成但有警告，继续往下走。"
+                        "请结合 extracted/skeleton_extract.log 人工核对。"
+                    )
+                    mark_step(state, step, "ok", exit_code=1, note="warnings")
+                    continue
+                # 骨架硬失败 ≠ 流程中止;只警告,Step 2 校验时再提示
                 if code != 0:
                     log.warning(
                         f"  skeleton 提取退出码 {code}(警告级,继续往下走)。"
@@ -1447,6 +1499,10 @@ def run_pipeline(tender_dir: Path, args, log) -> int:
                 if code == 0:
                     log.info("  post-writer: 自动修正 H1 字面...")
                     run_script("bid_h1_fix.py", [str(tender_dir)], log)
+                    # 连贯性工序B:重写每章引言回指主线(coherence config 控制)
+                    if coh_cfg.get("enabled") and (coh_cfg.get("chapter_intro", {}) or {}).get("enabled", True):
+                        log.info("  post-writer: 连贯性工序B 章首引言重写...")
+                        run_script("bid_chapter_intro.py", [str(tender_dir)], log)
             elif step == "review":
                 cmd = [str(tender_dir)]
                 if mode == "single":
@@ -1462,6 +1518,18 @@ def run_pipeline(tender_dir: Path, args, log) -> int:
                     else:
                         # 门禁通过 → moderate/minor 不阻断，强制 code=0 继续
                         code = 0
+            elif step == "coherence_pass":
+                # 连贯性工序C:assemble 前跨章勾兑(引用编织+重复检测+矛盾修复)
+                # coherence config 未启用时直接 skip(灰度)
+                if not coh_cfg.get("enabled") or not (coh_cfg.get("coherence_pass", {}) or {}).get("enabled", True):
+                    log.info("  coherence_pass 未启用,跳过")
+                    mark_step(state, step, "skip")
+                    continue
+                code = run_script("bid_coherence_pass.py", [str(tender_dir)], log)
+                # 工序C 失败不阻断 assemble(只警告,降级为"未勾兑")
+                if code != 0:
+                    log.warning(f"  coherence_pass 退出码 {code},降级跳过(不阻断 assemble)")
+                    code = 0
             elif step == "assemble":
                 cmd = [str(tender_dir / "output")]
                 if mode == "batch":
@@ -1494,13 +1562,18 @@ def run_pipeline(tender_dir: Path, args, log) -> int:
                     if enforce_compliance_gate(tender_dir, mode, state, log, loop_policy):
                         code = 0
             elif step == "similarity":
-                code = run_script("bid_similarity.py", [str(tender_dir)], log)
-                if not args.force_continue:
-                    if not enforce_similarity_gate(tender_dir, state, log):
-                        log.error("similarity gate 未通过，abort")
-                        mark_step(state, step, "fail", error="similarity gate failed")
-                        save_state(state_path, state)
-                        return 1
+                n_variants = variant_count(tender_dir)
+                if n_variants < 2:
+                    log.info(f"  仅 {n_variants} 个 variant，跳过 similarity 交叉检查")
+                    code = 0
+                else:
+                    code = run_script("bid_similarity.py", [str(tender_dir)], log)
+                    if not args.force_continue:
+                        if not enforce_similarity_gate(tender_dir, state, log):
+                            log.error("similarity gate 未通过，abort")
+                            mark_step(state, step, "fail", error="similarity gate failed")
+                            save_state(state_path, state)
+                            return 1
             elif step == "expert_review":
                 # 评标专家：对照评分表逐项瑕疵制打分 + 符合性/跨章一致性，只出报告，恒不阻断
                 code = run_script("bid_expert_review.py", [str(tender_dir)], log)

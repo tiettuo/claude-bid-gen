@@ -55,8 +55,10 @@ The pipeline is the ordered `STEPS` list in [scripts/bid_run.py](scripts/bid_run
 ```
 extract → template → facts → derive → skeleton → special → input_assemble →
 fingerprint → variants → plan_variants → chart_specs → write → review →
-assemble → verify → compliance → similarity → summary
+coherence_pass → assemble → verify → compliance → similarity → summary
 ```
+
+> **连贯性主线注入(散装→茅台)**:`coherence_pass` 是可选工序(受 `configs/bid_coherence.json enabled` 开关控制,默认 off)。启用后还会触发工序A(`deployment_synthesize` 在 Step2 链 + plan 派生 `chapter_narrative.json` + writer Block1 难点精准注入)和工序B(post-writer `bid_chapter_intro` 重写引言回指主线)。详见 [memory/feedback_bid_coherence.md](memory/feedback_bid_coherence.md)。
 
 Two layers coordinate this:
 

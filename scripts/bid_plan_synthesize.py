@@ -381,17 +381,15 @@ def score_item_subitems(
     score = item.get("score") or 0
 
     target_count = _score_item_subitem_count(title, criteria, score, work_complexity)
+    context = f"{title} {criteria} {project_brief}"
+    project_objects = _project_object_subitems(context)
 
     if "施工方案" in title or "技术措施" in title:
-        candidates = [
-            "工程特点、重难点及总体技术路线",
-            "施工部署、作业区划分及工序衔接",
-            "附属工程、铺装及景观节点施工方法",
-            "木栈道、台阶、围墙及标识小品施工措施",
-            "园林绿化、给排水及电气工程技术措施",
-            "高海拔、抗冻及村庄施工专项控制",
-            "质量标准、责任分解及违约承诺",
-        ]
+        candidates = (
+            ["工程特点、重难点及总体技术路线", "施工部署、作业区划分及工序衔接"]
+            + project_objects
+            + ["施工现场周边环境保护措施", "质量标准、责任分解及违约承诺"]
+        )
     elif "质量" in title:
         candidates = [
             "质量目标、责任体系及岗位分工",
@@ -405,7 +403,7 @@ def score_item_subitems(
             "安全文明施工目标与责任体系",
             "关键地点、关键工序安全控制",
             "机械用电、临边作业及消防管理",
-            "高原健康保障与应急处置",
+            "校园施工隔离、防坠及应急处置",
             "安全文明施工标准及违约承诺",
         ]
     elif "环保" in title or "环境" in title:
@@ -421,13 +419,14 @@ def score_item_subitems(
             "总工期安排与施工阶段划分",
             "关键线路、关键节点及横道计划",
             "劳动力、材料、机械与进度协同",
-            "高原气候、运输条件下的纠偏措施",
+            "雨季、校园作业条件下的进度纠偏措施",
             "工期违约责任承诺",
         ]
-    elif "劳动力" in title or "机械" in title:
+    elif any(k in title for k in ("劳动力", "机械", "资源配备", "设备配置")):
         candidates = [
+            "施工组织架构与岗位职责",
             "劳动力投入计划及专业班组配置",
-            "机械设备投入计划及高原降效配置",
+            "机械设备投入计划及进退场安排",
             "材料供应、运输组织及储备计划",
             "劳动力与机械动态调配措施",
             "资源投入保证措施",
@@ -461,6 +460,32 @@ def score_item_subitems(
             "covers": [criteria[:60]] if criteria else [],
         })
     return out
+
+
+def _project_object_subitems(context: str) -> list[str]:
+    """按项目真实对象生成施工方案子项，避免把历史项目专属词写入新项目。"""
+    candidates: list[str] = []
+    if "防坠长廊" in context:
+        candidates.extend([
+            "防坠长廊钢柱、钢架制作安装措施",
+            "防坠长廊网面及耐力板安装措施",
+        ])
+    if any(k in context for k in ("顶面遮雨", "耐力板", "遮雨")):
+        candidates.append("顶面遮雨系统与节点防水施工措施")
+    if any(k in context for k in ("铁丝网", "网面")):
+        candidates.append("铁丝网面安装及边缘收口控制")
+    if any(k in context for k in ("基础", "混凝土", "垫层", "土方", "回填")):
+        candidates.append("土方开挖、基础及混凝土工程施工方法")
+    if any(k in context for k in ("沥青", "路缘石", "路面", "草皮")):
+        candidates.append("路面拆除恢复及场地修复措施")
+
+    if not candidates:
+        candidates = [
+            "主要分部分项工程施工方法",
+            "关键节点施工技术控制",
+            "既有设施保护及恢复措施",
+        ]
+    return list(dict.fromkeys(candidates))
 
 
 def _score_item_subitem_count(title: str, criteria: str, score: float, work_complexity: int = 0) -> int:
@@ -514,6 +539,26 @@ def _boq_work_complexity(ext: Path) -> int:
             continue
         roots.add(name.split("-", 1)[0])
     return len(roots)
+
+
+def _boq_item_brief(ext: Path, limit: int = 12) -> str:
+    """提取少量清单项目名称，供评分制子项规划识别真实施工对象。"""
+    boq_path = ext / "boq.json"
+    if not boq_path.exists():
+        return ""
+    try:
+        boq = json.loads(boq_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    names: list[str] = []
+    for cat in boq.get("categories", []) or []:
+        for item in (cat.get("items") or []):
+            name = str(item.get("name") or item.get("project_name") or "").strip()
+            if name and name not in names:
+                names.append(name)
+            if len(names) >= limit:
+                return "、".join(names)
+    return "、".join(names)
 
 
 # ─── 渲染 ──────────────────────────────────────────────────────────────
@@ -681,6 +726,12 @@ def synthesize(tender_dir: Path, target_pages: int | None = None,
     eval_data = json.loads((ext / "evaluation_method.json").read_text(encoding="utf-8"))
     outline_data = json.loads((ext / "mandatory_outline.json").read_text(encoding="utf-8"))
 
+    # 连贯性主线:加载 deployment_outline(工序A1 产出,可能不存在→None,下游降级)
+    deploy_path = ext / "deployment_outline.json"
+    deploy_or_none = (
+        json.loads(deploy_path.read_text(encoding="utf-8")) if deploy_path.exists() else None
+    )
+
     # 取项目基础信息
     project_name = _val(facts, "project_name", "")
     control_price = _val(facts, "control_price")
@@ -742,10 +793,13 @@ def synthesize(tender_dir: Path, target_pages: int | None = None,
             outline_subs_map[t.get("title_original", "")] = t.get("subsections_original", []) or []
 
     # 项目简介(给 LLM 上下文,200 字内)
+    scope_val = facts.get("project_scope", {}).get("value", "") if isinstance(facts.get("project_scope"), dict) else facts.get("project_scope", "")
+    boq_brief = _boq_item_brief(ext)
     project_brief = (
         f"{facts.get('project_name', {}).get('value', '') if isinstance(facts.get('project_name'), dict) else facts.get('project_name', '')} "
-        f"控制价 {control_price} 元 / 工期 {duration_days} 天 / 类型 {project_type} / 评标 {eval_method}"
-    )[:200]
+        f"控制价 {control_price} 元 / 工期 {duration_days} 天 / 类型 {project_type} / 评标 {eval_method} / "
+        f"范围 {scope_val} / 清单 {boq_brief}"
+    )[:600]
 
     # 并行规划子项:每章一次 LLM 调用,16 章串行 ~80s → 并行 ~8s
     plan_tasks: list[dict] = []
@@ -840,7 +894,238 @@ def synthesize(tender_dir: Path, target_pages: int | None = None,
 
     out_path.write_text(md, encoding="utf-8")
     log.info(f"  ✓ 写入 {out_path.name} ({len(md):,} 字符)")
+
+    # 连贯性主线注入(工序 A2):若 deployment_outline.json 存在,派生每章叙事职责
+    # → extracted/chapter_narrative.json。writer Block1 据此做难点精准注入,
+    # chapter_intro 据此写引言回指。文件不存在时 writer 走旧的全量 dump,完全降级安全。
+    try:
+        _derive_chapter_narrative(ext, chapters_meta, ext / "deployment_outline.json", log)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"  chapter_narrative 派生失败(非阻断,writer 将走旧逻辑): {e}")
+
+    # 第0章「编制总说明」(工序 A0):基于 deployment_outline 生成叙事锚点章。
+    # 不调 LLM,纯模板拼接。config intro_chapter.enabled=false 时不生成。
+    try:
+        _generate_intro_chapter(ext, facts, eval_data, deploy_or_none, log)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"  第0章生成失败(非阻断): {e}")
+
     return 0
+
+
+def _derive_chapter_narrative(
+    ext: Path,
+    chapters_meta: list[dict],
+    deployment_path: Path,
+    log,
+) -> None:
+    """工序 A2: 读 deployment_outline.json,为每章派生「叙事维度 + 难点聚焦 + 主线回指」。
+
+    输出 extracted/chapter_narrative.json:
+      {
+        "_deployment_statement": "...(全文主线声明,chapter_intro 回指用)",
+        "chapters": {
+          "01": {
+            "narrative_dimension": "施工总目标",
+            "difficulty_focus": ["<难点标题1>", "<难点标题2>"],
+            "mainline_echo": "★ 本章叙事职责:从「施工总目标」维度展开,呼应部署纲领。"
+          },
+          ...
+        }
+      }
+
+    匹配逻辑:对每个章节标题,用 bigram 重合度(复用 bid_run._pick_chapter_for_keyword
+    同款算法)在 difficulty_to_dimension 里找该章最该承载的难点;找不全则该章聚焦为空
+    (writer 降级到无聚焦)。narrative_dimension 取该章聚焦难点的主维度众数,无聚焦时
+    按章节序号在 5 维里轮转兜底。
+    """
+    if not deployment_path.exists():
+        log.info("  deployment_outline.json 不存在,跳过 chapter_narrative 派生(走旧逻辑)")
+        return
+
+    deploy = json.loads(deployment_path.read_text(encoding="utf-8"))
+    statement = deploy.get("deployment_statement", "")
+    d2d = deploy.get("difficulty_to_dimension", []) or []
+    if not statement and not d2d:
+        log.info("  deployment_outline 为空,跳过 chapter_narrative 派生")
+        return
+
+    DEPLOY_DIMS = ["施工总目标", "施工区段划分", "施工总顺序", "资源统筹原则", "组织机构框架"]
+
+    def _bigram_score(probe: str, title: str) -> int:
+        p = "".join(c for c in probe if "一" <= c <= "鿿")
+        return sum(1 for i in range(len(p) - 1) if p[i:i + 2] in title)
+
+    chapters_out: dict[str, dict] = {}
+    for idx, ch in enumerate(chapters_meta):
+        num = f"{ch.get('chapter_num', idx + 1):02d}" if isinstance(
+            ch.get("chapter_num"), int
+        ) else f"{idx + 1:02d}"
+        title = ch.get("title", "")
+
+        # 该章匹配哪些难点:difficulty 标题与章节标题 bigram 重合
+        matched = []
+        best_dim = None
+        best_score = 0
+        for d in d2d:
+            if not isinstance(d, dict):
+                continue
+            diff_title = d.get("difficulty", "") or ""
+            if not diff_title:
+                continue
+            s = _bigram_score(diff_title, title)
+            if s > 0:
+                matched.append(diff_title)
+            # 跟踪该章最匹配难点的维度(用作 narrative_dimension)
+            if s > best_score:
+                best_score = s
+                best_dim = d.get("primary_dimension")
+
+        # 无匹配 → 按章节序号在 5 维轮转兜底(保证每章有维度,叙事不悬空)
+        if not best_dim or best_dim not in DEPLOY_DIMS:
+            best_dim = DEPLOY_DIMS[idx % len(DEPLOY_DIMS)]
+
+        # 聚焦难点去重 + 限 3 条(避免 prompt 膨胀,控 C4)
+        seen = set()
+        focus = []
+        for m in matched:
+            if m not in seen:
+                seen.add(m)
+                focus.append(m)
+            if len(focus) >= 3:
+                break
+
+        echo = (
+            f"★ 本章叙事职责:从「{best_dim}」维度展开"
+            + (f",重点回应难点「{focus[0]}」" if focus else ",呼应总体部署纲领")
+            + "。"
+        )
+        chapters_out[num] = {
+            "narrative_dimension": best_dim,
+            "difficulty_focus": focus,
+            "mainline_echo": echo,
+        }
+
+    payload = {
+        "_deployment_statement": statement,
+        "_deployment_dimensions": deploy.get("deployment_dimensions", []),
+        "chapters": chapters_out,
+    }
+    out = ext / "chapter_narrative.json"
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    n_with_focus = sum(1 for c in chapters_out.values() if c["difficulty_focus"])
+    log.info(
+        f"  ✓ 写入 chapter_narrative.json: {len(chapters_out)} 章 / "
+        f"{n_with_focus} 章有难点聚焦 / 主线声明 {len(statement)} 字"
+    )
+
+
+def _generate_intro_chapter(
+    ext: Path,
+    facts: dict,
+    eval_data: dict,
+    deploy: dict | None,
+    log,
+) -> None:
+    """工序 A0: 生成第0章「编制总说明」(叙事锚点章,不调 LLM,纯模板拼接)。
+
+    内容:
+      §一 编制依据(从 facts + 评标办法派生)
+      §二 项目概况与总体部署 ← 叙事锚点(deployment_statement + 5 维部署)
+      §三 施工主线与重点难点响应 ← 贯穿声明(难点→章节响应分布表)
+      §四 编制说明(章节数/字数概要)
+
+    不计入页数预算(类似目录页,是编制说明)。
+    config bid_coherence.json intro_chapter.enabled=false 时不生成。
+    """
+    # config 开关
+    try:
+        from bid_common import get_bid_gen_home
+        cfg_path = get_bid_gen_home() / "configs" / "bid_coherence.json"
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
+    except Exception:
+        cfg = {}
+    if not (cfg.get("intro_chapter", {}) or {}).get("enabled", True):
+        log.info("  intro_chapter.enabled=false,跳过第0章生成")
+        return
+
+    # 无 deployment_outline → 无法生成有意义的部署纲领,跳过(降级)
+    if not deploy or not deploy.get("deployment_statement"):
+        log.info("  deployment_outline 缺失或无 deployment_statement,跳过第0章")
+        return
+
+    statement = deploy.get("deployment_statement", "")
+    dims = deploy.get("deployment_dimensions", []) or []
+    d2d = deploy.get("difficulty_to_dimension", []) or []
+
+    # §一 编制依据
+    def _fv(key):
+        v = facts.get(key)
+        if isinstance(v, dict):
+            return str(v.get("value", "") or "")
+        return str(v or "")
+
+    project_name = _fv("project_name")
+    project_scope = _fv("project_scope")
+    eval_method = eval_data.get("evaluation_method", "")
+
+    lines = ["# 编制总说明", ""]
+    lines.append("## 一、编制依据")
+    lines.append("")
+    lines.append(f"本施工组织设计依据以下文件编制:")
+    lines.append(f"- {project_name or '本项目'}招标文件及施工图纸")
+    lines.append(f"- 现行国家、行业、地方有关施工及验收规范、标准")
+    lines.append(f"- 招标文件规定的{'评分办法' if eval_method == 'score' else '合格制'}评审要求")
+    lines.append(f"- 项目现场实际条件与本企业同类工程施工经验")
+    lines.append("")
+
+    # §二 项目概况与总体部署(叙事锚点)
+    lines.append("## 二、项目概况与总体部署")
+    lines.append("")
+    if project_name or project_scope:
+        lines.append(f"**项目概况：** {project_name}。{project_scope}")
+        lines.append("")
+    lines.append("**总体施工部署纲领（全文施工主线）：**")
+    lines.append("")
+    lines.append(f"> {statement}")
+    lines.append("")
+    if dims:
+        lines.append("本项目总体施工部署围绕以下五个维度展开，后续各章节均服从此部署纲领：")
+        lines.append("")
+        for d in dims:
+            if isinstance(d, dict):
+                lines.append(f"- **{d.get('dim', '')}**：{d.get('summary', '')}")
+        lines.append("")
+
+    # §三 施工主线与重点难点响应(贯穿声明)
+    lines.append("## 三、施工主线与重点难点响应")
+    lines.append("")
+    lines.append("本项目以总体施工部署为纲领、以施工进度为主线贯穿全文。针对已识别的重点难点，")
+    lines.append("各章节响应分布如下（确保每个难点均有专章系统性回应，杜绝泛泛而谈）：")
+    lines.append("")
+    if d2d:
+        lines.append("| 序号 | 重点/难点 | 主要承载维度 | 响应角度 |")
+        lines.append("|---|---|---|---|")
+        for i, d in enumerate(d2d, 1):
+            if not isinstance(d, dict):
+                continue
+            lines.append(
+                f"| {i} | {d.get('difficulty', '')} | "
+                f"{d.get('primary_dimension', '')} | {d.get('angle', '')} |"
+            )
+        lines.append("")
+
+    # §四 编制说明
+    lines.append("## 四、编制说明")
+    lines.append("")
+    lines.append("本施工组织设计严格按招标文件规定的章节大纲/评分表组织，各章节标题与评审要点")
+    lines.append("一一对应。文中涉及的所有工期、质量、安全、环保承诺均为本企业的郑重承诺。")
+    lines.append("")
+
+    md = "\n".join(lines)
+    out = ext / "00_编制总说明.md"
+    out.write_text(md, encoding="utf-8")
+    log.info(f"  ✓ 写入第0章 {out.name} ({len(md):,} 字符,不计入页数预算)")
 
 
 def _figure_count(topic: str) -> int:
