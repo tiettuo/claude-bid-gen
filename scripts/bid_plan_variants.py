@@ -590,9 +590,13 @@ def main() -> int:
     # 1. 每变体:章节 = 基准(不变换),只缩放字数;并分配切分维度
     variant_structures: list[tuple[dict, list[dict], tuple[str, str]]] = []
     for i, variant in enumerate(variants):
-        # 变体缩放全部 ≤ 1.0:基准即上限,任何变体都不超基准字数
-        # (页数硬顶项目防超顶;字数仍有差异 → 反串标)
-        v_scale = user_scale * (1.0 + [0.0, -0.05, -0.02, -0.07, -0.04][i % 5])
+        # per-variant 目标页数(variant.target_pages 设了则按它大幅缩放,
+        # 支持同项目多家单位不同厚度方案;未设则沿用原 ≤基准 反串标微差逻辑)
+        vp = variant.get("target_pages")
+        if vp:
+            v_scale = vp / base_pages
+        else:
+            v_scale = user_scale * (1.0 + [0.0, -0.05, -0.02, -0.07, -0.04][i % 5])
         chapters = build_variant_chapters(base_chapters, variant, v_scale)
         verify_scoring_coverage(chapters, base_score_items, log)
         strategy = assign_strategy(i)
