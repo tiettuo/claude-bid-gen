@@ -60,6 +60,9 @@ STEPS = [
     "review",        # bid_reviewer.py
     "coherence_pass",# bid_coherence_pass.py (连贯性工序C:跨章引用编织+重复检测+矛盾修复,assemble 前)
     "assemble",      # bid_assemble.py (--batch 批量 / 单份)
+    "visual_style",  # bid_officecli_style.py (OfficeCLI 可重放视觉编排)
+    "visual_render", # bid_visual_render.py (结构快照 + 全篇联系表)
+    "visual_verify", # bid_visual_similarity.py (感知相似度;首期 warning-only)
     "verify",        # bid_verify.py (组装产物验证门:封面/三家排版差异/页数硬顶)
     "compliance",    # bid_compliance.py (--all-variants 批量 / 单份)
     "similarity",    # bid_similarity.py (批量专用)
@@ -176,6 +179,14 @@ def run_script(script: str, args: list[str], log) -> int:
         # 无 tender_dir 时回退到原行为(如 doctor 模式)
         proc = subprocess.run(cmd)
         return proc.returncode
+
+
+def run_visual_style(tender_dir: Path, log, variant: str = "") -> int:
+    """重装 DOCX 后立即重放视觉 profile，避免自动修复把视觉层覆盖掉。"""
+    cmd = [str(tender_dir)]
+    if variant and variant != "单份":
+        cmd += ["--variant", variant]
+    return run_script("bid_officecli_style.py", cmd, log)
 
 
 # ─── 模式判定 ─────────────────────────────────────────────────────────
@@ -442,7 +453,9 @@ def enforce_similarity_gate(tender_dir: Path, state: dict, log, max_retries: int
                     "at": datetime.now().isoformat(timespec="seconds")
                 })
                 run_script("bid_reviewer.py", [str(tender_dir), "--variant", vid], log)
-                run_script("bid_assemble.py", [str(tender_dir), "--variant", vid], log)
+                acode = run_script("bid_assemble.py", [str(tender_dir / "output"), "--variant", vid], log)
+                if acode == 0:
+                    run_visual_style(tender_dir, log, vid)
                 continue
 
             # 分支 B：段落/整体超阈 → 只重写最差章节
@@ -463,7 +476,9 @@ def enforce_similarity_gate(tender_dir: Path, state: dict, log, max_retries: int
                 "reason": "content", "attempt": n, "exit_code": code,
                 "at": datetime.now().isoformat(timespec="seconds")
             })
-            run_script("bid_assemble.py", [str(tender_dir), "--variant", vid], log)
+            acode = run_script("bid_assemble.py", [str(tender_dir / "output"), "--variant", vid], log)
+            if acode == 0:
+                run_visual_style(tender_dir, log, vid)
 
         if not any_rewrite:
             break
@@ -524,8 +539,14 @@ def enforce_verify_gate(tender_dir: Path, state: dict, log, policy: dict) -> boo
 
     def _reassemble(vid: str) -> int:
         if vid and vid != "单份":
-            return run_script("bid_assemble.py", [str(tender_dir), "--variant", vid], log)
-        return run_script("bid_assemble.py", [str(output)], log)
+            code = run_script("bid_assemble.py", [str(output), "--variant", vid], log)
+        else:
+            code = run_script("bid_assemble.py", [str(output)], log)
+        if code == 0:
+            vcode = run_visual_style(tender_dir, log, vid)
+            if vcode != 0:
+                log.warning(f"[{vid or '单份'}] 视觉编排重放失败，保留重装产物继续")
+        return code
 
     for round_idx in range(1, max_rounds + 1):
         report = _read_verify_report(output)
@@ -725,9 +746,11 @@ def enforce_compliance_gate(tender_dir: Path, mode: str, state: dict, log, polic
             # 重写后必须复扫(占位符/参数泄漏历史上正是重写引入的)+ 重装(docx 已 stale)
             run_script("bid_reviewer.py", rcmd, log)
             if vid != "单份":
-                run_script("bid_assemble.py", [str(tender_dir), "--variant", vid], log)
+                acode = run_script("bid_assemble.py", [str(output), "--variant", vid], log)
             else:
-                run_script("bid_assemble.py", [str(output)], log)
+                acode = run_script("bid_assemble.py", [str(output)], log)
+            if acode == 0:
+                run_visual_style(tender_dir, log, vid)
             decisions.append({"gate": "compliance", "class": cls, "variant": vid,
                               "chapter": cn, "attempt": attempts[key], "exit_code": code,
                               "at": datetime.now().isoformat(timespec="seconds")})
@@ -971,7 +994,7 @@ def write_summary_reports(tender_dir: Path, mode: str, log) -> None:
 
 # ─── 健康检查 ────────────────────────────────────────────────────────
 
-REQUIRED_PKGS = ["pdfplumber", "openpyxl", "docx", "openai"]
+REQUIRED_PKGS = ["pdfplumber", "openpyxl", "docx", "openai", "PIL"]
 OPTIONAL_PKGS = ["simhash", "datasketch", "jieba", "olefile", "fitz"]
 
 
@@ -1004,7 +1027,9 @@ def doctor(tender_dir: Path | None) -> int:
               "bid_skeleton_extract.py", "bid_special_extract.py", "bid_input_assemble.py",
               "bid_fingerprint.py", "bid_variants.py",
               "bid_writer.py", "bid_reviewer.py", "bid_assemble.py", "bid_compliance.py",
-              "bid_similarity.py", "bid_expert_review.py", "bid_llm_client.py", "bid_run.py"]:
+              "bid_officecli_style.py", "bid_visual_render.py", "bid_visual_similarity.py",
+              "bid_visual_rules.py", "bid_similarity.py", "bid_expert_review.py",
+              "bid_llm_client.py", "bid_run.py"]:
         p = SCRIPTS / s
         if p.exists():
             print(f"  {OK} {s}")
@@ -1058,6 +1083,24 @@ def doctor(tender_dir: Path | None) -> int:
             issues.append("macOS: brew install pandoc / Ubuntu: apt-get install pandoc")
     except Exception as e:
         print(f"  {WARN} pandoc 检测异常: {e}")
+
+    # 1.5 OfficeCLI（装配后视觉编排的硬依赖）
+    try:
+        officecli = shutil.which("officecli")
+        fallback = Path.home() / ".local" / "bin" / "officecli"
+        if not officecli and fallback.exists():
+            officecli = str(fallback)
+        if officecli:
+            proc = subprocess.run([officecli, "--version"], capture_output=True,
+                                  text=True, timeout=10)
+            version = proc.stdout.strip() if proc.returncode == 0 else "unknown"
+            print(f"  {OK} officecli — {version}")
+        else:
+            print(f"  {FAIL} officecli 未安装(视觉编排会失败)")
+            issues.append("安装 OfficeCLI: curl -fsSL https://d.officecli.ai/install.sh | bash")
+    except Exception as e:
+        print(f"  {FAIL} officecli 检测异常: {e}")
+        issues.append("修复 OfficeCLI 安装或 PATH")
 
     # 2. 中文字体(fc-list)
     try:
@@ -1211,12 +1254,13 @@ def run_pipeline(tender_dir: Path, args, log) -> int:
             break
 
     plan = all_steps[start_i:end_i]
-    # P0.7: 如果 assemble 在计划中，强制追加 compliance（不可跳过）
-    if "assemble" in plan and "compliance" not in plan:
-        ci = all_steps.index("compliance")
-        if ci > all_steps.index("assemble"):
-            plan = list(plan) + ["compliance"]
-            log.warning("compliance 被 --to 截断，已强制追加（P0.7）")
+    # assemble 之后视觉层与 compliance 均不可被 --to assemble 截断。
+    if "assemble" in plan:
+        required_after_assemble = ["visual_style", "visual_render", "visual_verify", "compliance"]
+        missing = [s for s in required_after_assemble if s not in plan]
+        if missing:
+            plan = list(plan) + missing
+            log.warning(f"assemble 后置步骤被 --to 截断，已强制追加: {', '.join(missing)}")
     log.info(f"模式: {mode}  计划执行: {' → '.join(plan)}")
 
     if args.dry_run:
@@ -1538,6 +1582,23 @@ def run_pipeline(tender_dir: Path, args, log) -> int:
                 if code != 0 and loop_mode and not args.force_continue:
                     if enforce_assemble_gate(tender_dir, cmd, state, log, loop_policy):
                         code = 0
+            elif step == "visual_style":
+                code = run_script("bid_officecli_style.py", [str(tender_dir)], log)
+                if code != 0:
+                    # 视觉层失败(如 officecli 未装)不阻断管道,与 visual_render/
+                    # visual_verify 的降级哲学一致——DOCX 本身仍有效,只是没套视觉 profile
+                    log.warning("视觉编排未应用（officecli 不可用或执行失败），保留组装产物继续")
+                    code = 0
+            elif step == "visual_render":
+                code = run_script("bid_visual_render.py", [str(tender_dir)], log)
+                if code != 0:
+                    log.warning("视觉联系表生成不完整，保留结构校验结果并继续")
+                    code = 0
+            elif step == "visual_verify":
+                vcode = run_script("bid_visual_similarity.py", [str(tender_dir)], log)
+                if vcode == 1:
+                    log.warning("视觉相似度有告警（首期 warning-only），继续流水线")
+                code = 0 if vcode in (0, 1) else vcode
             elif step == "verify":
                 # 组装产物验证门:exit 2=硬失败(封面缺失/三家排版雷同/超硬顶)→ abort
                 vcode = run_script("bid_verify.py", [str(tender_dir)], log)

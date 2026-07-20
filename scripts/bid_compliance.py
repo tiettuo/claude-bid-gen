@@ -20,6 +20,7 @@ import sys
 import re
 import json
 import logging
+from datetime import date, datetime as _dt
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -41,6 +42,12 @@ RESPONSE_RULES = [
     ("暗标响应", r"(技术暗标|暗标格式)", False),
     ("双代号网络图", r"(双代号网络图)", False),
 ]
+
+
+def _normalize_heading_title(title: str) -> str:
+    """章节标题比较口径：忽略开头展示标记和空白，但不吞掉真实标题差异。"""
+    title = re.sub(r"^[\s★☆⭐\ufe0f]+", "", title or "")
+    return re.sub(r"\s+", "", title)
 
 
 
@@ -159,13 +166,89 @@ def _schedule_span(tasks: list) -> int:
     return (max(ds) - min(ds)).days + 1 if len(ds) >= 2 else 0
 
 
-def check_schedule_duration(md_files: list[Path], tender_days: int, log: logging.Logger) -> dict:
+def _parse_abs_date(value) -> date | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return None
+    s = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"):
+        try:
+            return _dt.strptime(s[:10], fmt).date()
+        except ValueError:
+            pass
+    m = re.match(r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日?", s)
+    if m:
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+    return None
+
+
+def _schedule_absolute_dates(data: dict) -> list[tuple[str, date]]:
+    hits: list[tuple[str, date]] = []
+    for key in ("startDate", "endDate", "start_date", "end_date", "baseline_date"):
+        d = _parse_abs_date(data.get(key))
+        if d:
+            hits.append((key, d))
+    project = data.get("project") or {}
+    if isinstance(project, dict):
+        for key in ("start_date", "end_date", "baseline_date"):
+            d = _parse_abs_date(project.get(key))
+            if d:
+                hits.append((f"project.{key}", d))
+    for idx, task in enumerate(data.get("tasks") or data.get("schedule") or [], 1):
+        if not isinstance(task, dict):
+            continue
+        for key in ("start", "end", "start_date", "end_date", "begin", "finish"):
+            d = _parse_abs_date(task.get(key))
+            if d:
+                hits.append((f"tasks[{idx}].{key}", d))
+    for idx, ms in enumerate(data.get("milestones") or [], 1):
+        if not isinstance(ms, dict):
+            continue
+        d = _parse_abs_date(ms.get("date"))
+        if d:
+            hits.append((f"milestones[{idx}].date", d))
+    return hits
+
+
+_SCHEDULE_CONTEXT_RE = re.compile(r"(开工|竣工|施工|进度|阶段|计划|工期|浇筑|养护|验收|完成|里程碑)")
+_NON_SCHEDULE_CONTEXT_RE = re.compile(r"(投标|比选公告|公告发布|发布时间|获取|养老保险|造价信息|信息价)")
+_TEXT_DATE_RE = re.compile(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{4}年\s*\d{1,2}月\s*\d{1,2}日")
+
+
+def _text_schedule_dates_before(text: str, earliest_start: date) -> list[tuple[int, str, date]]:
+    hits: list[tuple[int, str, date]] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if not _SCHEDULE_CONTEXT_RE.search(line):
+            continue
+        if _NON_SCHEDULE_CONTEXT_RE.search(line):
+            continue
+        for m in _TEXT_DATE_RE.finditer(line):
+            d = _parse_abs_date(m.group(0))
+            if d and d < earliest_start:
+                hits.append((lineno, line.strip()[:120], d))
+    return hits
+
+
+def check_schedule_duration(
+    md_files: list[Path], tender_days: int, log: logging.Logger,
+    earliest_start: date | None = None,
+) -> dict:
     """工期废标门。评委按双代号网络图算关键线路,activities 最长路径 > 招标工期即超期废标。
     同时查 schedule 横道跨度、散文声明的"总工期 N 天"。"""
-    result = {"tender_days": tender_days, "violations": [], "warnings": [], "checked": 0}
-    if not tender_days or tender_days <= 0:
-        log.info("  工期门:招标工期未知,跳过")
-        return result
+    result = {
+        "tender_days": tender_days,
+        "earliest_start_date": earliest_start.isoformat() if earliest_start else None,
+        "violations": [],
+        "warnings": [],
+        "checked": 0,
+    }
+    has_tender_days = bool(tender_days and tender_days > 0)
+    if not has_tender_days:
+        log.info("  工期门:招标工期未知,仅检查绝对开工基准")
     json_re = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
     for md in md_files:
         text = md.read_text(encoding="utf-8", errors="ignore")
@@ -177,7 +260,7 @@ def check_schedule_duration(md_files: list[Path], tender_days: int, log: logging
             if d.get("type") == "aoa_network":
                 cp = _aoa_critical_path(d.get("activities") or [])
                 result["checked"] += 1
-                if cp > tender_days:
+                if has_tender_days and cp > tender_days:
                     result["violations"].append({
                         "file": md.name, "kind": "网络图关键线路", "value": cp, "limit": tender_days,
                         "detail": f"{md.name} 双代号网络图关键线路累加 {cp} 天 > 招标工期 {tender_days} 天(超期废标)"})
@@ -185,19 +268,44 @@ def check_schedule_duration(md_files: list[Path], tender_days: int, log: logging
                 span = _schedule_span(d.get("tasks") or [])
                 if span:
                     result["checked"] += 1
-                    if span > tender_days:
+                    if has_tender_days and span > tender_days:
                         result["violations"].append({
                             "file": md.name, "kind": "进度横道跨度", "value": span, "limit": tender_days,
                             "detail": f"{md.name} 进度横道图跨度 {span} 天 > 招标工期 {tender_days} 天"})
+                if earliest_start:
+                    for loc, abs_date in _schedule_absolute_dates(d):
+                        if abs_date < earliest_start:
+                            result["violations"].append({
+                                "file": md.name,
+                                "kind": "计划开工基准",
+                                "value": abs_date.isoformat(),
+                                "limit": earliest_start.isoformat(),
+                                "detail": (
+                                    f"{md.name} 进度图 {loc}={abs_date.isoformat()} "
+                                    f"早于投标截止后第5个工作日 {earliest_start.isoformat()}"
+                                ),
+                            })
+        if earliest_start:
+            for lineno, snippet, abs_date in _text_schedule_dates_before(text, earliest_start):
+                result["violations"].append({
+                    "file": md.name,
+                    "kind": "计划开工基准",
+                    "value": abs_date.isoformat(),
+                    "limit": earliest_start.isoformat(),
+                    "detail": (
+                        f"{md.name}:{lineno} 工期相关日期 {abs_date.isoformat()} "
+                        f"早于投标截止后第5个工作日 {earliest_start.isoformat()}：{snippet}"
+                    ),
+                })
         for pm in re.finditer(r"(?:总工期|计算工期)[^。\d]{0,6}(\d{2,3})\s*(?:日历)?天", text):
             val = int(pm.group(1))
-            if val > tender_days:
+            if has_tender_days and val > tender_days:
                 result["violations"].append({
                     "file": md.name, "kind": "声明总工期", "value": val, "limit": tender_days,
                     "detail": f"{md.name} 声明总工期 {val} 天 > 招标工期 {tender_days} 天"})
         for pm in re.finditer(r"合计\s*(\d{2,3})\s*天", text):
             val = int(pm.group(1))
-            if val > tender_days:
+            if has_tender_days and val > tender_days:
                 result["warnings"].append(
                     f"{md.name} 出现'合计{val}天'(>{tender_days}),确认是否为交叉作业压缩前的累加值,"
                     f"建议改述以免评委误读为关键线路超期")
@@ -207,7 +315,12 @@ def check_schedule_duration(md_files: list[Path], tender_days: int, log: logging
         for v in result["violations"]:
             log.error(f"    - {v['detail']}")
     else:
-        log.info(f"  工期门:已检 {result['checked']} 张进度图,关键线路/跨度均 ≤ {tender_days} 天 ✓")
+        msg = f"  工期门:已检 {result['checked']} 张进度图"
+        if has_tender_days:
+            msg += f",关键线路/跨度均 ≤ {tender_days} 天"
+        if earliest_start:
+            msg += f",绝对日期均不早于 {earliest_start.isoformat()}"
+        log.info(msg + " ✓")
     for w in result["warnings"]:
         log.warning(f"  工期门(提示): {w}")
     return result
@@ -553,9 +666,9 @@ def check_plan_alignment(
             m = re.search(r"^#\s+(.+?)\s*$", text, re.M)
             if m:
                 item["actual_title"] = m.group(1).strip()
-                # 字面一致判断：去掉空白后比较
-                norm_a = re.sub(r"\s+", "", item["actual_title"])
-                norm_b = re.sub(r"\s+", "", row["title"])
+                # 字面一致判断：去掉空白和展示星标后比较
+                norm_a = _normalize_heading_title(item["actual_title"])
+                norm_b = _normalize_heading_title(row["title"])
                 item["title_match"] = (norm_a == norm_b)
             # 字数下限：共享 bid_common.chapter_chars_floor（圈层理论 ±15%）
             threshold = chapter_chars_floor(row["target_chars"])
@@ -718,7 +831,16 @@ def _run_single(root: Path, chapter_dir: Path, variant_id: str) -> int:
         m = re.search(r"total_duration_days:\s*(\d+)", rules_text)
         if m:
             tender_days = int(m.group(1))
-    schedule_check = check_schedule_duration(md_files, tender_days, log)
+    earliest_start = None
+    derived_p = extracted / "project_derived.json"
+    if derived_p.exists():
+        try:
+            _dj = json.loads(derived_p.read_text(encoding="utf-8"))
+            _sc = _dj.get("schedule_constraints") or {}
+            earliest_start = _parse_abs_date(_sc.get("earliest_start_date") or _dj.get("schedule_start_date"))
+        except (json.JSONDecodeError, OSError, TypeError):
+            earliest_start = None
+    schedule_check = check_schedule_duration(md_files, tender_days, log, earliest_start=earliest_start)
 
     # 生成机读报告（JSON，供 Claude 读取）+ 人读报告（MD）
     reports_dir = output / "reports"

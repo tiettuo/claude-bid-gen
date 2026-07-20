@@ -1492,17 +1492,212 @@ def _as_day_offset(v):
     s = str(v).strip()
     if re.fullmatch(r"[Dd]?\d+", s):
         return int(re.sub(r"^[Dd]", "", s))
+    m = re.fullmatch(r"第\s*(\d+)\s*(?:天|日)", s)
+    if m:
+        return int(m.group(1))
     return None
 
 
 def _resolve_baseline(data: dict):
     """从 JSON 里推断基准日（D1 对应的绝对日期）。找不到就用今天。"""
     proj = data.get("project") or {}
-    for key in ("start_date", "baseline_date", "baseline", "kickoff"):
+    # LLM 常把 project 写成项目名称字符串，而不是包含 start_date 的对象。
+    # 日期解析应忽略这种展示字段，继续读取顶层 start_date，不能让整份图表
+    # 预处理因一次 AttributeError 回退到完全无图状态。
+    if not isinstance(proj, dict):
+        proj = {}
+    for key in ("start_date", "schedule_start_date", "baseline_date", "baseline", "kickoff"):
         d = _parse_date(proj.get(key))
         if d:
             return d
+    for key in ("startDate", "start_date", "schedule_start_date", "baseline_date", "baseline"):
+        d = _parse_date(data.get(key))
+        if d:
+            return d
     return datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _inject_schedule_project_timing(data: dict, project_timing: dict | None) -> dict:
+    """把项目级开工/工期基准注入 schedule 数据，供相对天数 D1/D50 渲染使用。"""
+    if not isinstance(data, dict) or not project_timing:
+        return data
+    start = project_timing.get("schedule_start_date") or project_timing.get("start_date")
+    total = project_timing.get("duration_days") or project_timing.get("total_duration_days")
+    proj = data.setdefault("project", {})
+    if start and not any(proj.get(k) for k in ("start_date", "schedule_start_date", "baseline_date", "baseline", "kickoff")):
+        proj["start_date"] = start
+    if total and not proj.get("total_duration_days"):
+        try:
+            proj["total_duration_days"] = int(total)
+        except (TypeError, ValueError):
+            proj["total_duration_days"] = total
+    return data
+
+
+def _schedule_milestones(data: dict, baseline: datetime) -> list[dict]:
+    """把里程碑的绝对日期/相对日序统一成 datetime。"""
+    result = []
+    for item in data.get("milestones") or []:
+        if not isinstance(item, dict):
+            continue
+        raw = item.get("date") or item.get("day") or item.get("time")
+        dt = _parse_date(raw)
+        if dt is None:
+            off = _as_day_offset(raw)
+            if off is not None:
+                dt = baseline + timedelta(days=off - 1)
+        if dt is not None:
+            result.append({"name": _clean_label(item.get("name") or item.get("label") or "节点"), "date": dt})
+    return result
+
+
+def _render_schedule_swimlane(parsed_tasks: list[dict], milestones: list[dict], data: dict,
+                              out_png: Path, title: str, style: dict, log: logging.Logger) -> bool:
+    """分阶段泳道式横道图：阶段分区、空心横道、上下双时间轴。"""
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
+    phases = []
+    for task in parsed_tasks:
+        phase = str(task.get("phase") or "施工阶段")
+        if phase not in phases:
+            phases.append(phase)
+        task["_phase"] = phase
+    ordered = sorted(parsed_tasks, key=lambda t: (phases.index(t["_phase"]), t["start"], t["end"]))
+    d0, d1 = min(t["start"] for t in ordered), max(t["end"] for t in ordered)
+    span = max(1, (d1 - d0).days + 1)
+    hatch_pool = ["///", "\\\\\\", "...", "xxx", "+++"]
+    height = max(5.2, 0.62 * len(ordered) + 2.2)
+    fig, ax = plt.subplots(figsize=(14.0, height), dpi=max(120, int(_RENDER_DPI * style.get("chart_scale", 1.0))))
+
+    phase_ranges = {}
+    for i, task in enumerate(ordered):
+        phase_ranges.setdefault(task["_phase"], []).append(i)
+    for pidx, phase in enumerate(phases):
+        rows = phase_ranges[phase]
+        y0, y1 = min(rows) - 0.45, max(rows) + 0.45
+        ax.add_patch(Rectangle((0, y0), span, y1 - y0,
+                               facecolor=("#F0F0F0" if pidx % 2 else "white"),
+                               edgecolor="none", zorder=0))
+        ax.axhline(y1, color="#555555", linewidth=1.0, zorder=1)
+        # 阶段标签放在右侧独立栏，避免与左侧工序名称叠压。
+        ax.text(1.012, (y0 + y1) / 2, phase, transform=ax.get_yaxis_transform(),
+                ha="left", va="center", fontsize=8.2, fontweight="bold", clip_on=False,
+                bbox=dict(boxstyle="square,pad=0.28", facecolor="white", edgecolor="black", linewidth=0.8))
+
+    for i, task in enumerate(ordered):
+        start = (task["start"] - d0).days
+        duration = max(1, (task["end"] - task["start"]).days + 1)
+        pidx = phases.index(task["_phase"])
+        ax.broken_barh([(start, duration)], (i - 0.25, 0.5),
+                       facecolors="white", edgecolors="black",
+                       linewidth=style.get("gantt_bar_lw", 0.9),
+                       hatch=hatch_pool[pidx % len(hatch_pool)], zorder=3)
+        ax.text(start + duration / 2, i, f"D{start + 1}-D{start + duration}",
+                ha="center", va="center", fontsize=6.8, zorder=4)
+
+    for idx, milestone in enumerate(milestones, 1):
+        x = (milestone["date"] - d0).days
+        if 0 <= x < span:
+            ax.axvline(x, color="black", linestyle=style.get("gantt_milestone_style", ":"), linewidth=0.9, zorder=2)
+            ax.scatter([x], [-0.75], marker="D", s=34, facecolor="black", edgecolor="black", zorder=5)
+            ax.text(x, -1.02, f"M{idx}", ha="center", va="top", fontsize=6.5)
+
+    tick_step = 5 if span <= 60 else 10
+    ticks = list(range(0, span, tick_step))
+    if span - 1 not in ticks:
+        ticks.append(span - 1)
+    ax.set_xticks(ticks, [f"D{x + 1}" for x in ticks])
+    ax.tick_params(axis="x", which="both", top=True, labeltop=True, bottom=True, labelbottom=True, labelsize=7)
+    ax.set_yticks(range(len(ordered)), [_wrap_text(t["name"], 14) for t in ordered], fontsize=7.5)
+    ax.set_xlim(0, span)
+    ax.set_ylim(-1.2, len(ordered) - 0.5)
+    ax.invert_yaxis()
+    ax.grid(axis="x", color="#9A9A9A", linestyle="--", linewidth=0.45, zorder=1)
+    ax.set_title(title or "施工进度分阶段泳道图", fontsize=13, fontweight="bold", pad=12)
+    ax.set_xlabel(f"计划工期：{span} 日历天；菱形为控制节点", fontsize=8)
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.1)
+        spine.set_color("black")
+    fig.subplots_adjust(left=0.24, right=0.91, top=0.88, bottom=0.11)
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_png, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    log.info(f"  ✓ 渲染横道图(阶段泳道式): {out_png.name}  任务={len(ordered)}  阶段={len(phases)}")
+    return True
+
+
+def _render_schedule_calendar_matrix(parsed_tasks: list[dict], milestones: list[dict], data: dict,
+                                     out_png: Path, title: str, style: dict, log: logging.Logger) -> bool:
+    """周历矩阵式横道图：按日离散成格，七日成组，形成与连续横条不同的视觉语法。"""
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
+    ordered = sorted(parsed_tasks, key=lambda t: (t["start"], t["end"], t["name"]))
+    d0, d1 = min(t["start"] for t in ordered), max(t["end"] for t in ordered)
+    span = max(1, (d1 - d0).days + 1)
+    weeks = (span + 6) // 7
+    hatches = ["", "///", "...", "xxx", "+++"]
+    phases = []
+    for task in ordered:
+        phase = str(task.get("phase") or "工序")
+        if phase not in phases:
+            phases.append(phase)
+
+    fig, ax = plt.subplots(figsize=(15.2, max(5.0, 0.48 * len(ordered) + 2.7)),
+                           dpi=max(120, int(_RENDER_DPI * style.get("chart_scale", 1.0))))
+    n = len(ordered)
+    for day in range(span):
+        if (day // 7) % 2:
+            ax.add_patch(Rectangle((day, -1.1), 1, n + 1.1, facecolor="#F3F3F3", edgecolor="none", zorder=0))
+    for row, task in enumerate(ordered):
+        start = max(0, (task["start"] - d0).days)
+        end = min(span - 1, (task["end"] - d0).days)
+        pidx = phases.index(str(task.get("phase") or "工序"))
+        for day in range(start, end + 1):
+            is_edge = day in (start, end)
+            ax.add_patch(Rectangle((day + 0.08, row - 0.34), 0.84, 0.68,
+                                   facecolor=("#222222" if pidx % 3 == 0 else "white"),
+                                   edgecolor="black", linewidth=(1.2 if is_edge else 0.45),
+                                   hatch=("" if pidx % 3 == 0 else hatches[pidx % len(hatches)]), zorder=3))
+        ax.text(start + 0.5, row, f"{end - start + 1}d", ha="left", va="center",
+                fontsize=6.2, color=("white" if pidx % 3 == 0 and end > start else "black"), zorder=4)
+
+    for day in range(span + 1):
+        ax.axvline(day, color=("black" if day % 7 == 0 else "#B0B0B0"),
+                   linewidth=(1.15 if day % 7 == 0 else 0.35), zorder=1)
+    for row in range(n + 1):
+        ax.axhline(row - 0.5, color="#777777", linewidth=0.45, zorder=1)
+    for week in range(weeks):
+        x0, width = week * 7, min(7, span - week * 7)
+        ax.add_patch(Rectangle((x0, -1.05), width, 0.55, facecolor="white",
+                               edgecolor="black", linewidth=0.9, zorder=2))
+        ax.text(x0 + width / 2, -0.78, f"第{week + 1}周", ha="center", va="center", fontsize=7.2, fontweight="bold")
+
+    for idx, milestone in enumerate(milestones, 1):
+        day = (milestone["date"] - d0).days
+        if 0 <= day < span:
+            ax.scatter([day + 0.5], [-0.25], marker="v", s=46, facecolor="black", edgecolor="black", zorder=5)
+            ax.text(day + 0.5, -0.08, f"M{idx}", ha="center", va="bottom", fontsize=6.2)
+
+    labels = [str(i + 1) if i == 0 or (i + 1) % 5 == 0 or i == span - 1 else "" for i in range(span)]
+    ax.set_xticks([i + 0.5 for i in range(span)], labels, fontsize=6.2)
+    ax.tick_params(axis="x", top=True, labeltop=True, bottom=False, labelbottom=False, length=0)
+    ax.set_yticks(range(n), [_wrap_text(t["name"], 15) for t in ordered], fontsize=7.3)
+    ax.set_xlim(0, span)
+    ax.set_ylim(-1.1, n - 0.5)
+    ax.invert_yaxis()
+    ax.set_title(title or "施工进度周历矩阵图", fontsize=13, fontweight="bold", pad=28)
+    ax.set_xlabel(f"日序矩阵（总工期 {span} 日历天；每 7 日为一周）", fontsize=8)
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.2)
+        spine.set_color("black")
+    fig.subplots_adjust(left=0.25, right=0.99, top=0.82, bottom=0.10)
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_png, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    log.info(f"  ✓ 渲染横道图(周历矩阵式): {out_png.name}  任务={n}  周数={weeks}")
+    return True
 
 
 def render_schedule_png(data: dict, out_png: Path, title: str,
@@ -1533,7 +1728,8 @@ def render_schedule_png(data: dict, out_png: Path, title: str,
             return d
         off = _as_day_offset(val_day if val_day is not None else val_date)
         if off is not None:
-            return baseline + timedelta(days=off - 1)  # D1 对应 baseline
+            # 兼容 D1 起算和少量模型输出的 0-based start=0。
+            return baseline + timedelta(days=max(0, off - 1))  # D1/0 均对应 baseline
         return None
 
     parsed_tasks = []
@@ -1544,6 +1740,11 @@ def render_schedule_png(data: dict, out_png: Path, title: str,
         end_raw = t.get("end") if t.get("end") is not None else t.get("end_date") or t.get("finish") or t.get("finish_day")
         start = _resolve_dt(start_raw, start_raw)
         end = _resolve_dt(end_raw, end_raw)
+        if start is not None and end is None and t.get("duration") is not None:
+            try:
+                end = start + timedelta(days=max(1, int(t.get("duration"))) - 1)
+            except (TypeError, ValueError):
+                pass
         if start is None or end is None or end < start:
             continue
         parsed_tasks.append({
@@ -1556,6 +1757,17 @@ def render_schedule_png(data: dict, out_png: Path, title: str,
     if not parsed_tasks:
         log.warning(f"  schedule JSON 无有效 tasks，跳过渲染 {out_png.name}")
         return False
+
+    layout = style.get("gantt_layout", "classic_table")
+    parsed_milestones = _schedule_milestones(data, baseline)
+    if layout == "phase_swimlane":
+        return _render_schedule_swimlane(
+            parsed_tasks, parsed_milestones, data, out_png, title, style, log
+        )
+    if layout == "calendar_matrix":
+        return _render_schedule_calendar_matrix(
+            parsed_tasks, parsed_milestones, data, out_png, title, style, log
+        )
 
     # ── 传统"表格网格式"施工进度横道图(序号/项目列 + 年/月/旬表头 + 带边框网格 + 横道条) ──
     import calendar
@@ -1790,7 +2002,7 @@ def _adapt_schedule_data(data: dict) -> dict:
             dur = row.get("duration") or row.get("days")
             if end is None and dur is not None and start is not None:
                 try:
-                    end = int(start) + int(dur)
+                    end = int(start) + int(dur) - 1
                 except (ValueError, TypeError):
                     pass
             if name and start is not None and end is not None:
@@ -1820,7 +2032,7 @@ def _adapt_schedule_data(data: dict) -> dict:
         dur = item.get("duration") or item.get("days")
         if end is None and dur is not None and start is not None:
             try:
-                end = int(start) + int(dur)
+                end = int(start) + int(dur) - 1
             except (ValueError, TypeError):
                 pass
         if name and start is not None and end is not None:
@@ -2504,14 +2716,14 @@ def _normalize_heading_numbers(text: str, chapter_idx: int,
                                style_id: str = "B") -> str:
     """为 H2/H3/H4 自动补序号（支持 12 种编号风格）。
 
-    LLM 输出的标题可能带序号（07.1 xxx）也可能不带（施工方案）。
+    LLM 输出的标题可能带序号（7.1 xxx）也可能不带（施工方案）。
     此函数先剥离已有序号，再用指定风格重新编号。
 
     style_id: A-L 对应 _HEADING_STYLES 中的编号风格。
     """
     if chapter_idx <= 0:
         return text
-    ch_str = str(chapter_idx).zfill(2)
+    ch_str = str(chapter_idx)
 
     style = _HEADING_STYLES.get(style_id, _HEADING_STYLES["B"])
     h2_fmt, h3_fmt, h4_fmt = style[1], style[2], style[3]
@@ -2532,11 +2744,14 @@ def _normalize_heading_numbers(text: str, chapter_idx: int,
         # H4（#### 必须先检测——历史上漏处理,H4 保留模型原编号导致全篇编号混用）
         m4 = h4_pat.match(line)
         if m4:
-            h4_counter += 1
             title = line[m4.end():]
             nm = any_num.match(title)
             if nm:
                 title = title[nm.end():]
+            if h2_counter <= 0 or h3_counter <= 0:
+                lines[i] = f"#### {title}"
+                continue
+            h4_counter += 1
             prefix = h4_fmt(ch_str, h2_counter, h3_counter, h4_counter)
             lines[i] = f"#### {prefix} {title}"
             continue
@@ -2544,13 +2759,18 @@ def _normalize_heading_numbers(text: str, chapter_idx: int,
         # H3（要先于 H2 检测，因为 ### 也匹配 ##）
         m3 = h3_pat.match(line)
         if m3:
-            h3_counter += 1
-            h4_counter = 0
             title = line[m3.end():]
             # 剥离已有编号
             nm = any_num.match(title)
             if nm:
                 title = title[nm.end():]
+            if h2_counter <= 0:
+                h3_counter = 0
+                h4_counter = 0
+                lines[i] = f"### {title}"
+                continue
+            h3_counter += 1
+            h4_counter = 0
             prefix = h3_fmt(ch_str, h2_counter, h3_counter, 0)
             lines[i] = f"### {prefix} {title}"
             continue
@@ -2858,6 +3078,7 @@ def _replace_pseudo_gantt_tables(
     stem: str,
     log: logging.Logger,
     chart_style: dict | None = None,
+    project_timing: dict | None = None,
 ) -> str:
     """检测并替换 markdown 中的伪横道表格为甘特图 PNG。"""
     gantt_tables = _extract_pseudo_gantt_tables(text, log)
@@ -2867,6 +3088,7 @@ def _replace_pseudo_gantt_tables(
     # 从后往前替换，避免偏移错乱
     for idx, (start, end, title, data) in enumerate(reversed(gantt_tables)):
         suffix = "" if len(gantt_tables) == 1 else f"_{idx}"
+        data = _inject_schedule_project_timing(data, project_timing)
         backup = data_dir / f"{stem}.pseudo_gantt{suffix}.json"
         data_dir.mkdir(parents=True, exist_ok=True)
         backup.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2944,19 +3166,19 @@ _RENDERER_SCHEMAS: dict[str, dict] = {
         "use_when": "进度计划章节;附表四 进度网络图;任何含里程碑的工序时间表",
         "required": ["tasks"],
         "fields": {
-            "tasks": "list of {name, start, end, phase}。start/end 接受 'YYYY-MM-DD' 或工期序号(int days from 0)。phase 用于横道颜色分组(可选)",
+            "tasks": "list of {name, start, end, phase}。start/end 接受 'YYYY-MM-DD' 或工期序号(int days from 1)。若项目上下文给出计划开工基准,绝对日期必须从该基准起算;否则优先用相对日序号,不要照抄示例日期。phase 用于横道颜色分组(可选)",
             "milestones": "list of {name, date}(可选,菱形标记)",
             "title": "图标题(可选,缺省走 _CHART_TITLES)",
         },
         "example": {
             "tasks": [
-                {"name": "施工准备", "start": "2026-05-31", "end": "2026-06-09", "phase": "准备"},
-                {"name": "基础工程", "start": "2026-06-10", "end": "2026-06-30", "phase": "基础"},
-                {"name": "主体结构", "start": "2026-07-01", "end": "2026-07-31", "phase": "主体"},
+                {"name": "施工准备", "start": 1, "end": 10, "phase": "准备"},
+                {"name": "基础工程", "start": 11, "end": 30, "phase": "基础"},
+                {"name": "主体结构", "start": 31, "end": 60, "phase": "主体"},
             ],
             "milestones": [
-                {"name": "M1 基础验收", "date": "2026-06-30"},
-                {"name": "M2 主体封顶", "date": "2026-07-31"},
+                {"name": "M1 基础验收", "date": 30},
+                {"name": "M2 主体封顶", "date": 60},
             ],
         },
     },
@@ -3232,6 +3454,7 @@ def preprocess_md(
     chart_style: dict | None = None,
     heading_style: str = "B",
     chart_order: list | None = None,
+    project_timing: dict | None = None,
 ) -> Path:
     """处理单个 md，返回临时 md 的 Path。
 
@@ -3293,8 +3516,12 @@ def preprocess_md(
                 if ctype == "site_layout":
                     # 多变体批量:按变体序号自动分配不同模板/风格/图号/比例(缺省才注入)
                     data = _auto_diff_site_layout(data, variant_id)
+                if ctype == "schedule":
+                    data = _inject_schedule_project_timing(data, project_timing)
                 adapter = _CHART_ADAPTERS.get(ctype)
                 render_data = adapter(data) if adapter else data
+                if ctype == "schedule":
+                    render_data = _inject_schedule_project_timing(render_data, project_timing)
                 _data_ok, _data_why = validate_chart_data(ctype, render_data)
                 if not _data_ok:
                     log.warning(f"  [{src_md.name}] {ctype} 数据不足"
@@ -3352,7 +3579,7 @@ def preprocess_md(
     text = _strip_bare_json(text, src_md.name, data_dir, log)
 
     # 伪横道表格（█ 字符模拟横道条的 pipe table）→ 甘特图 PNG
-    text = _replace_pseudo_gantt_tables(text, charts_dir, data_dir, stem, log, chart_style)
+    text = _replace_pseudo_gantt_tables(text, charts_dir, data_dir, stem, log, chart_style, project_timing)
 
     # 确保 markdown pipe table 前后有空行（pandoc 要求，否则当纯文本处理）
     text = _ensure_table_blank_lines(text)
@@ -3372,6 +3599,7 @@ def preprocess_chapter_dir(
     add_chapter_prefix: bool = True,
     chart_style: dict | None = None,
     heading_style: str = "",
+    project_timing: dict | None = None,
 ) -> list[Path]:
     """对一个章节目录（output/ 或 output/VXX/）做批量预处理。
 
@@ -3406,7 +3634,8 @@ def preprocess_chapter_dir(
             chapter_idx = 0
         tmp = preprocess_md(src, tmp_dir, charts_dir, data_dir, variant_id, log,
                             chapter_idx=chapter_idx, chart_style=chart_style,
-                            heading_style=heading_style, chart_order=chart_order)
+                            heading_style=heading_style, chart_order=chart_order,
+                            project_timing=project_timing)
         tmp_paths.append(tmp)
     # 写出图表顺序清单，供 bid_assemble._fit_images 判定哪些图需横版(平面布置图/进度图)
     try:

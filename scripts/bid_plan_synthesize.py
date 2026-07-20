@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -309,7 +310,7 @@ def llm_plan_subitems(
                 user + "\n\n⚠ 上次输出的 JSON 解析失败。请严格只输出 JSON 数组本身,首字符必须是 `[`,末字符必须是 `]`,不要任何说明文字、代码围栏或思考过程。"
             )
             resp = client.chat(
-                model_key="deepseek", system=system, user=user_attempt,
+                model_key=os.environ.get("BID_PLAN_MODEL", "deepseek"), system=system, user=user_attempt,
                 temperature=0.1, max_tokens=4000,
             )
         except Exception as e:
@@ -403,7 +404,7 @@ def score_item_subitems(
             "安全文明施工目标与责任体系",
             "关键地点、关键工序安全控制",
             "机械用电、临边作业及消防管理",
-            "校园施工隔离、防坠及应急处置",
+            "交通导改、交叉作业及应急处置",
             "安全文明施工标准及违约承诺",
         ]
     elif "环保" in title or "环境" in title:
@@ -419,7 +420,7 @@ def score_item_subitems(
             "总工期安排与施工阶段划分",
             "关键线路、关键节点及横道计划",
             "劳动力、材料、机械与进度协同",
-            "雨季、校园作业条件下的进度纠偏措施",
+            "雨季、交叉作业条件下的进度纠偏措施",
             "工期违约责任承诺",
         ]
     elif any(k in title for k in ("劳动力", "机械", "资源配备", "设备配置")):
@@ -478,6 +479,9 @@ def _project_object_subitems(context: str) -> list[str]:
         candidates.append("土方开挖、基础及混凝土工程施工方法")
     if any(k in context for k in ("沥青", "路缘石", "路面", "草皮")):
         candidates.append("路面拆除恢复及场地修复措施")
+    if any(k in context for k in ("人居环境", "园林", "绿化", "草皮")):
+        candidates.append("场地整治、排水衔接及附属设施施工措施")
+        candidates.append("园林绿化、苗木栽植及养护施工措施")
 
     if not candidates:
         candidates = [

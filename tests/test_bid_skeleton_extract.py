@@ -3,9 +3,11 @@ import pytest
 
 from bid_skeleton_extract import (
     _grep_implicit_constraints,
+    _grep_result_disqualifications,
     auto_detect_hybrid,
     choose_skeleton_model,
     extract_b3_disqualification,
+    parse_page_header,
     validate_b1,
     validate_b3,
 )
@@ -75,6 +77,31 @@ def test_b3_grep_skip_existing():
     existing = {"总页数不得超过 70 页|5"}
     out = _grep_implicit_constraints(text, existing, None)
     assert len(out) == 0
+
+
+def test_parse_visual_ocr_page_header():
+    assert parse_page_header("[第5页 - 视觉OCR:qwen_vl]") == (5, "ocr")
+    assert parse_page_header("[第6页]") == (6, "text")
+
+
+def test_b3_grep_visual_page_header_keeps_page_and_method():
+    text = """[第5页 - 视觉OCR:qwen_vl]
+本项目为中小型项目,投标文件总页数不得超过 70 页。
+"""
+    out = _grep_implicit_constraints(text, set(), None)
+    hit = next(c for c in out if c["constraint_type"] == "page_limit")
+    assert hit["source_page"] == 5
+    assert hit["source_page_method"] == "ocr"
+
+
+def test_b3_result_grep_visual_page_header_keeps_page_and_method():
+    text = """[第8页 - 视觉OCR:glm_ocr]
+投标报价超过招标控制价的，否决投标。
+"""
+    out = _grep_result_disqualifications(text, [], None)
+    assert len(out) == 1
+    assert out[0]["source_page"] == 8
+    assert out[0]["source_page_method"] == "ocr"
 
 
 # ─── B3 LLM 失败时的 grep-only 降级 ───
@@ -217,6 +244,31 @@ def test_validate_b1_keeps_224_group_sections():
     assert ok
     sections = [i["section"] for i in payload["scoring_items"]]
     assert sections == ["技术", "技术", "项目管理", "投标报价", "其他因素"]
+    assert not any("section 冲突" in w for w in warns)
+
+
+def test_validate_b1_simple_competitive_bid_sections_by_title_semantics():
+    """非 2.2.4 范本编号不能按首位数字硬套 section。"""
+    payload = {
+        "evaluation_method": "score",
+        "method_chinese": "综合评分法",
+        "total_tech_score": 100,
+        "tech_score_is_passfail": False,
+        "scoring_items": [
+            {"id": "1", "section": "投标报价", "title_original": "比选报价", "score": 30},
+            {"id": "2.1", "section": "技术", "title_original": "施工方案与技术措施", "score": 12},
+            {"id": "2.2", "section": "技术", "title_original": "资源配备计划和施工设备配置情况", "score": 12},
+            {"id": "3", "section": "其他因素", "title_original": "业绩", "score": 10},
+        ],
+        "veto_items": [{"text_original": "报价高于最高限价", "source_page": 16}],
+    }
+
+    ok, warns = validate_b1(payload)
+
+    assert ok
+    assert [i["section"] for i in payload["scoring_items"]] == [
+        "投标报价", "技术", "技术", "其他因素"
+    ]
     assert not any("section 冲突" in w for w in warns)
 
 

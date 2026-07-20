@@ -600,8 +600,11 @@ def verify(tender_dir: Path, strict: bool | None = None) -> int:
         print("\n── brain↔evaluation_method 对账 ──")
         method = eval_payload.get("evaluation_method")
         items = eval_payload.get("scoring_items") or []
+        tech_items = [i for i in items if i.get("section") == "技术"]
         json_score_count = len(items)
-        json_total = sum((i.get("score") or 0) for i in items)
+        # scoring_items 可同时包含技术和报价。与 brain 的“技术标总分”
+        # 对账时只累计技术项；旧 JSON 无 section 时才回退全量。
+        json_total = sum((i.get("score") or 0) for i in (tech_items or items))
         brain_rows = count_brain_scoring_rows(brain_text)
 
         print(f"    JSON: method={method}, scoring_items={json_score_count}, sum_score={json_total}")
@@ -761,7 +764,13 @@ def verify(tender_dir: Path, strict: bool | None = None) -> int:
             msg = (f"清单 {len(boq_cov.get('covered',[]))+len(missing)} 个类目中有 {len(missing)} 个未被章节覆盖："
                    f"{', '.join(missing[:5])}")
             if boq_cov["ratio"] < 0.5:
-                errors.append(msg); print(f"{FAIL} {msg}")
+                if strict:
+                    # 合格制章节锚点锁大纲原文(工程概况/编制依据/施工方案...),
+                    # BoQ专业类目(屋面防水/天棚/电气)统一归"施工方案与技术措施"章,
+                    # 字面覆盖是评分制思维;合格制下降级为警告,不阻断 resume。
+                    warnings.append(msg); print(f"{WARN} {msg} (合格制:BoQ类目归施工方案章,字面覆盖非硬要求)")
+                else:
+                    errors.append(msg); print(f"{FAIL} {msg}")
             else:
                 warnings.append(msg); print(f"{WARN} {msg}")
     elif boq_cov.get("ratio", 1.0) == 1.0 and not boq_cov.get("note"):

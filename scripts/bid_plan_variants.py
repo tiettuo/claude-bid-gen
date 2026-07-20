@@ -44,7 +44,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from bid_common import make_script_logger, parse_chapter_plan, parse_plan_subitems
+from bid_common import (
+    make_script_logger,
+    parse_chapter_plan,
+    parse_plan_budget,
+    parse_plan_subitems,
+)
 from bid_llm_client import LLMClient
 
 
@@ -87,9 +92,11 @@ def _is_tier_a(ch: dict) -> bool:
     return bool(si and si not in ("—", "-", "无")) or ch.get("score", 0) > 0
 
 
-def _est_pages(target_chars: int, chart_count: int) -> float:
-    """字数 + 图表估算页数(约 425 字/页[14pt 四号 1.5 倍全文档有效密度],每渲染图 0.85 页)。"""
-    return round(target_chars / 425.0 + chart_count * 0.85, 1)
+def _est_pages(target_chars: int, chart_count: int,
+               chars_per_page: float = 425.0) -> float:
+    """按当前项目字号/行距密度估算字数页 + 图表页。"""
+    density = chars_per_page if chars_per_page and chars_per_page > 0 else 425.0
+    return round(target_chars / density + chart_count * 0.85, 1)
 
 
 # ── 评分标准 / 项目背景加载 ────────────────────────────────────────
@@ -127,8 +134,10 @@ def _load_project_brief(extracted: Path) -> str:
         facts = json.loads(fp.read_text(encoding="utf-8")).get("facts", {})
         name = ((facts.get("project_name") or {}).get("value") or "").strip()
         scope = ((facts.get("project_scope") or {}).get("value") or "").strip()
-        brief = "；".join(x for x in (name, scope) if x)
-        return brief[:240]
+        boq_items = _load_boq_item_names(extracted)
+        boq_brief = f"清单主要工作：{'、'.join(boq_items[:12])}" if boq_items else ""
+        brief = "；".join(x for x in (name, scope, boq_brief) if x)
+        return brief[:600]
     except Exception:
         return ""
 
@@ -136,7 +145,8 @@ def _load_project_brief(extracted: Path) -> str:
 # ── 变体章节构建(章标题/数量/顺序 = 基准,只缩放字数)──────────────
 
 def build_variant_chapters(base_chapters: list[dict], variant: dict,
-                           scale: float) -> list[dict]:
+                           scale: float,
+                           chars_per_page: float = 425.0) -> list[dict]:
     """克隆基准章节为某变体的工作副本。
 
     ★ 章标题、章数量、章顺序、评分项、文件名 全部 1:1 沿用基准,绝不变换。
@@ -158,7 +168,7 @@ def build_variant_chapters(base_chapters: list[dict], variant: dict,
             "score": base.get("score", 0),
             "target_chars": target_chars,
             "chart_count": chart_count,
-            "est_pages": _est_pages(target_chars, chart_count),
+            "est_pages": _est_pages(target_chars, chart_count, chars_per_page),
             "_scope": [s["title"] for s in base.get("_subitems", [])],
         })
     return chapters
@@ -402,12 +412,14 @@ def _assign_charts_for_variant(variant: dict, base_chart_specs, org_templates: d
             for spec in specs:
                 if spec.get("required", False):
                     continue
+                # 进度横道图是工期响应的核心图形语义：可换布局，不可随机改成资源曲线或删除。
+                if spec.get("type") == "schedule":
+                    continue
                 if rng.random() < 0.3:
                     alternatives = {
                         "hierarchy_flow": ["process_flow", "org_chart"],
                         "process_flow": ["hierarchy_flow"],
                         "org_chart": ["hierarchy_flow", "process_flow"],
-                        "schedule": ["resource_curve"],
                         "site_layout": ["process_flow"],
                     }
                     cur_type = spec.get("type", "process_flow")
@@ -429,6 +441,10 @@ def _assign_charts_for_variant(variant: dict, base_chart_specs, org_templates: d
 
 
 def _find_org_chapter(chapters: list[dict]) -> str:
+    # 组织架构优先落在资源/组织机构评分章；只有缺失时才回落施工方案章。
+    for ch in chapters:
+        if any(k in ch.get("title", "") for k in ("资源配备", "组织机构", "项目管理机构")):
+            return str(ch["num"]).zfill(2)
     for ch in chapters:
         if any(k in ch.get("title", "") for k in ("施工方案", "技术措施", "施工部署", "组织")):
             return str(ch["num"]).zfill(2)
@@ -446,22 +462,57 @@ def _find_management_chapters(chapters: list[dict]) -> list[str]:
 _STALE_WORK_WORDS = ("棚圈", "牧道", "桥涵", "暖棚", "装配安装")
 
 
+def _load_boq_item_names(extracted: Path) -> list[str]:
+    """从清单提取文本中抓项目名称，供变体规划和组织模板项目化。"""
+    names: list[str] = []
+    seen: set[str] = set()
+    for path in sorted(extracted.glob("*工程量清单*.txt")):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            m = re.match(r"^\s*\d+\s*\|\s*[0-9A-Za-z]+\s*\|\s*([^|]+?)\s*\|", line)
+            if not m:
+                continue
+            name = m.group(1).strip()
+            if name and name not in seen and "工程" not in name[:2]:
+                seen.add(name)
+                names.append(name)
+    return names
+
+
 def _load_work_labels(extracted: Path) -> list[str]:
     """从 boq.json 生成项目专属作业队标签。"""
     boq_path = extracted / "boq.json"
-    if not boq_path.exists():
-        return []
-    try:
-        boq = json.loads(boq_path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
     labels, seen = [], set()
-    for cat in boq.get("categories", []):
-        name = cat.get("name") or cat.get("category") or ""
-        name = re.sub(r"^未分类-?", "", name).strip("- ")
-        if name and name not in seen:
-            seen.add(name)
-            labels.append(f"{name}施工队")
+    if boq_path.exists():
+        try:
+            boq = json.loads(boq_path.read_text(encoding="utf-8"))
+        except Exception:
+            boq = {}
+        for cat in boq.get("categories", []):
+            name = cat.get("name") or cat.get("category") or ""
+            name = re.sub(r"^未分类-?", "", name).strip("- ")
+            if name and name not in seen:
+                seen.add(name)
+                labels.append(f"{name}施工队")
+
+    # Excel 清单项目通常只有提取文本、没有 boq.json。按具体工作项归并成
+    # 项目专属作业队，避免组织图泄漏历史项目的棚圈/牧道名称。
+    if not labels:
+        item_names = _load_boq_item_names(extracted)
+        buckets = [
+            (("拆除", "清运"), "拆除清运作业队"),
+            (("混凝土路面", "碎石"), "混凝土路面修补队"),
+            (("沥青", "透层", "粘层"), "沥青路面修补队"),
+            (("土方", "路基"), "土方基层作业队"),
+        ]
+        blob = " ".join(item_names)
+        for keys, label in buckets:
+            if any(k in blob for k in keys) and label not in seen:
+                seen.add(label)
+                labels.append(label)
     return labels[:6]
 
 
@@ -572,7 +623,13 @@ def main() -> int:
         log.info(f"清单驱动作业队标签: {work_labels}")
 
     # 目标总页数 → 全局缩放因子(缺省沿用基准字数)
-    base_pages = sum(c.get("est_pages", 0) for c in base_chapters) or 1
+    # 变体 target_pages 是相对于共享计划声明的“目标总页数”缩放，而不是
+    # 相对于章节表的正文估算页数。后者通常不含图表预留、封面和目录，拿它
+    # 作分母会把 170 页主方案反向放大到约 230 页。
+    base_budget = parse_plan_budget(plan_path)
+    base_budget_pages = (base_budget.get("target_pages") or 0)
+    base_density = (base_budget.get("chars_per_page") or 425.0)
+    base_pages = base_budget_pages or sum(c.get("est_pages", 0) for c in base_chapters) or 1
     user_scale = 1.0
     if args.target_pages:
         user_scale = args.target_pages / base_pages
@@ -597,7 +654,9 @@ def main() -> int:
             v_scale = vp / base_pages
         else:
             v_scale = user_scale * (1.0 + [0.0, -0.05, -0.02, -0.07, -0.04][i % 5])
-        chapters = build_variant_chapters(base_chapters, variant, v_scale)
+        chapters = build_variant_chapters(
+            base_chapters, variant, v_scale, chars_per_page=base_density
+        )
         verify_scoring_coverage(chapters, base_score_items, log)
         strategy = assign_strategy(i)
         log.info(f"  {variant['id']}: 切分维度【{strategy[0]}】, 字数 ×{v_scale:.2f}, "

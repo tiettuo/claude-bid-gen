@@ -151,6 +151,60 @@ def parse_authoring_yaml(text: str) -> dict:
     return merged
 
 
+def _val_from_fact(facts: dict, key: str):
+    v = facts.get(key)
+    if isinstance(v, dict):
+        return v.get("value")
+    return v
+
+
+def _enrich_authoring_with_project_timing(
+    extracted: Path, authoring: dict, log: logging.Logger | None = None
+) -> None:
+    """把 project_facts/project_derived 的工期基准灌入 authoring project 上下文。"""
+    project = authoring.setdefault("project", {})
+    facts: dict = {}
+    derived: dict = {}
+    facts_path = extracted / "project_facts.json"
+    derived_path = extracted / "project_derived.json"
+    try:
+        if facts_path.exists():
+            payload = json.loads(facts_path.read_text(encoding="utf-8"))
+            facts = payload.get("facts", payload)
+    except (json.JSONDecodeError, OSError):
+        facts = {}
+    try:
+        if derived_path.exists():
+            derived = json.loads(derived_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        derived = {}
+
+    bid_deadline = _val_from_fact(facts, "bid_deadline")
+    duration_days = _val_from_fact(facts, "duration_days")
+    constraints = derived.get("schedule_constraints") or {}
+    schedule_start = derived.get("schedule_start_date")
+    schedule_end = derived.get("schedule_end_date")
+    earliest_start = constraints.get("earliest_start_date") or schedule_start
+
+    if bid_deadline and not project.get("bid_deadline"):
+        project["bid_deadline"] = bid_deadline
+    if duration_days and not project.get("duration_days"):
+        project["duration_days"] = duration_days
+    if schedule_start:
+        project["schedule_start_date"] = schedule_start
+    if schedule_end:
+        project["schedule_end_date"] = schedule_end
+    if earliest_start:
+        project["earliest_start_date"] = earliest_start
+    if constraints.get("min_start_rule"):
+        project["min_start_rule"] = constraints.get("min_start_rule")
+    if log and (schedule_start or earliest_start):
+        log.info(
+            "工期基准已注入 authoring: "
+            f"bid_deadline={bid_deadline}, start={schedule_start}, end={schedule_end}"
+        )
+
+
 def load_authoring_context(extracted: Path, log: logging.Logger | None = None) -> bool:
     """加载 authoring_rules.md + project_brain.md + difficulties.json 到模块级缓存。
 
@@ -194,6 +248,7 @@ def load_authoring_context(extracted: Path, log: logging.Logger | None = None) -
         try:
             text = rp.read_text(encoding="utf-8")
             _AUTHORING_CTX = parse_authoring_yaml(text)
+            _enrich_authoring_with_project_timing(extracted, _AUTHORING_CTX, log)
             if log:
                 log.info(f"authoring_rules.md 已解析: {len(_AUTHORING_CTX)} 段 YAML, 字段={list(_AUTHORING_CTX.keys())}")
             return bool(_AUTHORING_CTX)
@@ -304,8 +359,25 @@ def _build_block1_project(
         lines.append(f"  · 招标控制价：{cp} 元（约 {cp_wan}）")
     if project.get("duration_days"):
         lines.append(f"  · 总工期：{project['duration_days']} 日历天")
+    if project.get("bid_deadline"):
+        lines.append(f"  · 投标截止/开标基准：{project['bid_deadline']}")
+    if project.get("schedule_start_date"):
+        rule = project.get("min_start_rule") or "投标截止后第5个工作日"
+        lines.append(f"  · 计划开工基准：{project['schedule_start_date']}（{rule}，不得早于该日）")
+    if project.get("schedule_end_date"):
+        lines.append(f"  · 计划竣工基准：{project['schedule_end_date']}")
     if project.get("quality_target"):
         lines.append(f"  · 质量目标：{project['quality_target']}")
+    if project.get("earliest_start_date"):
+        if project.get("schedule_end_date"):
+            _dur = f"{project['duration_days']}日历天" if project.get("duration_days") else ""
+            end_note = f"；{_dur}计划竣工至 {project['schedule_end_date']}"
+        else:
+            end_note = ""
+        lines.append(
+            f"⚠ 工期/进度图若出现绝对日期，D1 必须按 {project['earliest_start_date']} 起算，"
+            f"任何开工、施工、浇筑、验收、里程碑日期不得早于 {project['earliest_start_date']}{end_note}。"
+        )
     lines.append("")
 
     # 工程构成
@@ -1011,6 +1083,7 @@ def _legacy_build_user_prompt(
 9. **禁用 Mermaid 代码块**（```mermaid 会被组装阶段直接剥离，docx 渲染不出来）
 10. **JSON 图表数据块**：在章节文末可附 ```json 代码块，组装阶段自动渲染为 PNG 图片。**必须包含 `"type"` 字段**，支持以下类型：
     - `"schedule"`：进度横道图。必须含 `tasks`（[{{name,start,end,phase?}}]）和 `milestones`（[{{name,date}}]），日期格式 `YYYY-MM-DD`。适用于进度/工期章节
+      进度日期必须服从 Block 1 的计划开工基准；若使用绝对日期，不得早于计划开工基准；若无绝对基准，优先使用第1天/第N天相对日序号。
     - `"org_chart"`：组织机构图。必须含 `root`（{{role,name,children:[...]}}），树形递归结构。适用于项目管理机构章节
     - `"hierarchy_flow"`：管理体系图。含 `layers`（[{{name,nodes:[...]}}]）和 `connections`（[{{from,to,label?}}]）。适用于质量/安全管理体系章节
     - `"process_flow"`：工艺流程图。含 `nodes`（[{{id,label,shape:box|diamond|oval}}]）和 `edges`（[{{from,to,label?}}]）。适用于关键工序/施工方法章节
@@ -1648,7 +1721,10 @@ def _load_writer_inputs(extracted: Path, log):
 
 def _build_writer_tasks(target_variants, chapters, output: Path, args, log):
     """构造 (variant, chapter, out_path) 任务列表；返回 (tasks, skip_count)。
-    每变体优先用自己的 chapter_plan_variant.md(结构独立,反串标),缺失回退共享 chapter_plan.md。"""
+    每变体优先用自己的 chapter_plan_variant.md(结构独立,反串标),缺失回退共享 chapter_plan.md。
+    任务按变体轮转交错 [V01-ch1, V02-ch1, V03-ch1, V01-ch2, ...]
+    (feedback_bid_writer_scheduling 方案A):让前 N 个 worker 自然分到不同
+    变体/模型,避免单模型信号量阻塞的 worker 占住槽位导致多模型串行。"""
     def _variant_chapters(v: dict) -> list[dict]:
         vp = output / v["id"] / "chapter_plan_variant.md"
         v_chs = parse_chapter_plan(vp) if vp.exists() else []
@@ -1658,8 +1734,8 @@ def _build_writer_tasks(target_variants, chapters, output: Path, args, log):
             v_chs = [c for c in v_chs if c["num"] == args.chapter.zfill(2)]
         return v_chs
 
-    tasks = []
     skip_count = 0
+    per_variant: list[list] = []
     for v in target_variants:
         v_dir = output / v["id"]
         v_dir.mkdir(exist_ok=True)
@@ -1668,13 +1744,23 @@ def _build_writer_tasks(target_variants, chapters, output: Path, args, log):
             log.error(f"[{v['id']}] 未解析到章节"
                       + (f"(指定的 --chapter {args.chapter} 不在该变体中)" if args.chapter else ""))
             continue
+        v_tasks = []
         for ch in v_chapters:
             out_path = v_dir / ch["filename"]
             if out_path.exists() and not args.force:
                 log.info(f"[{v['id']}] 章 {ch['num']} 已存在，跳过（用 --force 覆盖）")
                 skip_count += 1
                 continue
-            tasks.append((v, ch, out_path))
+            v_tasks.append((v, ch, out_path))
+        per_variant.append(v_tasks)
+
+    # 变体轮转交错:章节序号为外层、变体为内层
+    tasks = []
+    depth = max((len(vt) for vt in per_variant), default=0)
+    for i in range(depth):
+        for vt in per_variant:
+            if i < len(vt):
+                tasks.append(vt[i])
     return tasks, skip_count
 
 

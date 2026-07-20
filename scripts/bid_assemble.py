@@ -444,7 +444,7 @@ def _apply_format_set(fmt: dict, fs: dict, log) -> dict:
             fmt["line_spacing"] = float(val)
         elif key in ("margin_top_cm","margin_bottom_cm","margin_left_cm","margin_right_cm"):
             fmt[key] = float(val)
-        elif key in ("font_name_cn","font_name_h1","page_size","bold_h1","align_h1","first_line_indent_chars"):
+        elif key in ("font_name_cn","font_name_h1","page_size","bold_h1","align_h1","first_line_indent_chars","doc_grid"):
             fmt[key] = val
         elif key == "page_number_position":
             v = str(val).strip().lower()
@@ -485,6 +485,8 @@ def _normalize_rule_param_keys(params: dict, log: logging.Logger) -> None:
         "h1_align": "align_h1",
         "heading_h1_size_pt": "font_size_h1",    # Phase 2 authoring 用
         "heading_h1_size_pt_source": "font_size_h1_source",
+        "heading_h1_font": "font_name_h1",        # Phase 2 authoring 标题字体
+        "heading_h1_font_source": "font_name_h1_source",
         "heading_h2_size_pt": "font_size_h2",
         "heading_h3_size_pt": "font_size_h3",
         "margin_top": "margin_top_cm",
@@ -631,15 +633,20 @@ def parse_format_rules(rules_path: Path, log: logging.Logger) -> dict:
 
     if "font_name_h1" in params:
         fmt["font_name_h1"] = params["font_name_h1"].strip()
-        # _source: default 时标记为未指定，让后续 fallback 覆盖
-        if params.get("font_name_h1_source", "").lower() != "default":
+        # authoring_rules.md 的 _source 标注来源：source=default 表示该值是
+        # 兜底默认而非招标指定，不计入 specified，让下方"未指定跟随正文"的
+        # 回落逻辑生效（feedback_bid_no_hardcode_size / assemble_fixes §4）。
+        if params.get("font_name_h1_source", "").strip().lower() != "default":
             specified.add("font_name_h1")
+    if "doc_grid" in params:
+        fmt["doc_grid"] = str(params["doc_grid"]).strip().lower()
+        specified.add("doc_grid")
     if "font_size_h1" in params:
         n = _resolve_font_size(params["font_size_h1"])
         if n:
             fmt["font_size_h1"] = n
-            # _source: default 时标记为未指定，让后续 fallback 覆盖
-            if params.get("font_size_h1_source", "").lower() != "default":
+            # 同上：source=default 的字号是兜底默认，不视为招标指定
+            if params.get("font_size_h1_source", "").strip().lower() != "default":
                 specified.add("font_size_h1")
     if "align_h1" in params:
         v = params["align_h1"].strip().lower()
@@ -1696,7 +1703,7 @@ def _postproc_normalize_tables(doc, fmt: dict, body_size, log, force_cn_font):
     tbl_size = fmt.get("font_size_table") or max(body_size - 2, 10)
     # 边框 sz 是"八分之一磅"单位,fmt 里是 pt
     line_sz = max(1, round(float(fmt.get("line_thickness_pt", 0.5)) * 8))  # 0.5→4 / 0.75→6 / 1.0→8
-    line_color_hex = str(fmt.get("line_color", "595959")).upper()
+    line_color_hex = str(fmt.get("line_color", "000000")).upper()
 
     tbl_count = 0
     wide_tables = 0
@@ -1967,6 +1974,10 @@ def postprocess_docx(docx_path: Path, fmt: dict, project_name: str,
     # ─── 9. settings.xml 修正：东亚语言 ja-JP → zh-CN + 隐藏拼写/语法标记 ──
     _fix_settings_lang_and_proofing(doc, log)
 
+    # ─── 10. 文档网格设为无网络（响应招标"文档网络采用无网络"）──
+    if fmt.get("doc_grid", "") == "none" or fmt.get("no_doc_grid"):
+        _clear_doc_grid(doc, log)
+
     doc.save(str(docx_path))
 
 
@@ -2205,16 +2216,43 @@ def _build_toc_title(fmt: dict):
     rFonts.set(qn("w:ascii"), fmt["font_name_en"])
     rFonts.set(qn("w:hAnsi"), fmt["font_name_en"])
     rFonts.set(qn("w:cs"), fmt["font_name_en"])
+    rFonts.set(qn("w:hint"), "eastAsia")
     rPr.append(rFonts)
     sz = OxmlElement("w:sz"); sz.set(qn("w:val"), str(int(toc_size * 2))); rPr.append(sz)
     r.append(rPr)
-    t = OxmlElement("w:t"); t.text = "目    录"
+    _cs = str(fmt.get("cover_style") or "A").upper()
+    _toc_title = {"A": "目    录", "B": "施工组织设计目录", "C": "目  录"}.get(_cs, "目    录")
+    t = OxmlElement("w:t"); t.text = _toc_title
     r.append(t)
     p.append(r)
     return p
 
 
-def _build_toc_field():
+def _build_toc_subtitle(fmt: dict):
+    """目录英文副标题（C 版反串标差异化：标题下加 Contents，字号比正文小 2pt）。"""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    p = OxmlElement("w:p")
+    pPr = OxmlElement("w:pPr")
+    jc = OxmlElement("w:jc"); jc.set(qn("w:val"), "center"); pPr.append(jc)
+    p.append(pPr)
+    r = OxmlElement("w:r")
+    rPr = OxmlElement("w:rPr")
+    rFonts = OxmlElement("w:rFonts")
+    rFonts.set(qn("w:eastAsia"), fmt.get("font_name_cn", "宋体"))
+    rFonts.set(qn("w:ascii"), fmt["font_name_en"])
+    rFonts.set(qn("w:hAnsi"), fmt["font_name_en"])
+    rFonts.set(qn("w:cs"), fmt["font_name_en"])
+    rFonts.set(qn("w:hint"), "eastAsia")
+    rPr.append(rFonts)
+    sz = OxmlElement("w:sz"); sz.set(qn("w:val"), str(int(fmt.get("font_size_body", 14) * 2 - 4))); rPr.append(sz)
+    r.append(rPr)
+    t = OxmlElement("w:t"); t.text = "Contents"; r.append(t)
+    p.append(r)
+    return p
+
+
+def _build_toc_field(fmt: dict = None):
     """构造 TOC 域段落。"""
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
@@ -2226,7 +2264,9 @@ def _build_toc_field():
     r.append(fld1)
     instr = OxmlElement("w:instrText")
     instr.set(qn("xml:space"), "preserve")
-    instr.text = r'TOC \o "1-3" \h \z \u'
+    _cs = str((fmt or {}).get("cover_style") or "A").upper()
+    _lvl = "1-2" if _cs == "B" else "1-3"
+    instr.text = f'TOC \\o "{_lvl}" \\h \\z \\u'
     r.append(instr)
     fld2 = OxmlElement("w:fldChar"); fld2.set(qn("w:fldCharType"), "separate"); r.append(fld2)
     t = OxmlElement("w:t"); t.text = "（请在 Word 中按 F9 更新目录）"; r.append(t)
@@ -2266,7 +2306,9 @@ def _prepend_toc(doc, fmt: dict, log):
             body.append(elem)
 
     _insert(_build_toc_title(fmt))
-    _insert(_build_toc_field())
+    if str(fmt.get("cover_style") or "A").upper() == "C":
+        _insert(_build_toc_subtitle(fmt))
+    _insert(_build_toc_field(fmt))
     _insert(_build_section_break(body))
     log.info(f"  目录已插入（封面存在={cover_present}），已插入分节符 → 正文独立 section")
 
@@ -2419,6 +2461,38 @@ def _reapply_h1_run_fonts(doc: "Document", fmt: dict, log: logging.Logger) -> No
         log.info(f"  Word 后 H1 段落 run 字体已修复: {fixed} 处 → {h1_cn} {h1_size}pt")
 
 
+def _clear_doc_grid(doc: "Document", log: logging.Logger) -> int:
+    """清除所有 sectPr 的 docGrid（设为无网格），响应招标文件"文档网络采用无网络"要求。
+
+    pandoc 默认注入 <w:docGrid w:linePitch="360"/>（只指定行距网格），
+    但"无网络"要求 docGrid type=off（Word 不应用任何文档网格）。
+    """
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    cleared = 0
+    body = doc.element.body
+    # body 级 sectPr（末尾）
+    for sectPr in body.findall(qn("w:sectPr")):
+        for dg in sectPr.findall(qn("w:docGrid")):
+            sectPr.remove(dg)
+            cleared += 1
+        dg = OxmlElement("w:docGrid")
+        dg.set(qn("w:type"), "off")
+        sectPr.append(dg)
+    # 段落内嵌的 sectPr（分节符）
+    for pPr in body.iter(qn("w:pPr")):
+        for sectPr in pPr.findall(qn("w:sectPr")):
+            for dg in sectPr.findall(qn("w:docGrid")):
+                sectPr.remove(dg)
+                cleared += 1
+            dg = OxmlElement("w:docGrid")
+            dg.set(qn("w:type"), "off")
+            sectPr.append(dg)
+    if cleared:
+        log.info(f"  文档网格已设为无网络 (docGrid type=off): {cleared} 处")
+    return cleared
+
+
 def _reapply_heading_fonts(doc: "Document", fmt: dict, log: logging.Logger) -> None:
     """Word 在页数检查时会剥离 H1/Title 的 w:rFonts，重新注入。"""
     from docx.oxml.ns import qn
@@ -2450,7 +2524,7 @@ def _reapply_heading_fonts(doc: "Document", fmt: dict, log: logging.Logger) -> N
 
 
 def _apply_docx_metadata(docx_path: Path, variant: dict | None, log: logging.Logger,
-                         fmt: dict | None = None) -> None:
+                         fmt: dict | None = None, reapply_fonts: bool = True) -> None:
     """清理/注入 DOCX 元数据。
 
     - 批量模式（variant 非空）：按 variant 配置注入 author/last_modified_by/timestamps
@@ -2467,13 +2541,14 @@ def _apply_docx_metadata(docx_path: Path, variant: dict | None, log: logging.Log
         doc = Document(str(docx_path))
 
         # Word 在页数检查时会剥离 H1 样式的 w:rFonts，且把表格 10.5pt→11pt，此处修复
-        if fmt:
+        if fmt and reapply_fonts:
             _reapply_heading_fonts(doc, fmt, log)
             _reapply_h1_run_fonts(doc, fmt, log)
             _reapply_table_fonts(doc, fmt, log)
         cp = doc.core_properties
 
-        if variant:
+        blind_metadata = bool(fmt and (fmt.get("blind_bid") or fmt.get("no_company_info")))
+        if variant and not blind_metadata:
             md = variant.get("metadata", {}) or {}
             author = md.get("author") or variant.get("company_name", "")
             last_by = md.get("last_modified_by") or author
@@ -2501,8 +2576,10 @@ def _apply_docx_metadata(docx_path: Path, variant: dict | None, log: logging.Log
         cp.title = ""
 
         doc.save(str(docx_path))
-        if variant:
+        if variant and not blind_metadata:
             log.info(f"  元数据已注入: author={author}  created={created.isoformat(timespec='minutes')}")
+        elif blind_metadata:
+            log.info("  元数据已清空（暗标：author/last_modified_by/subject 全空）")
         else:
             log.info("  元数据已清空（单份模式：author/last_modified_by/title 全空）")
     except Exception as e:
@@ -2629,8 +2706,9 @@ tell application "Microsoft Word" to return (count of documents) as string
 # 合并:一次开关完成「更新字段(含 TOC)+ 保存 + 读页数」,避免开关 Word 两遍。
 _WORD_RENDER_COUNT_APPLESCRIPT = r'''
 tell application "Microsoft Word"
-    set d to open file name (POSIX file "{path}" as string)
+    open file name (POSIX file "{path}" as string)
     delay 3
+    set d to active document
     with timeout of 420 seconds
         try
             update field of every field of d
@@ -2775,6 +2853,12 @@ def _make_chart_style(variant_id: str, variant: dict = None) -> dict:
         _VALID_LS = {"-", "--", "-.", ":", "None", " ", "", "solid", "dashed", "dashdot", "dotted", "none"}
         style["gantt_milestone_style"] = _ms if _ms in _VALID_LS else ":"
         style["gantt_date_fmt"] = cs.get("gantt_date_fmt", "%m月")
+        style["gantt_layout"] = cs.get(
+            "gantt_layout",
+            {"V01": "classic_table", "V02": "phase_swimlane", "V03": "calendar_matrix"}.get(
+                str(variant_id).upper(), "classic_table"
+            ),
+        )
         # org chart
         style["org_direction"] = cs.get("org_direction", "TB")
         style["org_box_shape"] = cs.get("org_box_shape", "box")
@@ -2842,6 +2926,44 @@ def _make_chart_style(variant_id: str, variant: dict = None) -> dict:
     fb = dict(styles.get(str(variant_id).upper(), styles["V01"]))
     _backfill_chart_theme(fb, variant_id)  # 硬编码兜底也补主题字段, 各家不撞脸
     return fb
+
+
+def _load_project_timing(extracted_dir: Path, log: logging.Logger) -> dict:
+    """读取项目级工期基准，供相对天数图表渲染时换算绝对日期。"""
+    timing: dict = {}
+
+    derived_path = extracted_dir / "project_derived.json"
+    if derived_path.exists():
+        try:
+            derived = json.loads(derived_path.read_text(encoding="utf-8"))
+            if derived.get("schedule_start_date"):
+                timing["schedule_start_date"] = derived.get("schedule_start_date")
+            if derived.get("schedule_end_date"):
+                timing["schedule_end_date"] = derived.get("schedule_end_date")
+            if derived.get("duration_days"):
+                timing["duration_days"] = derived.get("duration_days")
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"  项目工期基准读取失败: {derived_path} ({e})")
+
+    facts_path = extracted_dir / "project_facts.json"
+    if facts_path.exists() and not timing.get("duration_days"):
+        try:
+            facts = json.loads(facts_path.read_text(encoding="utf-8"))
+            facts_root = facts.get("facts") if isinstance(facts, dict) and isinstance(facts.get("facts"), dict) else facts
+            duration = facts_root.get("duration_days") if isinstance(facts_root, dict) else None
+            if isinstance(duration, dict):
+                duration = duration.get("value")
+            if duration:
+                timing["duration_days"] = duration
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"  项目工期事实读取失败: {facts_path} ({e})")
+
+    if timing.get("schedule_start_date"):
+        log.info(
+            "  项目工期基准: D1=%s, 总工期=%s"
+            % (timing["schedule_start_date"], timing.get("duration_days", "-"))
+        )
+    return timing
 
 
 def _assemble_one(
@@ -2936,6 +3058,7 @@ def _assemble_one(
     # ─── 图表预处理：剥离 JSON/mermaid，渲染进度甘特图 PNG ──
     variant_id = variant["id"] if variant else ""
     chart_style = _make_chart_style(variant_id, variant=variant) if variant else None
+    project_timing = _load_project_timing(extracted_dir, log)
     # no_color: true → 强制图表纯黑白（无灰色填充/彩色描边）
     if chart_style and fmt.get("no_color"):
         chart_style["chart_node_filled"] = False
@@ -2949,6 +3072,7 @@ def _assemble_one(
             add_chapter_prefix=fmt.get("heading_chapter_prefix", True),
             chart_style=chart_style,
             heading_style=heading_style,
+            project_timing=project_timing,
         )
     except Exception as e:
         log.warning(f"图表预处理失败，回退到原 md：{e}")
@@ -2983,9 +3107,11 @@ def _assemble_one(
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="投标文件 DOCX 组装工具")
-    parser.add_argument("output_dir", help="output 目录路径")
+    parser.add_argument("output_dir", help="output 目录路径（兼容传入 tender 根目录）")
     parser.add_argument("--batch", action="store_true",
                         help="批量模式：扫描 output/V*/ 为每家单位生成独立 DOCX")
+    parser.add_argument("--variant", metavar="VXX",
+                        help="只组装指定变体（如 V02）；与 --batch 互斥")
     parser.add_argument("--word", action="store_true",
                         help="启用 Word 自动化(目录预渲染+真实页数检查)。默认关闭——"
                              "大文档 Word 开档分页可达数分钟,而组装本身仅 ~15s。"
@@ -2994,6 +3120,9 @@ def main():
                         help="（已为默认行为,保留兼容）跳过 Word 自动化;docx 仍正常生成,"
                              "打开后按 F9 更新目录。")
     args = parser.parse_args()
+
+    if args.batch and args.variant:
+        parser.error("--batch 与 --variant 不能同时使用")
 
     global _SKIP_WORD
     # 默认跳过 Word;仅当显式 --word 且未同时传 --no-word 时才启用。
@@ -3005,10 +3134,19 @@ def main():
         print("错误: 请先安装 python-docx: pip install python-docx")
         sys.exit(1)
 
-    output_dir = Path(args.output_dir).resolve()
-    if not output_dir.exists():
-        print(f"目录不存在: {output_dir}")
+    input_dir = Path(args.output_dir).resolve()
+    if not input_dir.exists():
+        print(f"目录不存在: {input_dir}")
         sys.exit(1)
+
+    # 主编排器历史上既传 tender 根目录，也传 output 目录。这里统一归一化，
+    # 让 --variant 的自动修复路径与手工命令使用同一契约。
+    if (input_dir / "output").is_dir() and (input_dir / "extracted").is_dir():
+        output_dir = input_dir / "output"
+        extracted_dir = input_dir / "extracted"
+    else:
+        output_dir = input_dir
+        extracted_dir = output_dir.parent / "extracted"
 
     (output_dir / "logs").mkdir(exist_ok=True)
     log_path = output_dir / "logs" / "run.log"
@@ -3018,7 +3156,30 @@ def main():
     log.info(f"bid_assemble 启动  输出目录: {output_dir}  批量={args.batch}")
     log.info("=" * 60)
 
-    extracted_dir = output_dir.parent / "extracted"
+    if args.variant:
+        vid = str(args.variant).upper()
+        if not re.fullmatch(r"V\d{2}", vid):
+            parser.error("--variant 必须为 V01/V02 形式")
+        variants_path = extracted_dir / "variants.json"
+        if not variants_path.exists():
+            log.error(f"单变体模式需要 {variants_path}")
+            sys.exit(2)
+        payload = json.loads(variants_path.read_text(encoding="utf-8"))
+        variant = next((v for v in payload.get("variants", []) if v.get("id") == vid), None)
+        if not variant:
+            log.error(f"variants.json 中未找到 {vid}")
+            sys.exit(2)
+        chapter_dir = output_dir / vid
+        if not chapter_dir.is_dir():
+            log.error(f"变体章节目录不存在: {chapter_dir}")
+            sys.exit(2)
+        try:
+            _assemble_one(chapter_dir, extracted_dir, output_dir, log, variant=variant)
+        except Exception as e:
+            log.error(f"{vid} 组装失败: {e}", exc_info=True)
+            sys.exit(1)
+        log.info(f"bid_assemble 单变体完成: {vid}")
+        return
 
     if not args.batch:
         # 单份模式（保持原行为）

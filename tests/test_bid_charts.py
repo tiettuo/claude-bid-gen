@@ -1,11 +1,48 @@
 """bid_charts 纯函数特征化测试 —— 锁定围栏解析/类型判定/编号/适配器行为,
 为后续重构提供安全网(P3)。"""
 import sys
+import hashlib
+import logging
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import bid_charts as C
+
+
+def test_schedule_layouts_render_structurally_distinct_pngs(tmp_path):
+    data = {
+        "title": "测试横道图",
+        "tasks": [
+            {"name": "施工准备", "start": 1, "end": 5, "phase": "准备"},
+            {"name": "钢结构安装", "start": 6, "end": 18, "phase": "主体"},
+            {"name": "收尾验收", "start": 19, "end": 25, "phase": "验收"},
+        ],
+        "milestones": [{"name": "主体完成", "date": 18}],
+        "project": {"start_date": "2026-01-01", "total_duration_days": 25},
+    }
+    hashes = set()
+    for layout in ("classic_table", "phase_swimlane", "calendar_matrix"):
+        path = tmp_path / f"{layout}.png"
+        assert C.render_schedule_png(data, path, data["title"], logging.getLogger(__name__),
+                                     {"gantt_layout": layout})
+        assert path.stat().st_size > 10_000
+        hashes.add(hashlib.sha256(path.read_bytes()).hexdigest())
+    assert len(hashes) == 3
+
+
+def test_schedule_accepts_chinese_day_labels_and_duration(tmp_path):
+    data = {
+        "tasks": [
+            {"name": "准备", "start": "第1天", "end": "第3天", "phase": "准备"},
+            {"name": "安装", "start": 4, "duration": 5, "phase": "主体"},
+        ],
+        "project": {"start_date": "2026-01-01"},
+    }
+    out = tmp_path / "schedule.png"
+    assert C.render_schedule_png(data, out, "测试", logging.getLogger(__name__),
+                                 {"gantt_layout": "phase_swimlane"})
+    assert out.stat().st_size > 10_000
 
 
 # ─── iter_fences ────────────────────────────────────────────────
@@ -73,7 +110,20 @@ def test_prepend_chapter_number_idx0_noop():
 # ─── _normalize_heading_numbers ─────────────────────────────────
 def test_normalize_heading_numbers_styleB():
     out = C._normalize_heading_numbers("## 施工方案\n### 细节", 7, "B")
-    assert out == "## 07.1 施工方案\n### 07.1.1 细节"
+    assert out == "## 7.1 施工方案\n### 7.1.1 细节"
+
+
+def test_normalize_heading_numbers_styleB_no_leading_zero():
+    out = C._normalize_heading_numbers("## 施工方案\n### 细节", 1, "B")
+    assert out == "## 1.1 施工方案\n### 1.1.1 细节"
+    assert "01." not in out
+
+
+def test_normalize_heading_numbers_does_not_create_zero_section():
+    out = C._normalize_heading_numbers("### 工期控制中的文明施工协同要求\n## 进度计划", 9, "B")
+    assert "9.0.1" not in out
+    assert out.splitlines()[0] == "### 工期控制中的文明施工协同要求"
+    assert out.splitlines()[1] == "## 9.1 进度计划"
 
 
 def test_normalize_heading_numbers_strips_existing_number():
@@ -142,3 +192,25 @@ def test_validate_chart_data_unknown_type_passes():
     """未登记类型不拦(保守:不误杀)。"""
     ok, _ = C.validate_chart_data("table", {"anything": 1})
     assert ok
+
+
+def test_schedule_project_timing_sets_relative_baseline():
+    data = {"type": "schedule", "tasks": [{"name": "施工准备", "start": 1, "end": 3}]}
+    out = C._inject_schedule_project_timing(
+        data,
+        {"schedule_start_date": "2026-07-23", "duration_days": 60},
+    )
+
+    assert out["project"]["start_date"] == "2026-07-23"
+    assert out["project"]["total_duration_days"] == 60
+    assert C._resolve_baseline(out).strftime("%Y-%m-%d") == "2026-07-23"
+
+
+def test_adapt_schedule_duration_is_inclusive():
+    out = C._adapt_schedule_data({
+        "type": "schedule",
+        "items": [{"name": "完工确认", "start": 60, "duration": 1}],
+    })
+
+    assert out["tasks"][0]["start"] == 60
+    assert out["tasks"][0]["end"] == 60

@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "officecli_min_version": "1.0.136",
+  "default_profile": "A",
+  "similarity": {
+    "mode": "warning",
+    "contact_sheet_similarity_warn": 0.9,
+    "layout_hash_distance_warn": 8
+  },
+  "profiles": {
+    "A": {
+      "description": "左对齐紧凑章节 + 完整网格表",
+      "h2_align": "left",
+      "h3_align": "left",
+      "h2_space_before_pt": 10,
+      "h2_space_after_pt": 4,
+      "h3_space_before_pt": 7,
+      "h3_space_after_pt": 3,
+      "table_grammar": "full_grid",
+      "table_padding_twips": 70,
+      "image_align": "center"
+    },
+    "B": {
+      "description": "居中二级标题 + 横线型表格",
+      "h2_align": "center",
+      "h3_align": "left",
+      "h2_space_before_pt": 14,
+      "h2_space_after_pt": 6,
+      "h3_space_before_pt": 8,
+      "h3_space_after_pt": 3,
+      "table_grammar": "horizontal_rules",
+      "table_padding_twips": 120,
+      "image_align": "left"
+    },
+    "C": {
+      "description": "左对齐舒展章节 + 外框分层表格",
+      "h2_align": "left",
+      "h3_align": "center",
+      "h2_space_before_pt": 16,
+      "h2_space_after_pt": 7,
+      "h3_space_before_pt": 10,
+      "h3_space_after_pt": 4,
+      "table_grammar": "frame_horizontal",
+      "table_padding_twips": 95,
+      "image_align": "right"
+    },
+    "D": {
+      "description": "居中章节组 + 上下边界表格",
+      "h2_align": "center",
+      "h3_align": "center",
+      "h2_space_before_pt": 12,
+      "h2_space_after_pt": 5,
+      "h3_space_before_pt": 9,
+      "h3_space_after_pt": 4,
+      "table_grammar": "top_bottom",
+      "table_padding_twips": 140,
+      "image_align": "center"
+    },
+    "E": {
+      "description": "左对齐高密度章节 + 外框表格",
+      "h2_align": "left",
+      "h3_align": "left",
+      "h2_space_before_pt": 8,
+      "h2_space_after_pt": 3,
+      "h3_space_before_pt": 6,
+      "h3_space_after_pt": 2,
+      "table_grammar": "outer_frame",
+      "table_padding_twips": 55,
+      "image_align": "left"
+    },
+    "F": {
+      "description": "居中二级标题 + 轻横线表格",
+      "h2_align": "center",
+      "h3_align": "left",
+      "h2_space_before_pt": 18,
+      "h2_space_after_pt": 8,
+      "h3_space_before_pt": 11,
+      "h3_space_after_pt": 5,
+      "table_grammar": "light_horizontal",
+      "table_padding_twips": 110,
+      "image_align": "right"
+    }
+  }
+}

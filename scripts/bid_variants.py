@@ -221,11 +221,14 @@ def variant_chart_theme(idx: int) -> dict:
         "org_direction": direction,
         "flow_direction": direction,
         "gantt_bar_lw": _GANTT_BAR_LWS[idx % len(_GANTT_BAR_LWS)],  # 横道条边线宽,按序号互异
+        # 横道图不再只靠线型/阴影做微差异；前三套分别采用表格式、泳道式、周历矩阵式。
+        "gantt_layout": _GANTT_LAYOUTS[idx % len(_GANTT_LAYOUTS)],
     }
 
 
 _GV_DIR_FALLBACK = ["TB", "LR"]
 _GANTT_BAR_LWS = [0.5, 0.9, 1.4, 1.9]
+_GANTT_LAYOUTS = ["classic_table", "phase_swimlane", "calendar_matrix"]
 
 
 def _variant_index(variant_id: str, fallback: int) -> int:

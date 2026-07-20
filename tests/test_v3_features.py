@@ -52,6 +52,14 @@ def test_boq_partial():
         result = check_boq_chapter_coverage(ext, ["施工方案（含土石方）"])
         assert result["ratio"] < 1.0
 
+def test_boq_uncategorized_covered_by_technical_container():
+    with tempfile.TemporaryDirectory() as td:
+        ext = Path(td)
+        (ext / "boq.json").write_text(json.dumps({"categories": [{"name":"未分类"}]}), encoding="utf-8")
+        result = check_boq_chapter_coverage(ext, ["施工方案与技术措施"])
+        assert result["missing"] == []
+        assert result["ratio"] == 1.0
+
 def test_boq_no_file():
     with tempfile.TemporaryDirectory() as td:
         result = check_boq_chapter_coverage(Path(td), ["施工方案"])

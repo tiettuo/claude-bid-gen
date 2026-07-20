@@ -2,12 +2,12 @@
 """
 bid_facts_extract.py - Tier 1 项目事实抽取
 
-从 extracted/<主文档>.txt 抽出 13 个项目事实字段,正则优先 + LLM 兜底。
+从 extracted/<主文档>.txt 抽出项目事实字段,正则优先 + LLM 兜底。
 每个字段带 source 元信息(file/page/char_offset/method),供下游审计。
 
 字段:
   project_name / project_code / location / client / agent /
-  funding_source / control_price / duration_days /
+  funding_source / control_price / duration_days / bid_deadline /
   start_date / end_date / quality_target / qualification / project_scope
 
 输出:extracted/project_facts.json
@@ -102,7 +102,13 @@ def _line_field(field_keyword: str) -> str:
     return rf"{field_keyword}\s*[:：]\s*([^\n|]{{3,200}}?)(?=\n|\||$)"
 
 
-# 13 字段规则(每字段多个 fallback 正则,按命中顺序取第一个)
+_DATETIME_PAT = (
+    r"(?:\d{4}[-/年]\s*\d{1,2}[-/月]\s*\d{1,2}日?"
+    r"(?:\s*\d{1,2}\s*(?:[:：时])\s*\d{1,2}\s*分?)?)"
+)
+
+
+# 字段规则(每字段多个 fallback 正则,按命中顺序取第一个)
 FIELD_PATTERNS: dict[str, list[str]] = {
     "project_name": [
         _table_cell(r"项目名称"),
@@ -153,9 +159,14 @@ FIELD_PATTERNS: dict[str, list[str]] = {
     ],
     "duration_days": [
         r"计划工期[:：]\s*(\d{1,4})\s*日历?天",
-        r"工期[:：]\s*(\d{1,4})\s*日历?天",
+        r"工期(?:要求)?[:：]\s*(\d{1,4})\s*日历?天",
         r"总工期[:：]\s*(\d{1,4})\s*日历?天",
         r"(\d{2,4})\s*日历天\s*(?:\(|（)?(?:不含冬季|含)",
+    ],
+    "bid_deadline": [
+        rf"投标(?:文件)?递交时间\s*{_DATETIME_PAT}\s*(?:至|到|[-—－])\s*({_DATETIME_PAT})",
+        rf"(?:投标截止时间|递交投标文件截止时间|提交投标文件截止时间|竞争性比选开始时间|比选开始时间)\s*[:：]?\s*({_DATETIME_PAT})",
+        rf"在\s*({_DATETIME_PAT})\s*(?:前)?(?:递交|提交)投标文件",
     ],
     "start_date": [
         r"计划开工日期\s*[:：]\s*(\d{4}[-/年]\s*\d{1,2}[-/月]\s*\d{1,2}日?)",
@@ -228,6 +239,26 @@ def _normalize_date(s: str) -> str | None:
     return None
 
 
+def _normalize_datetime(s: str) -> str | None:
+    """日期时间标准化为 YYYY-MM-DD 或 YYYY-MM-DD HH:MM。"""
+    if not s:
+        return None
+    m = re.match(
+        r"(\d{4})[-/年]\s*(\d{1,2})[-/月]\s*(\d{1,2})日?"
+        r"(?:\s*(\d{1,2})\s*(?:[:：时])\s*(\d{1,2})\s*分?)?",
+        s.strip(),
+    )
+    if not m:
+        return _normalize_date(s)
+    try:
+        base = f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+        if m.group(4) is not None and m.group(5) is not None:
+            return f"{base} {int(m.group(4)):02d}:{int(m.group(5)):02d}"
+        return base
+    except ValueError:
+        return None
+
+
 _PLACEHOLDER_VALUE_RE = re.compile(
     r"^(?:见)?(?:投标人须知前附表|须知前附表|前附表|项目名称|工程名称|本项目|本工程|"
     r"\(?项目名称\)?|（项目名称）|/|无|未明确)$"
@@ -244,6 +275,8 @@ def _is_bad_project_name(value: str | None) -> bool:
     if _PLACEHOLDER_VALUE_RE.search(v):
         return True
     if re.search(r"见\s*投标人须知", v):
+        return True
+    if v.startswith("致：") or v.startswith("致:"):
         return True
     return False
 
@@ -356,6 +389,7 @@ def extract_facts(full_text: str, source_file: str, log) -> dict:
         "funding_source": 30,
         "control_price":  50,
         "duration_days":  30,
+        "bid_deadline":   30,
         "start_date":     30,
         "end_date":       30,
         "quality_target": 30,
@@ -367,6 +401,7 @@ def extract_facts(full_text: str, source_file: str, log) -> dict:
     POSTPROCESS = {
         "control_price": lambda v: _normalize_price(v),
         "duration_days": lambda v: int(v) if v.isdigit() else None,
+        "bid_deadline": _normalize_datetime,
         "start_date": _normalize_date,
         "end_date": _normalize_date,
     }
@@ -412,6 +447,7 @@ FIELD_DESCRIPTIONS = {
     "funding_source": "资金来源(如政府采购/财政拨款/自筹)",
     "control_price":  "最高限价/控制价/招标控制价(纯数字,单位元)",
     "duration_days":  "工期(日历天整数;若为月按30天换算)",
+    "bid_deadline":   "投标截止/递交截止/开标或比选开始时间(YYYY-MM-DD HH:MM;未明示则 null)",
     "start_date":     "计划开工日期(YYYY-MM-DD;未明示则 null)",
     "end_date":       "计划竣工日期(YYYY-MM-DD;未明示则 null)",
     "quality_target": "质量目标/质量等级(如合格/达到现行验收规范)",
@@ -447,10 +483,10 @@ def extract_facts_llm_fallback(full_text: str, missing_fields: list[str],
         f"{snippet}\n\n"
         f"---\n请抽取以下字段:\n{field_desc_lines}\n\n"
         f"输出 JSON,字段名严格使用上述英文键名,例如:\n"
-        f'{{"control_price": 169500.00, "duration_days": 40, "start_date": null}}\n\n'
+        f'{{"control_price": 169500.00, "duration_days": 40, "bid_deadline": "2026-07-16 09:30", "start_date": null}}\n\n'
         f"特别注意:\n"
         f"- 数字字段(control_price/duration_days)输出纯数字,不带单位、不带千分位、不带引号\n"
-        f"- 日期字段输出 \"YYYY-MM-DD\" 字符串,未明示输出 null\n"
+        f"- 日期字段输出 \"YYYY-MM-DD\"；bid_deadline 可输出 \"YYYY-MM-DD HH:MM\"；未明示输出 null\n"
         f"- 文字字段输出完整原文表述,不要概括或同义改写\n"
     )
 
@@ -498,6 +534,8 @@ def extract_facts_llm_fallback(full_text: str, missing_fields: list[str],
                 v = int(v)
             elif not isinstance(v, int):
                 v = None
+        elif field == "bid_deadline":
+            v = _normalize_datetime(str(v))
         elif field in ("start_date", "end_date"):
             v = _normalize_date(str(v))
         else:
@@ -584,6 +622,7 @@ DRIVES = {
     "funding_source": ["brain.section1", "chapter01.项目概况"],
     "control_price":  ["brain.section1", "derive.size_class", "rejection.B1.10"],
     "duration_days":  ["brain.section1", "chapter05.进度计划", "rejection.B1.16"],
+    "bid_deadline":   ["derive.schedule_start_date", "chapter05.进度计划"],
     "start_date":     ["chapter05.进度计划", "derive.season_set"],
     "end_date":       ["chapter05.进度计划", "derive.spans_winter"],
     "quality_target": ["brain.section1", "chapter08.质量管理"],

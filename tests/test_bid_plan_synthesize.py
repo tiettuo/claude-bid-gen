@@ -62,3 +62,33 @@ def test_repair_technical_criteria_alignment_semantically_reorders_shifted_rows(
     by_title = {i["title_original"]: i["criteria_original"] for i in repaired}
     assert "关键技术" in by_title["施工方案与技术措施"]
     assert "质量" in by_title["质量管理体系与措施"]
+
+
+def test_repair_keeps_generic_completeness_criteria_locked():
+    completeness = "对本项目总体认识深刻，方案完整，进度、质量、安全、环保及文明施工措施具有针对性。"
+    safety = "建立专职安全监督机构，有完整可操作的安全生产管理制度和劳动保护措施。"
+    items = [
+        {
+            "section": "技术",
+            "title_original": "内容完整性和编制水平",
+            "score": 4,
+            "criteria_original": completeness,
+        },
+        {
+            "section": "技术",
+            "title_original": "安全管理体系与措施",
+            "score": 4,
+            "criteria_original": safety,
+        },
+        {
+            "section": "技术",
+            "title_original": "质量管理体系与措施",
+            "score": 4,
+            "criteria_original": "质量目标明确，对工程、材料、设备和成品质量制定控制措施。",
+        },
+    ]
+
+    repaired = repair_technical_criteria_alignment(items)
+    by_title = {i["title_original"]: i["criteria_original"] for i in repaired}
+    assert by_title["内容完整性和编制水平"] == completeness
+    assert by_title["安全管理体系与措施"] == safety

@@ -14,9 +14,17 @@ from bid_plan_variants import (
     assign_strategy,
     build_variant_chapters,
     verify_scoring_coverage,
+    _assign_charts_for_variant,
 )
 
 _LOG = logging.getLogger("test_plan_variants")
+
+
+def test_schedule_chart_is_never_retyped_or_removed():
+    variant = {"id": "V02", "section_order_seed": 2617993262}
+    specs = {"05": [{"section": "5.1", "type": "schedule", "required": False}]}
+    result = _assign_charts_for_variant(variant, specs, {}, [{"num": "05", "title": "进度计划"}])
+    assert "05" not in result["chart_overrides"]
 
 
 def test_assign_strategy_distinct_across_variants():

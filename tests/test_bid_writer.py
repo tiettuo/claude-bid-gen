@@ -106,3 +106,27 @@ def test_build_writer_tasks_chapter_filter(tmp_path):
     args = SimpleNamespace(chapter="2", force=False)  # 仅生成第 02 章
     tasks, skip = W._build_writer_tasks(variants, chapters, output, args, log)
     assert len(tasks) == 1 and tasks[0][1]["num"] == "02"
+
+
+def test_build_writer_tasks_interleaved_by_variant(tmp_path):
+    """feedback_bid_writer_scheduling 方案A：任务按变体轮转交错，
+    前 N 个任务应分属不同变体，避免单模型信号量阻塞占住全部 worker。"""
+    import logging
+    from types import SimpleNamespace
+    log = logging.getLogger("t_build3"); log.setLevel(logging.ERROR)
+    output = tmp_path / "output"; output.mkdir()
+    variants = [{"id": "V01", "model": "glm"}, {"id": "V02", "model": "deepseek"},
+                {"id": "V03", "model": "kimi"}]
+    chapters = [
+        {"num": "01", "title": "a", "filename": "01_a.md"},
+        {"num": "02", "title": "b", "filename": "02_b.md"},
+        {"num": "03", "title": "c", "filename": "03_c.md"},
+    ]
+    args = SimpleNamespace(chapter=None, force=False)
+    tasks, skip = W._build_writer_tasks(variants, chapters, output, args, log)
+    order = [(v["id"], ch["num"]) for v, ch, _ in tasks]
+    assert order == [
+        ("V01", "01"), ("V02", "01"), ("V03", "01"),
+        ("V01", "02"), ("V02", "02"), ("V03", "02"),
+        ("V01", "03"), ("V02", "03"), ("V03", "03"),
+    ]

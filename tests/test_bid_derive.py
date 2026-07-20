@@ -2,7 +2,10 @@
 import pytest
 
 from bid_derive import (
+    add_workdays,
     chars_per_page,
+    derive,
+    parse_date,
     recommend_target_chars,
     resolve_font_size_pt,
     parse_format_spec_from_rules,
@@ -90,3 +93,21 @@ line_spacing: 28磅
     assert spec["font_size_pt"] == 16
     assert spec["line_spacing_kind"] == "fixed_pt"
     assert spec["line_spacing_value"] == 28
+
+
+def test_add_workdays_from_bid_deadline():
+    """2026-07-16(周四)之后第5个工作日为 2026-07-23。"""
+    assert add_workdays(parse_date("2026-07-16"), 5).isoformat() == "2026-07-23"
+
+
+def test_derive_schedule_start_from_bid_deadline():
+    facts = {
+        "duration_days": {"value": 60},
+        "bid_deadline": {"value": "2026-07-16 09:30"},
+        "start_date": {"value": None},
+        "end_date": {"value": None},
+    }
+    out = derive(facts)
+    assert out["schedule_start_date"] == "2026-07-23"
+    assert out["schedule_end_date"] == "2026-09-20"
+    assert out["schedule_constraints"]["earliest_start_date"] == "2026-07-23"

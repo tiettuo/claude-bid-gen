@@ -129,8 +129,9 @@ def page_count(docx: Path, log) -> int | None:
         return None
     script = f'''
 tell application "Microsoft Word"
-    set d to open file name (POSIX file "{docx}" as string)
+    open file name (POSIX file "{docx}" as string)
     delay 4
+    set d to active document
     with timeout of 420 seconds
         set pg to (compute statistics d statistic (statistic pages))
     end timeout

@@ -136,6 +136,14 @@ def build_page_index(full_text: str) -> list[PageInfo]:
     return pages
 
 
+def parse_page_header(line: str) -> tuple[int | None, str]:
+    """Parse bid_extract page headers and return (page_num, source_page_method)."""
+    m = _PAGE_HEADER_RE.match(line.strip())
+    if not m:
+        return None, "text"
+    return int(m.group(1)), "ocr" if (m.group(2) or "").strip() else "text"
+
+
 def page_at_offset(pages: list[PageInfo], offset: int) -> int | None:
     """二分查找:某字符偏移所在的页码。"""
     lo, hi = 0, len(pages)
@@ -475,24 +483,35 @@ def auto_detect_hybrid(payload: dict) -> tuple[bool, list[str]]:
 def _validate_scoring_sections(payload: dict, log) -> tuple[bool, list[str]]:
     """C 方案:编号规则核验 LLM 的 section 归类。
 
-    评分表条目编号通常是固定格式:
+    评分表条目编号在西藏范本里通常是固定格式:
       - 2.2.4(1)-x → 技术
       - 2.2.4(2)-x → 项目管理
       - 2.2.4(3)-x → 投标报价
       - 2.2.4(4)-x → 其他因素
-      - 1.x → 技术
-      - 2.x → 项目管理
-      - 3.x → 投标报价
-      - 4.x → 其他因素
 
-    LLM 归类和编号规则不一致时:以编号规则为准,记录差异日志。
-    任何 section 字段缺失的条目自动补填编号规则值。
+    其他招标文件常用 1/2/3 表示报价/技术/业绩,不能泛化按首位编号覆盖。
+    因此只对 2.2.4(n) 这类强结构编号使用编号规则;其余先按标题语义补齐。
     返回 (has_conflict, messages)。
     """
     import re
 
     SECTION_BY_GROUP = {"1": "技术", "2": "项目管理", "3": "投标报价", "4": "其他因素"}
-    SECTION_BY_PREFIX = {"1": "技术", "2": "项目管理", "3": "投标报价", "4": "其他因素"}
+
+    def _semantic_section(title: str) -> str | None:
+        title = title or ""
+        if any(k in title for k in ("报价", "价格", "投标价", "比选报价")):
+            return "投标报价"
+        if any(k in title for k in ("业绩", "信用", "财务", "奖项", "信誉", "履约")):
+            return "其他因素"
+        if any(k in title for k in (
+            "施工方案", "技术措施", "资源配备", "施工设备", "质量管理",
+            "安全管理", "进度计划", "工期", "文明施工", "环境保护",
+            "重难点", "施工组织"
+        )):
+            return "技术"
+        if any(k in title for k in ("项目经理", "技术负责人", "管理班子", "人员配备")):
+            return "项目管理"
+        return None
 
     def _expected_section(item_id: str) -> str | None:
         """从评分项编号推断 section。
@@ -503,11 +522,7 @@ def _validate_scoring_sections(payload: dict, log) -> tuple[bool, list[str]]:
         m = re.search(r"2\.2\.4\s*[\(（]\s*([1-4])\s*[\)）]", item_id)
         if m:
             return SECTION_BY_GROUP.get(m.group(1))
-
-        # 兼容 `2.2.4(3)` 无尾号、全角括号等已经由上方覆盖。
-        # 其他常见简表才按首段 1/2/3/4 解释。
-        prefix = item_id.split(".")[0]
-        return SECTION_BY_PREFIX.get(prefix)
+        return None
 
     messages: list[str] = []
     has_conflict = False
@@ -519,7 +534,8 @@ def _validate_scoring_sections(payload: dict, log) -> tuple[bool, list[str]]:
         item_id = (item.get("id") or "").strip()
         if not item_id:
             continue
-        expected = _expected_section(item_id)
+        title = item.get("title_original", "")
+        expected = _expected_section(item_id) or _semantic_section(title)
         if not expected:
             continue  # 无法按编号规则判断,信任 LLM
 
@@ -530,9 +546,8 @@ def _validate_scoring_sections(payload: dict, log) -> tuple[bool, list[str]]:
         elif llm_section != expected:
             item["section"] = expected  # 编号规则优先
             conflict_count += 1
-            title = item.get("title_original", "")
             messages.append(
-                f"section 冲突: {item_id} '{title[:30]}' LLM→{llm_section} 编号规则→{expected} (已用编号规则)"
+                f"section 冲突: {item_id} '{title[:30]}' LLM→{llm_section} 规则→{expected} (已用规则)"
             )
 
     if fixed_count:
@@ -864,12 +879,11 @@ def _grep_implicit_constraints(tender_text: str, existing_keys: set[str], log) -
     # 拆原文为带页号的行
     cur_page: int | None = None
     cur_method: str = "text"
-    page_re = re.compile(r"\[第(\d+)页\](?:\s*-\s*视觉OCR)?", re.UNICODE)
     for raw_line in tender_text.splitlines():
-        m = page_re.search(raw_line)
-        if m:
-            cur_page = int(m.group(1))
-            cur_method = "ocr" if "视觉OCR" in raw_line else "text"
+        page_num, page_method = parse_page_header(raw_line)
+        if page_num is not None:
+            cur_page = page_num
+            cur_method = page_method
             continue
         if not raw_line.strip():
             continue
@@ -970,12 +984,11 @@ def _grep_result_disqualifications(
     seen_norms = [_norm_clause(c.get("text_original", "")) for c in reference_clauses]
     cur_page: int | None = None
     cur_method: str = "text"
-    page_re = re.compile(r"\[第(\d+)页\](?:\s*-\s*视觉OCR)?", re.UNICODE)
     for raw_line in tender_text.splitlines():
-        m = page_re.search(raw_line)
-        if m:
-            cur_page = int(m.group(1))
-            cur_method = "ocr" if "视觉OCR" in raw_line else "text"
+        page_num, page_method = parse_page_header(raw_line)
+        if page_num is not None:
+            cur_page = page_num
+            cur_method = page_method
             continue
         line = raw_line.strip()
         if not line or not any(kw in line for kw in _RESULT_DISQ_KEYWORDS):

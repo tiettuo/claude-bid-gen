@@ -161,6 +161,17 @@ def parse_date(s: str | None) -> date | None:
     return None
 
 
+def add_workdays(start: date, days: int) -> date:
+    """从 start 次日开始累计工作日(周一至周五),返回第 days 个工作日日期。"""
+    cur = start
+    left = int(days)
+    while left > 0:
+        cur += timedelta(days=1)
+        if cur.weekday() < 5:
+            left -= 1
+    return cur
+
+
 def season_set(start: date | None, end: date | None) -> list[str]:
     """有效施工季节集合(西藏施工气候分区,非天文季节)。
     西藏 4500m 海拔以下:11-3 月停工区,9-10 月秋季,6-8 月夏季,4-5 月春季。
@@ -383,19 +394,31 @@ def derive(facts: dict, extracted_dir: Path | None = None) -> dict:
 
     location = _val("location")
     duration_days = _val("duration_days")
+    bid_deadline_s = _val("bid_deadline")
     start_date_s = _val("start_date")
     end_date_s = _val("end_date")
     control_price = _val("control_price")
 
     explicit_altitude, explicit_source = extract_explicit_altitude(extracted_dir)
     altitude = explicit_altitude if explicit_altitude is not None else lookup_altitude(location)
+    bid_deadline = parse_date(bid_deadline_s)
+    earliest_start = add_workdays(bid_deadline, 5) if bid_deadline else None
     start = parse_date(start_date_s)
     end = parse_date(end_date_s)
+    start_source = "facts.start_date" if start else None
+
+    # 未明示开工日时,以投标截止后第 5 个工作日作为施组计划基准。
+    # 若抽到的开工日早于该基准,按基准日纠偏,避免生成早于投标截止的进度计划。
+    if earliest_start and (not start or start < earliest_start):
+        start = earliest_start
+        start_source = "bid_deadline_plus_5_workdays"
 
     # 若有 duration 但缺 end_date,用 start + duration 推导
+    end_source = "facts.end_date" if end else None
     if start and not end and duration_days:
         try:
             end = start + timedelta(days=int(duration_days) - 1)
+            end_source = f"{start_source or 'start_date'}+duration_days-1"
         except (ValueError, TypeError):
             pass
 
@@ -411,6 +434,17 @@ def derive(facts: dict, extracted_dir: Path | None = None) -> dict:
             "start": start.isoformat() if start else None,
             "end": end.isoformat() if end else None,
         },
+        "schedule_start_date": start.isoformat() if start else None,
+        "schedule_end_date": end.isoformat() if end else None,
+        "schedule_inferred_from": {
+            "start": start_source,
+            "end": end_source,
+        },
+        "schedule_constraints": {
+            "bid_deadline": str(bid_deadline_s) if bid_deadline_s else None,
+            "earliest_start_date": earliest_start.isoformat() if earliest_start else None,
+            "min_start_rule": "投标截止后第5个工作日(周一至周五口径)",
+        },
         "size_class": size_class(float(control_price) if control_price else None),
         "size_inferred_from_price": float(control_price) if control_price else None,
     }
@@ -420,6 +454,8 @@ def derive(facts: dict, extracted_dir: Path | None = None) -> dict:
         "altitude_class":  ["brain.section3", "chapter07.高原专项", "chapter10.医疗保障", "chapter12.冬期"],
         "season_set":      ["chapter12.季节性施工措施"],
         "spans_winter":    ["chapter12.冬期施工", "chapter05.进度计划"],
+        "schedule_start_date": ["chapter05.进度计划", "chapter04.人员出工计划"],
+        "schedule_end_date": ["chapter05.进度计划", "chapter04.人员出工计划"],
         "size_class":      ["chapter_plan.target_pages", "chapter01.项目概况"],
     }
     return derived
@@ -431,6 +467,7 @@ def main() -> int:
     p.add_argument("tender_dir", nargs="?", help="投标根目录(读 extracted/project_facts.json)")
     p.add_argument("--location", help="手动指定地点(单元测试用)")
     p.add_argument("--duration", type=int, help="工期日历天")
+    p.add_argument("--bid-deadline", help="投标截止/开标时间")
     p.add_argument("--start", help="开工日期")
     p.add_argument("--end", help="竣工日期")
     p.add_argument("--price", type=float, help="控制价(元)")
@@ -472,10 +509,11 @@ def main() -> int:
         return 0
 
     # 命令行直接传参模式(单元测试)
-    if args.location or args.duration or args.start or args.price:
+    if args.location or args.duration or args.bid_deadline or args.start or args.price:
         facts = {
             "location": {"value": args.location} if args.location else None,
             "duration_days": {"value": args.duration} if args.duration else None,
+            "bid_deadline": {"value": args.bid_deadline} if args.bid_deadline else None,
             "start_date": {"value": args.start} if args.start else None,
             "end_date": {"value": args.end} if args.end else None,
             "control_price": {"value": args.price} if args.price else None,

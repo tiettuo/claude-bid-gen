@@ -280,9 +280,30 @@ def _split_by_subsection(items: list[dict], section_name: str | None) -> dict[st
     return {"": items}
 
 
+def _looks_like_boq_text(path: Path) -> bool:
+    try:
+        sample = path.read_text(encoding="utf-8", errors="ignore")[:20000]
+    except OSError:
+        return False
+    return any(k in sample for k in (
+        "分部分项工程项目清单", "工程量清单", "项目编码", "项目名称 | 项目特征",
+        "综合单价", "措施项目清单", "单位工程"
+    ))
+
+
 def collect_boq(ext: Path, log) -> dict:
-    """扫 extracted/ 下所有 *清单*.txt,合并解析。"""
-    txt_files = list(ext.glob("*清单*.txt")) + list(ext.glob("*BoQ*.txt")) + list(ext.glob("*工程量*.txt"))
+    """扫 extracted/ 下清单文本,合并解析。
+
+    文件名优先匹配 *清单* / *工程量*;若用户文件只叫"项目.xlsx",
+    兜底扫描 txt 内容里的清单表头。
+    """
+    txt_files = (
+        list(ext.glob("*清单*.txt"))
+        + list(ext.glob("*BoQ*.txt"))
+        + list(ext.glob("*工程量*.txt"))
+    )
+    if not txt_files:
+        txt_files = [p for p in ext.glob("*.txt") if _looks_like_boq_text(p)]
     if not txt_files:
         log.warning(f"  {WARN} 未找到清单 txt 文件")
         return {"categories": [], "_meta": {"source_files": []}}

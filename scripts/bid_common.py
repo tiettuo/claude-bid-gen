@@ -225,7 +225,7 @@ def parse_plan_budget(plan_path: Path) -> dict:
               "chars_per_page": None, "figure_ratio": None}
     patterns = {
         "target_pages": r"(?:建议)?目标(?:总)?页数[：:\s*]*(?:\*\*)?([\d.]+)",
-        "target_total_chars": r"目标总字数[：:\s*]*[^\n]*?(?:≈|=)\s*\*?\*?([\d,，]{4,})",
+        "target_total_chars": r"目标总字数[：:\s*]*(?:\*\*)?([\d,，]{4,})",
         "figure_ratio": r"图表占比[^\d]{0,10}(?:\*\*)?([\d.]+)\s*%",
     }
     for key, pat in patterns.items():
@@ -421,9 +421,18 @@ def check_boq_chapter_coverage(ext_dir: "Path", chapter_titles: list[str]) -> di
     cats = boq.get("categories",[]) or []
     if not cats: return {"covered":[],"missing":[],"ratio":1.0}
     cov=[]; mis=[]
+    has_technical_container = any(
+        any(k in (t or "") for k in ("施工方案", "技术措施", "工程构成", "施工技术方案"))
+        for t in chapter_titles
+    )
     for c in cats:
         n = c.get("name","") if isinstance(c,dict) else str(c)
         if not n: continue
+        # "未分类"是清单抽取无法恢复专业类目时的占位值；在评分型文件中，
+        # 施工内容通常承载于"施工方案与技术措施"等评分章节，而不是写入类目名。
+        if n in ("未分类", "其他", "其他工程") and has_technical_container:
+            cov.append(n)
+            continue
         # 类目基名:专业前缀("建筑装饰工程-门窗工程" → "建筑装饰工程")。
         # 合格制章标题锁大纲原文,清单专业靠子项标题括注覆盖,故按基名匹配。
         base = n.split("-", 1)[0]
@@ -465,33 +474,51 @@ def repair_technical_criteria_alignment(items: list[dict], log=None) -> list[dic
     if len(tech) < 3:
         return items
 
-    criteria_pool = [
-        (idx, item.get("criteria_original", "") or "")
-        for idx, item in enumerate(tech)
-        if item.get("criteria_original")
+    # 「内容完整性和编制水平」这类综合标题没有单一语义组。若把它也放进
+    # 全排列，安全项会因为综合描述里出现“安全”而抢走它的 criteria，造成
+    # 本来正确的评分表被误修复。只允许具有明确专业语义的标题参与重排；
+    # 综合项保持原行锁定。
+    semantic_title_keys = (
+        "施工方案", "技术措施", "重难点", "质量", "安全", "文明",
+        "环保", "环境", "绿色", "进度", "工期", "劳动力", "机械",
+        "资源", "保修",
+    )
+    repairable_positions = [
+        pos for pos, item in enumerate(tech)
+        if any(k in (item.get("title_original", "") or "") for k in semantic_title_keys)
     ]
-    if len(criteria_pool) < 3:
+    if len(repairable_positions) < 2:
         return items
 
-    if len(tech) > 8 or len(criteria_pool) < len(tech):
+    criteria_pool = [
+        (pos, tech[pos].get("criteria_original", "") or "")
+        for pos in repairable_positions
+        if tech[pos].get("criteria_original")
+    ]
+    if len(criteria_pool) < 2:
+        return items
+
+    if len(repairable_positions) > 8 or len(criteria_pool) < len(repairable_positions):
         return items
 
     pool_indices = [idx for idx, _ in criteria_pool]
     criteria_by_idx = dict(criteria_pool)
     current_by_item = {
         pos: next(
-            (idx for idx, criteria in criteria_pool if criteria == (item.get("criteria_original", "") or "")),
+            (idx for idx, criteria in criteria_pool
+             if criteria == (tech[pos].get("criteria_original", "") or "")),
             None,
         )
-        for pos, item in enumerate(tech)
+        for pos in repairable_positions
     }
 
-    best_perm = tuple(pool_indices[:len(tech)])
+    best_perm = tuple(pool_indices[:len(repairable_positions)])
     best_key = (-1.0, -1)
-    for perm in itertools.permutations(pool_indices, len(tech)):
+    for perm in itertools.permutations(pool_indices, len(repairable_positions)):
         total = 0.0
         kept_current = 0
-        for pos, pool_idx in enumerate(perm):
+        for order_idx, pool_idx in enumerate(perm):
+            pos = repairable_positions[order_idx]
             title = tech[pos].get("title_original", "") or ""
             score = _criteria_match_score(title, criteria_by_idx[pool_idx])
             if current_by_item[pos] == pool_idx:
@@ -506,9 +533,10 @@ def repair_technical_criteria_alignment(items: list[dict], log=None) -> list[dic
 
     repaired_by_id: dict[int, dict] = {}
     changes = 0
-    for pos, item in enumerate(tech):
+    for order_idx, pos in enumerate(repairable_positions):
+        item = tech[pos]
         current = item.get("criteria_original", "") or ""
-        chosen = criteria_by_idx[best_perm[pos]]
+        chosen = criteria_by_idx[best_perm[order_idx]]
         if chosen != current:
             new_item = dict(item)
             new_item["criteria_original"] = chosen
