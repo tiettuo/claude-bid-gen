@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "description": "地区专项技术暗标 profile。仅在暗标项目（bid_common.needs_blind_scan 为真）且地区命中或 rules 显式指定时激活；激活后 fmt_overrides 为招标硬性要求，优先级最高。与 bid_visual_profiles.json（A-F 视觉 profile）是独立关注点，不合并。",
+  "profiles": {
+    "chongqing": {
+      "description": "重庆地区技术暗标专项要求（违反任一项 → 符合性评审不合格/技术方案零分）",
+      "region_keywords": ["重庆"],
+      "fmt_overrides": {
+        "no_cover": true,
+        "no_page_numbers": true,
+        "no_color": true,
+        "header_disabled": true,
+        "font_name_cn": "仿宋",
+        "font_size_body": 14,
+        "bold_h1": false,
+        "page_size": "A4"
+      },
+      "headings_follow_body": true,
+      "all_text_no_bold": true,
+      "chart_allowed_page_sizes": ["A3", "A4"],
+      "advisory_max_pages": 200,
+      "pages_not_eval_factor": true,
+      "color_channel_spread_threshold": 16,
+      "penalty_note": "重庆技术暗标格式要求为符合性评审硬性条款：违反任何一项（封面/白页倒页/投标人信息/加粗修饰/页面规格/彩色/页码）将导致符合性评审不合格、技术方案零分；200 页为原则上参考上限，招标明确不得将页数作为评审因素，故仅提示不判废。"
+    }
+  }
+}

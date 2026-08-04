@@ -810,6 +810,9 @@ def _run_single(root: Path, chapter_dir: Path, variant_id: str) -> int:
     log.info("DOCX 格式实测层审计:")
     format_audit_result = _run_format_audit(root, output, log)
 
+    log.info("地区暗标专项检测:")
+    blind_profile_result = _run_blind_profile_checks(root, chapter_dir, log)
+
     log.info("标准引用编造检测:")
     config_dir = Path(__file__).resolve().parent.parent / "configs"
     truth = load_standards_truth(config_dir)
@@ -859,6 +862,7 @@ def _run_single(root: Path, chapter_dir: Path, variant_id: str) -> int:
         "must_include_sections": must,
         "chart_coverage": chart_coverage,
         "format_audit": format_audit_result,
+        "blind_profile_check": blind_profile_result,
         "standards_check": std_result,
         "schedule_check": schedule_check,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -953,6 +957,34 @@ def _run_single(root: Path, chapter_dir: Path, variant_id: str) -> int:
                 md_lines.append(f"| {att} | {'✓' if hit else '✗'} |")
     md_lines.append("")
 
+    md_lines.append("## 6. 地区暗标专项检测")
+    md_lines.append("")
+    if not blind_profile_result.get("active"):
+        md_lines.append("⏭ 未激活地区暗标 profile（非暗标项目或地区未命中），跳过。")
+    else:
+        md_lines.append(f"**Profile**：{blind_profile_result.get('profile')}")
+        if blind_profile_result.get("penalty_note"):
+            md_lines.append("")
+            md_lines.append(f"**违规后果**：{blind_profile_result['penalty_note']}")
+        md_lines.append("")
+        bp_violations = blind_profile_result.get("violations", [])
+        if bp_violations:
+            md_lines.append(f"❌ 命中 {len(bp_violations)} 处违规：")
+            md_lines.append("")
+            md_lines.append("| 规则 | 位置 | 详情 |")
+            md_lines.append("|------|------|------|")
+            for v in bp_violations:
+                md_lines.append(f"| {v['rule']} | {v['location']} | {v['detail']} |")
+        else:
+            md_lines.append("✓ 专项检测通过（加粗/彩色文字/页码/彩色图/白页倒页均未检出）")
+        bp_warnings = blind_profile_result.get("warnings", [])
+        if bp_warnings:
+            md_lines.append("")
+            md_lines.append("⚠ 提示（不影响退出码）：")
+            for w in bp_warnings:
+                md_lines.append(f"- {w}")
+    md_lines.append("")
+
     report_md = reports_dir / "compliance_scan.md"
     report_md.write_text("\n".join(md_lines), encoding="utf-8")
     log.info(f"人读报告: {report_md}")
@@ -966,6 +998,8 @@ def _run_single(root: Path, chapter_dir: Path, variant_id: str) -> int:
     has_format_severe = format_audit_result.get("exit_code", 0) >= 2
     has_std_violation = std_result.get("fabricated", 0) > 0
     has_schedule_violation = bool(schedule_check.get("violations"))
+    # 地区暗标专项违规与 blind_violation 同级 → exit 1；其 warnings（含 200 页 advisory）永不影响
+    has_blind_profile_violation = bool(blind_profile_result.get("violations"))
     has_violation = (
         bool(blind_hits)
         or any(r["required"] and not r["present"] for r in responses)
@@ -974,6 +1008,7 @@ def _run_single(root: Path, chapter_dir: Path, variant_id: str) -> int:
         or has_format_severe
         or has_std_violation
         or has_schedule_violation
+        or has_blind_profile_violation
     )
     log.info("=" * 60)
     if has_violation:
@@ -990,6 +1025,10 @@ def _run_single(root: Path, chapter_dir: Path, variant_id: str) -> int:
             log.error(f"工期超招标硬顶（超期废标风险）：{len(schedule_check['violations'])} 处")
             for v in schedule_check["violations"]:
                 log.error(f"    - {v['detail']}")
+        if has_blind_profile_violation:
+            log.error(f"地区暗标专项（{blind_profile_result.get('profile')}）违规 "
+                      f"{len(blind_profile_result['violations'])} 处"
+                      f"（{blind_profile_result.get('penalty_note', '')}）")
         log.error("存在合规风险，退出码 1")
         sys.exit(1)
     log.info("合规扫描通过 ✓")
@@ -1020,6 +1059,103 @@ def _run_format_audit(root, chapter_dir, log):
     except Exception as e:
         log.warning(f"  格式审计调用失败：{e}")
         return {"error": str(e), "skipped": True}
+
+
+def _find_docx_candidates(chapter_dir: Path) -> list[Path]:
+    """定位组装 DOCX（与 _run_format_audit 同口径 + 通用 *.docx 兜底）。"""
+    candidates = sorted(chapter_dir.glob("*_施工组织设计.docx"))
+    if not candidates and chapter_dir.name.startswith("V"):
+        candidates = sorted(chapter_dir.parent.glob(f"{chapter_dir.name}_*_施工组织设计.docx"))
+    if not candidates:
+        candidates = sorted(p for p in chapter_dir.glob("*.docx")
+                            if not p.name.startswith("~$"))
+    return candidates
+
+
+def _run_blind_profile_checks(root: Path, chapter_dir: Path, log) -> dict:
+    """地区暗标专项检测（如重庆技术暗标）。profile 未激活 → {"skipped": True}。
+
+    违规（加粗/彩色文字/页码/彩色图/白页/倒页）记入 violations → 与 blind_violation
+    同级影响退出码；200 页 advisory 与检测跳过只记 warnings，永不影响退出码。
+    """
+    extracted = root / "extracted"
+    try:
+        from bid_blind_profile import (
+            detect_blind_profile, load_profile,
+            check_bold_runs, check_color_runs, check_page_numbers,
+            check_color_images, check_blank_and_rotated_pages,
+            check_advisory_page_limit, pymupdf_available,
+        )
+    except ImportError as e:
+        log.warning(f"  bid_blind_profile 不可用：{e}")
+        return {"skipped": True, "reason": f"import error: {e}"}
+
+    name = detect_blind_profile(extracted)
+    if not name:
+        log.info("  未激活地区暗标 profile（非暗标或地区未命中）— 跳过")
+        return {"skipped": True, "active": False}
+    profile = load_profile(name) or {}
+    result = {
+        "active": True,
+        "profile": name,
+        "penalty_note": profile.get("penalty_note", ""),
+        "violations": [],
+        "warnings": [],
+    }
+    log.info(f"  地区暗标 profile 激活：{name}")
+    if profile.get("penalty_note"):
+        log.info(f"  违规后果：{profile['penalty_note']}")
+
+    docxs = _find_docx_candidates(chapter_dir)
+    if not docxs:
+        msg = "未找到组装 DOCX，DOCX 级检测跳过（先跑 bid_assemble）"
+        log.warning(f"  {msg}")
+        result["warnings"].append(msg)
+        # 无 docx 时兜底直扫 charts 目录 PNG
+        charts_dir = chapter_dir / "charts"
+        if charts_dir.is_dir():
+            result["violations"] += check_color_images(charts_dir, log=log)
+        return result
+
+    for dx in docxs:
+        for fn in (check_bold_runs, check_color_runs, check_page_numbers, check_color_images):
+            try:
+                hits = fn(dx, log=log)
+                result["violations"] += hits
+                log.info(f"  {fn.__name__}({dx.name}): {len(hits)} 处违规"
+                         + (" ✓" if not hits else ""))
+            except Exception as e:  # noqa: BLE001  degrade-safe：单 check 失败不 fail
+                log.warning(f"  {fn.__name__}({dx.name}) 执行失败，跳过：{e}")
+                result["warnings"].append(f"{fn.__name__} 执行失败：{e}")
+
+        # 白页/倒页 + 页数 advisory：PDF 来源 = docx 同名 .pdf（调用方负责导出）
+        pdf = dx.with_suffix(".pdf")
+        if pdf.exists():
+            result["violations"] += check_blank_and_rotated_pages(pdf, log=log)
+            if pymupdf_available():
+                try:
+                    import fitz
+                    with fitz.open(str(pdf)) as _d:
+                        result["warnings"] += [
+                            h["detail"] for h in
+                            check_advisory_page_limit(_d.page_count, profile)
+                        ]
+                except Exception as e:  # noqa: BLE001
+                    result["warnings"].append(f"页数 advisory 读取失败：{e}")
+        else:
+            msg = (f"未找到 {pdf.name}，白页/倒页与页数 advisory 跳过"
+                   f"（可用 Word AppleScript 导出 PDF 后重跑）")
+            log.warning(f"  {msg}")
+            result["warnings"].append(msg)
+
+    n_v = len(result["violations"])
+    if n_v:
+        log.error(f"  地区暗标专项（{name}）：{n_v} 处违规（{profile.get('penalty_note', '')}）")
+        for v in result["violations"][:10]:
+            log.error(f"    - [{v['rule']}] {v['location']}：{v['detail']}")
+    else:
+        log.info(f"  地区暗标专项（{name}）：未发现违规 ✓")
+    return result
 
 
 if __name__ == "__main__":

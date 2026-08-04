@@ -41,7 +41,7 @@ from bid_common import make_script_logger, parse_chapter_plan  # noqa: E402
 # ─── 关键词 → chart type 映射 ──────────────────────────────────────────
 # 顺序很重要:更具体的优先(进度+网络优先于进度)
 _KEYWORD_RULES: list[tuple[str, list[str]]] = [
-    ("aoa_network",   ["双代号网络", "网络计划", "关键线路图"]),
+    ("aoa_network",   ["施工进度网络图", "双代号网络", "网络计划", "关键线路图"]),
     ("schedule",      ["进度横道", "横道图", "甘特", "施工进度", "进度计划",
                        "工期计划", "进度安排"]),
     ("site_layout",   ["总平面图", "平面布置图", "总平面布置", "施工总平面",
@@ -100,7 +100,10 @@ _CHAPTER_BLOCK_RE = re.compile(
     re.DOTALL,
 )
 # 匹配 "- 5.4 主要资源配置计划概述:450 字"
-_SUBITEM_RE = re.compile(r"^\s*[-•]\s+(\d+\.\d+)\s+([^:：\n]+)", re.MULTILINE)
+_SUBITEM_RE = re.compile(
+    r"^\s*[-•]\s+(\d+\.\d+)\s+(.+?)(?=[:：]\s*[\d,，]+\s*字)",
+    re.MULTILINE,
+)
 
 
 def parse_subitems(plan_text: str) -> dict[str, list[tuple[str, str]]]:

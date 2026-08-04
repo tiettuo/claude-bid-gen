@@ -228,6 +228,12 @@ def scan_duration(text: str, duration_days) -> list[str]:
     """
     if not duration_days:
         return []
+    # duration_days 可能是字符串（如"以合同签订为准"），尝试提取数字
+    if isinstance(duration_days, str):
+        m_num = re.search(r"\d+", duration_days)
+        duration_days = int(m_num.group()) if m_num else None
+    if not duration_days:
+        return []
     hits: list[str] = []
     seen: set[int] = set()
     for m in re.finditer(r"(?:总工期|合同工期|投标工期|建设工期)[^。\n]{0,10}?(\d{2,3})\s*(?:个?日历天|天)", text):

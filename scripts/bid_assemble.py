@@ -32,6 +32,12 @@ from bid_common import (  # noqa: E402
     scan_blind_bid_violations,
 )
 from bid_charts import preprocess_chapter_dir  # noqa: E402
+from bid_blind_profile import (  # noqa: E402
+    detect_blind_profile,
+    load_profile,
+    apply_profile_to_fmt,
+    grayscale_png_dir,
+)
 
 
 def _find_pandoc() -> str:
@@ -1896,10 +1902,12 @@ def _pp_strip_lists_and_fonts(doc, fmt, body_size, log):
         _pp_clean_paragraph_rPr(p)
         # 规范 run 字体（含超链接内）—— 按段落样式分流：H1/Title/Subtitle 走 h1_cn，其余走 body
         # 非 H1 段落同时剥掉 Markdown **强调** 转出来的 <w:b/>，保证正文无粗体
+        # 地区暗标 profile（all_text_no_bold，如重庆全文含标题不得加粗）时标题 run 同样剥粗体
         h1_like = _pp_is_h1_like(p)
         para_font = h1_cn if h1_like else body_cn
+        strip_bold = (not h1_like) or bool(fmt.get("_all_text_no_bold"))
         for r in _pp_iter_all_runs(p):
-            _pp_force_cn_font(r, fmt, cn_font=para_font, strip_bold=not h1_like)
+            _pp_force_cn_font(r, fmt, cn_font=para_font, strip_bold=strip_bold)
 
     log.info(f"  去除列表项目符号: {list_stripped} 处")
 
@@ -3009,6 +3017,24 @@ def _assemble_one(
                 f"未在 disqualification_rules.md 的 format_sets 块中定义"
             )
 
+    # ★ 地区暗标专项 profile（如重庆技术暗标）：招标硬性格式要求，优先级最高。
+    #   必须在 parse_format_rules（含"暗标自动关联项"）与 format_set 之后应用，
+    #   确保 profile 覆盖一切前序推断。非暗标/非已配置地区 → 不激活，管道零变化。
+    try:
+        _bp_name = detect_blind_profile(extracted_dir)
+        if _bp_name:
+            _bp = load_profile(_bp_name)
+            if _bp:
+                _specified = fmt.get("_specified_keys")
+                if not isinstance(_specified, set):
+                    _specified = set()
+                    fmt["_specified_keys"] = _specified
+                apply_profile_to_fmt(fmt, _specified, _bp, log)
+                fmt["_blind_profile"] = _bp_name
+                log.info(f"  [暗标地区 profile] {_bp_name} 已激活（招标硬性格式要求，最高优先级）")
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"  暗标地区 profile 应用失败（非致命，按无 profile 继续）: {e}")
+
     info = read_tender_info(chapter_dir, log, extracted_dir=extracted_dir)
     if variant:
         info["company_name"] = variant.get("company_name", info.get("company_name", ""))
@@ -3077,6 +3103,14 @@ def _assemble_one(
     except Exception as e:
         log.warning(f"图表预处理失败，回退到原 md：{e}")
         tmp_md_files = md_files
+
+    # 地区暗标 profile + no_color（如重庆"图表不得使用彩色"）：
+    # 图表 PNG 先 PIL 转灰度再嵌入——比改各渲染器主题简单且保证合规。
+    if fmt.get("_blind_profile") and fmt.get("no_color"):
+        try:
+            grayscale_png_dir(chapter_dir / "charts", log)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"  图表灰度化失败（非致命）: {e}")
 
     # ─── pandoc 管线 ─────────────────────────────────
     pandoc_exe = _find_pandoc()

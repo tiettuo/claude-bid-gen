@@ -297,11 +297,22 @@ def collect_boq(ext: Path, log) -> dict:
     文件名优先匹配 *清单* / *工程量*;若用户文件只叫"项目.xlsx",
     兜底扫描 txt 内容里的清单表头。
     """
-    txt_files = (
+    txt_candidates = (
         list(ext.glob("*清单*.txt"))
         + list(ext.glob("*BoQ*.txt"))
         + list(ext.glob("*工程量*.txt"))
     )
+    # A filename such as "工程量清单.txt" matches more than one glob.  Preserve
+    # discovery order while parsing each physical file only once; otherwise every
+    # quantity and the downstream work-complexity estimate are doubled.
+    txt_files: list[Path] = []
+    seen_paths: set[Path] = set()
+    for candidate in txt_candidates:
+        key = candidate.resolve()
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
+        txt_files.append(candidate)
     if not txt_files:
         txt_files = [p for p in ext.glob("*.txt") if _looks_like_boq_text(p)]
     if not txt_files:

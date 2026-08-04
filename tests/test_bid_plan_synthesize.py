@@ -1,8 +1,49 @@
 from bid_plan_synthesize import (
+    _figure_count,
     _score_item_subitem_count,
+    assign_weights,
+    llm_plan_subitems,
     repair_technical_criteria_alignment,
     score_item_subitems,
 )
+
+
+class _Log:
+    def info(self, *args, **kwargs):
+        pass
+
+
+def test_passfail_outline_subsections_are_never_merged():
+    original = [f"原文子节{i}" for i in range(1, 15)]
+
+    subs = llm_plan_subitems("绿色施工管理体系与措施", original, 1249, 11, "", _Log())
+
+    assert len(subs) == len(original)
+    assert [s["covers"] for s in subs] == [[s] for s in original]
+    assert sum(s["chars"] for s in subs) == 1249
+
+
+def test_standard_passfail_outline_prioritizes_construction_plan():
+    topics = [
+        "工程概况", "编制依据", "总体施工部署", "项目组织管理机构",
+        "施工总进度计划", "施工总平面布置", "施工方案与技术措施",
+        "质量管理体系与措施", "工期保证技术组织措施",
+        "安全文明施工体系与措施", "绿色施工管理体系与措施",
+        "季节性施工措施", "地下管线及其他地上地下设施的保护加固措施",
+        "民工工资保证措施", "附图及附表", "其他",
+    ]
+
+    weights = assign_weights(topics)
+
+    assert sum(weights.values()) == 100
+    assert weights["施工方案与技术措施"] == 27
+    assert weights["施工方案与技术措施"] > weights["附图及附表"]
+
+
+def test_required_attachment_charts_are_budgeted_in_attachment_chapter():
+    assert _figure_count("施工总进度计划") == 0
+    assert _figure_count("施工总平面布置") == 0
+    assert _figure_count("附图及附表") == 2
 
 
 def test_score_item_subitems_expands_construction_plan_for_complex_work():

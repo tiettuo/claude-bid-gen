@@ -68,8 +68,11 @@ _AUX_PATTERNS = [
     r"技术规范书", r"工程量", r"图纸", r"地勘", r"勘探",
     r"设备表", r"仪器", r"附件\d", r"_t\d",
 ]
-# 主文档强匹配关键词
-_MAIN_PATTERNS = [r"招标文件", r"招标公告", r"招标项目"]
+# 主文档强匹配关键词（含竞争性磋商/竞争性谈判/询价等采购文件）
+_MAIN_PATTERNS = [
+    r"招标文件", r"招标公告", r"招标项目",
+    r"磋商文件", r"磋商公告", r"谈判文件", r"询价文件", r"采购文件",
+]
 
 
 def pick_main_tender_text(extracted_dir: Path, log) -> Path | None:

@@ -1,6 +1,6 @@
 import json
 
-from bid_boq_extract import _parse_loose_boq_text
+from bid_boq_extract import _parse_loose_boq_text, collect_boq
 from bid_derive import derive
 from bid_facts_extract import extract_facts
 
@@ -37,6 +37,23 @@ def test_loose_boq_html_table_extracts_items():
     cats = _parse_loose_boq_text(text)
     assert cats[0]["category"] == "园林绿化-绿化工程"
     assert [i["name"] for i in cats[0]["items"]] == ["整理绿化用地", "鼠茅草 + 高山嵩草混播"]
+
+
+def test_collect_boq_deduplicates_overlapping_filename_globs(tmp_path):
+    ext = tmp_path / "extracted"
+    ext.mkdir()
+    (ext / "某工程量清单.txt").write_text(
+        """
+工程名称：某项目 【建筑工程】
+| 1 | 010101001001 | 土方开挖 | 素土 | m³ | 12.5 |
+""",
+        encoding="utf-8",
+    )
+
+    payload = collect_boq(ext, _Log())
+
+    assert payload["_meta"]["source_files"] == ["某工程量清单.txt"]
+    assert sum(len(c["items"]) for c in payload["categories"]) == 1
 
 
 def test_derive_prefers_explicit_altitude(tmp_path):

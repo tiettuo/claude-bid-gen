@@ -201,6 +201,21 @@ def detect_cover_required(extracted: Path) -> bool:
     return True
 
 
+def pages_hard_cap_enforced(extracted: Path) -> bool:
+    """页数超限是否 hard-fail。
+
+    地区暗标 profile 声明 pages_not_eval_factor（如重庆"不得将页数作为评审因素"）
+    时，页数超 advisory_max_pages/硬顶降级为 warn，永不 hard-fail。
+    其余项目（profile 未激活）行为不变，仍按硬顶 hard-fail。
+    """
+    try:
+        from bid_blind_profile import detect_blind_profile, load_profile
+        bp = load_profile(detect_blind_profile(extracted) or "")
+    except Exception:  # noqa: BLE001
+        return True
+    return not (bp and bp.get("pages_not_eval_factor"))
+
+
 def detect_mandated_format(extracted: Path) -> bool:
     """判断招标是否强制规定统一排版格式(字体/字号/行距/页边距/颜色)。
 
@@ -255,6 +270,10 @@ def verify(tender_dir: Path, check_pages: bool, log) -> int:
     # 2. 单份逐份检查
     cap = detect_page_cap(extracted)
     cover_required = detect_cover_required(extracted)
+    # 地区暗标 profile（pages_not_eval_factor，如重庆）：页数超限降级 warn，不 hard-fail
+    cap_enforced = pages_hard_cap_enforced(extracted)
+    if cap and not cap_enforced:
+        log.info(f"  页数上限 {cap} 页按地区暗标 profile 降级为 advisory（页数不作为评审因素）")
     per: dict[str, dict] = {}
     for dx in docxs:
         vid = dx.name.split("_")[0] if is_batch else "单份"
@@ -277,7 +296,12 @@ def verify(tender_dir: Path, check_pages: bool, log) -> int:
             if pg is None:
                 add("warn", f"{vid} 页数", "Word 页数实测未取到")
             elif cap and pg > cap:
-                add("fail", f"{vid} 页数", f"{pg} 页 > 招标硬顶 {cap} 页")
+                if cap_enforced:
+                    add("fail", f"{vid} 页数", f"{pg} 页 > 招标硬顶 {cap} 页")
+                else:
+                    add("warn", f"{vid} 页数",
+                        f"{pg} 页 > 参考上限 {cap} 页"
+                        f"（地区暗标 profile：页数不作为评审因素，仅提示不判废）")
             elif cap:
                 log.info(f"  {vid} 页数 {pg} ≤ 硬顶 {cap} ✓")
             else:

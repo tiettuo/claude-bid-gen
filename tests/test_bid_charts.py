@@ -8,6 +8,24 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import bid_charts as C
+from bid_chart_specs import classify_by_title, parse_subitems
+
+
+def test_chart_spec_subitem_parser_keeps_attachment_title_after_colon():
+    plan = """
+### 15 附图及附表(382 字,2 图表,2.6 页)
+- 15.4 附表四：计划开、竣工日期和施工进度网络图:76 字
+- 15.5 附表五：施工总平面图:78 字
+"""
+
+    parsed = parse_subitems(plan)
+
+    assert parsed["15"][0][1] == "附表四：计划开、竣工日期和施工进度网络图"
+    assert parsed["15"][1][1] == "附表五：施工总平面图"
+
+
+def test_required_progress_network_uses_aoa_renderer():
+    assert classify_by_title("附表四：计划开、竣工日期和施工进度网络图") == "aoa_network"
 
 
 def test_schedule_layouts_render_structurally_distinct_pngs(tmp_path):
