@@ -11,6 +11,4 @@ logs/
 *.dwg
 projects/
 .claude/
-memory/project_*.md
-memory/user_bidding_professional.md
 *.local.json
