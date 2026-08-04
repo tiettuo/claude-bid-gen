@@ -2,7 +2,7 @@
 
 工程类招投标的全流程施工组织设计生成管道，从原始招标 PDF/DOCX 抽取，到机器审校 + 合规检查 + 批量投标相似度防围标。
 
-**当前形态**：原生于 Claude Code 的 slash command + 26 个 Python 脚本管道。本目录为**自包含迁移包**，已脱离 `Claude Code 目录/` 硬编码，可移植到任何支持 prompt + bash 工具调用的智能体（如 hermas）。
+**当前形态**：脚本管道 + 智能体编排。可移植到任何支持 prompt + bash 工具调用的智能体（Claude Code / Codex / pi / hermas 等）。
 
 ---
 
@@ -56,11 +56,10 @@ bid-gen/
 │   ├── chart_schemas.md         # 7 种图表渲染器精确 schema
 │   └── bid-gen-flowchart.html   # 业务流程图（Mermaid，浏览器打开）
 │
-└── memory/                      # 19 条经验沉淀（从原 Claude Code memory 系统迁出）
-    ├── feedback_bid_*.md        # 9 条反馈教训（写代码必读）
-    ├── reference_bid_*.md       # 4 条参考资料
-    ├── project_*.md             # 5 条历史项目案例
-    └── user_bidding_professional.md  # 用户画像
+└── memory/                      # 经验沉淀（feedback 教训 + 脱敏项目案例）
+    ├── feedback_bid_*.md        # 反馈教训（写代码必读）
+    ├── reference_bid_*.md       # 参考资料
+    └── project_*.md             # 历史项目案例（已脱敏：不含客户名/金额/编号）
 ```
 
 ---
@@ -163,11 +162,5 @@ python $BID_GEN_HOME/scripts/bid_run.py /path/to/招标文件目录
 
 ## 版本来源
 
-迁移自 `Claude Code 目录/` 下的 Claude Code skill 部署，时间：2026-05-11
-原位置：
-- `Claude Code 命令目录/bid-gen.md`
-- `Claude Code 技能目录/bid-gen/`
-- `Claude Code 脚本目录/bid_*.py`
-- `Claude Code 配置目录/bid_*_config.json`
-- `Claude Code 文档目录/chart_schemas.md`
-- `Claude Code 记忆目录/*bid*.md` 等
+本仓库由早期的个人 Claude Code skill 部署整理为自包含项目：脚本、提示词、配置、记忆全部收拢在本目录，无外部硬编码路径。
+
