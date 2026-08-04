@@ -5,7 +5,7 @@ Flask app,把 bid-gen 命令行流水线包装成浏览器可用的服务：上�
 ## 启动
 
 ```bash
-cd BID_GEN_HOME
+cd bid-gen
 source ~/.env  # 加载 DEEPSEEK_API_KEY 等
 python3 web/app.py            # http://127.0.0.1:5000
 python3 web/app.py --port 8080

@@ -17,19 +17,19 @@
 
 ```bash
 # 配置体检（首次使用 / 环境变量改动后）
-python BID_GEN_HOME/scripts/bid_run.py --doctor
+python $BID_GEN_HOME/scripts/bid_run.py --doctor
 
-# 首次初始化 LLM 配置模板（若 BID_GEN_HOME/configs/bid_llm_config.json 不存在）
-python BID_GEN_HOME/scripts/bid_llm_client.py --init
+# 首次初始化 LLM 配置模板（若 $BID_GEN_HOME/configs/bid_llm_config.json 不存在）
+python $BID_GEN_HOME/scripts/bid_llm_client.py --init
 
 # 自动判定单份 / 批量模式，依次跑完 Step 1 → Step 6
-python BID_GEN_HOME/scripts/bid_run.py "$ARGUMENTS"
+python $BID_GEN_HOME/scripts/bid_run.py "$ARGUMENTS"
 
 # 中断后从最近失败步骤续跑
-python BID_GEN_HOME/scripts/bid_run.py "$ARGUMENTS" --resume
+python $BID_GEN_HOME/scripts/bid_run.py "$ARGUMENTS" --resume
 
 # 查看实时进度 / 阻断项（只读）
-python BID_GEN_HOME/scripts/bid_status.py "$ARGUMENTS"
+python $BID_GEN_HOME/scripts/bid_status.py "$ARGUMENTS"
 ```
 
 `bid_run.py` 在 `output/.bid_run.state.json` 维护 checkpoint，每一步都有 `ok/fail/skip` 状态；`--from` / `--to` 可指定区间，`--dry-run` 只打印计划。**Step 2（brain/plan/rules）必须由 Claude 手工生成**，`bid_run.py` 检测缺失会停下并提示。
@@ -52,12 +52,12 @@ python BID_GEN_HOME/scripts/bid_status.py "$ARGUMENTS"
 ### Step 1：提取所有文件文本
 
 ```bash
-python BID_GEN_HOME/scripts/bid_extract.py "$ARGUMENTS"
+python $BID_GEN_HOME/scripts/bid_extract.py "$ARGUMENTS"
 ```
 
 等待提取完成，确认 `extracted/manifest.txt` 已生成。
 
-**分层视觉 OCR（自动）：** 提取阶段会按 `BID_GEN_HOME/configs/bid_vision_config.json` 的七类关键词触发视觉大模型（Qwen-VL-Max 主力，GLM-OCR 兜底）：
+**分层视觉 OCR（自动）：** 提取阶段会按 `$BID_GEN_HOME/configs/bid_vision_config.json` 的七类关键词触发视觉大模型（Qwen-VL-Max 主力，GLM-OCR 兜底）：
 - **强制触发（即使 pdfplumber 抽到了字）**：废标条款 / 暗标-排版-装订 / 评分办法 — 这三类关乎废标与得分命脉，必须用视觉模型保留表格结构
 - **扫描页才触发**：响应要求 / 技术核心 / 重难点 / 业绩 — 文字页信 pdfplumber
 
@@ -66,7 +66,7 @@ python BID_GEN_HOME/scripts/bid_extract.py "$ARGUMENTS"
 **可选：PDF 指纹采集（文件较多、类型混杂时推荐）**
 
 ```bash
-python BID_GEN_HOME/scripts/bid_fingerprint.py "$ARGUMENTS"
+python $BID_GEN_HOME/scripts/bid_fingerprint.py "$ARGUMENTS"
 ```
 
 生成 `extracted/fingerprints.json`，包含每个 PDF 的页数/纸张/字符密度/关键词命中/启发式初判（tender_main / boq / drawing / spec 等）。Step 2 读取 project_brain 时可参考此文件辅助识别文件用途。
@@ -76,7 +76,7 @@ python BID_GEN_HOME/scripts/bid_fingerprint.py "$ARGUMENTS"
 ### Step 1.5：骨架优先提取（★ 必跑，v2 方法论核心）
 
 ```bash
-python BID_GEN_HOME/scripts/bid_skeleton_extract.py "$ARGUMENTS"
+python $BID_GEN_HOME/scripts/bid_skeleton_extract.py "$ARGUMENTS"
 ```
 
 **为什么必跑：** 历史三个项目（仓储类项目A/学校类/仓储类项目B）暴露的根因是 Step 2 让 Claude 凭印象写 brain.md，导致招标第七章「主要技术内容 N 项」必含大纲被系统性漏抄、废标条款来源页号集中（如全部标 p75）。v2 方法论的核心是**把骨架从细节中分离**——机器先出 JSON，Claude 再翻译。
@@ -87,7 +87,7 @@ python BID_GEN_HOME/scripts/bid_skeleton_extract.py "$ARGUMENTS"
 - `disqualification.json` — 全部废标/否决条款，每条带 `source_page` + `source_page_method`
 - `document_map.md` — 主文档章节-页码索引（启发式，不调 LLM）
 
-**完整方法论：** 参见 `BID_GEN_HOME/skills/bid-gen/references/extraction-methodology.md`（v2 四阶段闭环 + 八条铁律 + 历史失败案例）。
+**完整方法论：** 参见 `$BID_GEN_HOME/skills/bid-gen/references/extraction-methodology.md`（v2 四阶段闭环 + 八条铁律 + 历史失败案例）。
 
 **退出码：** 0 = 全部通过；1 = 软警告（如 outline `found=false`）；2 = 硬失败（LLM 不可用 / JSON 解析反复失败）。bid_run.py 自动嵌入此步，跑完后自动进 Step 2。
 
@@ -242,7 +242,7 @@ python BID_GEN_HOME/scripts/bid_skeleton_extract.py "$ARGUMENTS"
   - 仿宋三号 16pt + 固定 28 磅 → **700-800 字/页**
   - 宋体三号 16pt + 1.5 倍 → **450-580 字/页**
   - 计算时取**区间中位值**做目标，按上限做"超页风险底线"
-  - 自动查表：`python BID_GEN_HOME/scripts/bid_derive.py --recommend-chars --pages 70 --font 14 --line 1.5`（也可直接 import `bid_derive.recommend_target_chars`）
+  - 自动查表：`python $BID_GEN_HOME/scripts/bid_derive.py --recommend-chars --pages 70 --font 14 --line 1.5`（也可直接 import `bid_derive.recommend_target_chars`）
 - 目标总字数 = 目标文字页数 × 字数密度中位值，图表页数按工程类型估（施工方案密集型 25-30%，制度密集型 15-20%）
 
 第二圈【按分值比例分大章节】
@@ -332,7 +332,7 @@ must_include_sections:
 #### 2.4 机器校验（★ 在向用户展示前必须跑）
 
 ```bash
-python3 BID_GEN_HOME/scripts/bid_plan_verify.py "$ARGUMENTS"
+python3 $BID_GEN_HOME/scripts/bid_plan_verify.py "$ARGUMENTS"
 ```
 
 检查 8 条铁律（脚本实现全量，文档同步）：
@@ -352,7 +352,7 @@ python3 BID_GEN_HOME/scripts/bid_plan_verify.py "$ARGUMENTS"
 #### 2.5 派生图表规格（chart_specs.json）
 
 ```bash
-python3 BID_GEN_HOME/scripts/bid_chart_specs.py "$ARGUMENTS"
+python3 $BID_GEN_HOME/scripts/bid_chart_specs.py "$ARGUMENTS"
 ```
 
 工具读 `chapter_plan.md` 各章节图表数 + 子项标题，按关键词启发式给每张图分配 chart type（schedule / org_chart / site_layout / hierarchy_flow / process_flow / resource_curve / aoa_network），并把招标硬性要求的图（总平面图、进度网络图）标 `required:true`，输出到 `extracted/chart_specs.json`。
@@ -360,12 +360,12 @@ python3 BID_GEN_HOME/scripts/bid_chart_specs.py "$ARGUMENTS"
 **用途：**
 - bid_writer 在生成章节时把对应 spec 的 schema + 示例注入 prompt，强制 LLM 输出对应 ```json``` 块
 - bid_compliance 在 Step 5 比对 chart_specs vs charts/ 实际产出，缺 required 图退出码 1 阻断
-- 7 种渲染器的精确 schema 定义在 `BID_GEN_HOME/scripts/bid_charts.py` `_RENDERER_SCHEMAS`，文档导出在 `BID_GEN_HOME/docs/chart_schemas.md`
+- 7 种渲染器的精确 schema 定义在 `$BID_GEN_HOME/scripts/bid_charts.py` `_RENDERER_SCHEMAS`，文档导出在 `$BID_GEN_HOME/docs/chart_schemas.md`
 
 **Claude 介入：**
 - 自动派生准确率 ~80%（关键词命中），剩余 20% 用户/Claude 可手动编辑 `chart_specs.json` 改 type 或 required
 - 招标只硬要求 5 张附图附表的项目，应把多余的 advisory 图删掉避免过度规划
-- 渲染器自检：`python3 BID_GEN_HOME/scripts/bid_charts_selftest.py` 应该 14/14 PASS
+- 渲染器自检：`python3 $BID_GEN_HOME/scripts/bid_charts_selftest.py` 应该 14/14 PASS
 
 #### 2.6 向用户确认（★ 两轮阻断）
 
@@ -401,7 +401,7 @@ python3 BID_GEN_HOME/scripts/bid_chart_specs.py "$ARGUMENTS"
 2. 拿到名单后，调用批量配置生成器：
 
 ```bash
-python BID_GEN_HOME/scripts/bid_variants.py "$ARGUMENTS" --companies "甲公司,乙公司,丙公司"
+python $BID_GEN_HOME/scripts/bid_variants.py "$ARGUMENTS" --companies "甲公司,乙公司,丙公司"
 ```
 
 3. 工具会在 `extracted/variants.json` 写入配置表，每家单位包含以下字段：
@@ -425,7 +425,7 @@ python BID_GEN_HOME/scripts/bid_variants.py "$ARGUMENTS" --companies "甲公司,
 **模型 API 依赖：** 需要在 `~/.env` 配置各家 API Key（`GLM_API_KEY` / `DEEPSEEK_API_KEY` / `DASHSCOPE_API_KEY` / `MOONSHOT_API_KEY` / `MINIMAX_API_KEY`；豆包 `ARK_API_KEY` 充值后可把 `bid_llm_config.json` 中 doubao 的 `disabled` 改 false）。可先运行连通性自检：
 
 ```bash
-python BID_GEN_HOME/scripts/bid_llm_client.py --test-all
+python $BID_GEN_HOME/scripts/bid_llm_client.py --test-all
 ```
 
 ---
@@ -479,7 +479,7 @@ python BID_GEN_HOME/scripts/bid_llm_client.py --test-all
 由下游大模型分布式撰写，每家单位的章节落到 `output/V01/`, `output/V02/`, ... 子目录。
 
 ```bash
-python BID_GEN_HOME/scripts/bid_writer.py "$ARGUMENTS"
+python $BID_GEN_HOME/scripts/bid_writer.py "$ARGUMENTS"
 ```
 
 **关键点：**
@@ -501,13 +501,13 @@ python BID_GEN_HOME/scripts/bid_writer.py "$ARGUMENTS"
 
 ```bash
 # 批量模式：审所有 variant
-python BID_GEN_HOME/scripts/bid_reviewer.py "$ARGUMENTS"
+python $BID_GEN_HOME/scripts/bid_reviewer.py "$ARGUMENTS"
 
 # 单份模式
-python BID_GEN_HOME/scripts/bid_reviewer.py "$ARGUMENTS" --single
+python $BID_GEN_HOME/scripts/bid_reviewer.py "$ARGUMENTS" --single
 
 # 仅审某一家
-python BID_GEN_HOME/scripts/bid_reviewer.py "$ARGUMENTS" --variant V01
+python $BID_GEN_HOME/scripts/bid_reviewer.py "$ARGUMENTS" --variant V01
 ```
 
 **检查项：**
@@ -546,13 +546,13 @@ python BID_GEN_HOME/scripts/bid_reviewer.py "$ARGUMENTS" --variant V01
 **单份模式：**
 
 ```bash
-python BID_GEN_HOME/scripts/bid_assemble.py "$ARGUMENTS/output/"
+python $BID_GEN_HOME/scripts/bid_assemble.py "$ARGUMENTS/output/"
 ```
 
 **批量模式（每家单位一份独立 DOCX）：**
 
 ```bash
-python BID_GEN_HOME/scripts/bid_assemble.py "$ARGUMENTS/output/" --batch
+python $BID_GEN_HOME/scripts/bid_assemble.py "$ARGUMENTS/output/" --batch
 ```
 
 批量模式会：
@@ -567,15 +567,15 @@ python BID_GEN_HOME/scripts/bid_assemble.py "$ARGUMENTS/output/" --batch
 **单份模式：**
 
 ```bash
-python BID_GEN_HOME/scripts/bid_compliance.py "$ARGUMENTS"
+python $BID_GEN_HOME/scripts/bid_compliance.py "$ARGUMENTS"
 ```
 
 **批量模式（逐家扫描）：**
 
 ```bash
-python BID_GEN_HOME/scripts/bid_compliance.py "$ARGUMENTS" --all-variants
+python $BID_GEN_HOME/scripts/bid_compliance.py "$ARGUMENTS" --all-variants
 # 或仅扫某一家
-python BID_GEN_HOME/scripts/bid_compliance.py "$ARGUMENTS" --variant V01
+python $BID_GEN_HOME/scripts/bid_compliance.py "$ARGUMENTS" --variant V01
 ```
 
 批量模式会在每个 `output/VXX/` 下生成独立 `compliance_scan.json` + `compliance_scan.md`。
@@ -645,9 +645,9 @@ python BID_GEN_HOME/scripts/bid_compliance.py "$ARGUMENTS" --variant V01
 批量投标的核心风险是被评标委员会判定"围标/串标"。同一项目的多家技术标一旦在**整体重复率 ≥ 40%** 或 **段落重复率 ≥ 50%** 就高危。
 
 ```bash
-python BID_GEN_HOME/scripts/bid_similarity.py "$ARGUMENTS"
+python $BID_GEN_HOME/scripts/bid_similarity.py "$ARGUMENTS"
 # 可覆盖阈值
-python BID_GEN_HOME/scripts/bid_similarity.py "$ARGUMENTS" --threshold-overall 0.4 --threshold-paragraph 0.5
+python $BID_GEN_HOME/scripts/bid_similarity.py "$ARGUMENTS" --threshold-overall 0.4 --threshold-paragraph 0.5
 ```
 
 **检查维度：**
@@ -663,7 +663,7 @@ python BID_GEN_HOME/scripts/bid_similarity.py "$ARGUMENTS" --threshold-overall 0
 **Claude 处理：**
 - 若存在超阈值对，报告中会给出具体章节重写命令，如：
   ```bash
-  python BID_GEN_HOME/scripts/bid_writer.py "$ARGUMENTS" --variant V03 --chapter 02 --force
+  python $BID_GEN_HOME/scripts/bid_writer.py "$ARGUMENTS" --variant V03 --chapter 02 --force
   ```
   执行后回到 Step 3.5 重新审校 → Step 4 重新组装 → 再次 Step 6，直到全部在阈值内。
 - 元数据冲突（author 或 created 相同）也要提示用户重跑 `bid_assemble.py --batch`。
@@ -677,9 +677,9 @@ python BID_GEN_HOME/scripts/bid_similarity.py "$ARGUMENTS" --threshold-overall 0
 similarity 通过后、summary 之前，自动以"评标专家"视角对最终方案做一次模拟评审。区别于 Step 3.5（机器规则审校）与 Step 5（合规红线），这一步是**对照招标评审标准的语义级打分**——模拟真人评委找扣分点。
 
 ```bash
-python BID_GEN_HOME/scripts/bid_expert_review.py "$ARGUMENTS"
-python BID_GEN_HOME/scripts/bid_expert_review.py "$ARGUMENTS" --variant V01   # 只评一家
-python BID_GEN_HOME/scripts/bid_expert_review.py "$ARGUMENTS" --model deepseek # 默认 deepseek
+python $BID_GEN_HOME/scripts/bid_expert_review.py "$ARGUMENTS"
+python $BID_GEN_HOME/scripts/bid_expert_review.py "$ARGUMENTS" --variant V01   # 只评一家
+python $BID_GEN_HOME/scripts/bid_expert_review.py "$ARGUMENTS" --model deepseek # 默认 deepseek
 ```
 
 **检查维度：**

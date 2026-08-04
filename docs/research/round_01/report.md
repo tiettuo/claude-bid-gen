@@ -12,7 +12,7 @@
 
 | 数据类型 | 来源 | 数量 |
 |---------|------|------|
-| 完整项目（brain+plan+output） | Desktop/5月/ | 13 |
+| 完整项目（brain+plan+output） | 历史投标项目目录/ | 13 |
 | 批量项目（≥2 variant） | 浪卡子(10), 小游园, 波罗, 罗玛镇, 金山, 古露5村, 俄玛村, 铜溪派出所 | 8 |
 | 有审校数据 | review_summary.json | 8 |
 | 有合规扫描 | compliance_scan.json | 2 |

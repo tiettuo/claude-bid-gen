@@ -1,5 +1,5 @@
 # bid-gen 投标技术文件生成系统 — Python 依赖
-# 来源：Claude Code 脚本目录/bid_run.py 的 REQUIRED_PKGS / OPTIONAL_PKGS
+# 来源：scripts/bid_run.py 的 REQUIRED_PKGS / OPTIONAL_PKGS
 
 # ─── 必需 ───────────────────────────────────────────
 pdfplumber>=0.11          # PDF 文本/表格提取
