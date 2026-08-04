@@ -5,8 +5,8 @@ type: reference
 session: 已脱敏
 ---
 评标细则原始图片保存在：
-- `LIB_CACHE/Containers/ru.keepcoder.Telegram/Data/tmp/IMAGE 2026-04-29 19:17:55.jpg`
-- `LIB_CACHE/Containers/ru.keepcoder.Telegram/Data/tmp/IMAGE 2026-04-29 19:17:58.jpg`
-- `LIB_CACHE/Containers/ru.keepcoder.Telegram/Data/tmp/IMAGE 2026-04-29 19:18:00.jpg`
+- （已归档）
+- （已归档）
+- （已归档）
 
 注意：这些是Telegram临时文件，可能会被清理。关键规则已提取并实现在模拟器代码中。

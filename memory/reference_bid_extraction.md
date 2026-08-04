@@ -4,13 +4,13 @@ description: 西藏招标项目自动化提取完整管道,extract→template→
 type: reference
 session: 已脱敏
 ---
-**完整方法论文档**:`Claude Code 技能目录/bid-gen/references/extraction-methodology.md`
+**完整方法论文档**:`skills/bid-gen/references/extraction-methodology.md`
 **研究背景**:`~/research/bid-gen-extraction/{SUMMARY,notes,progress}.md`
 
 ## 一行命令(新项目入口)
 
 ```bash
-python Claude Code 脚本目录/bid_run.py "/path/to/new_tender/"
+python scripts/bid_run.py "/path/to/new_tender/"
 ```
 
 自动顺序:`extract → template → facts → derive → skeleton → special → input_assemble → fingerprint → chart_specs → write → review → assemble → compliance → similarity → summary`
@@ -31,7 +31,7 @@ python Claude Code 脚本目录/bid_run.py "/path/to/new_tender/"
 ## brain.md 自动翻译
 
 ```bash
-python Claude Code 脚本目录/bid_brain_translate.py "/path/to/tender/" --force
+python scripts/bid_brain_translate.py "/path/to/tender/" --force
 ```
 
 第 1-4 节:facts/derived/special 数据组织+保留旧 brain 第 3 节人工分析
