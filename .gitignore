@@ -6,3 +6,11 @@ output/
 extracted/
 logs/
 .DS_Store
+# 敏感/客户数据 — 禁止开源
+*.dxf
+*.dwg
+projects/
+.claude/
+memory/project_*.md
+memory/user_bidding_professional.md
+*.local.json
