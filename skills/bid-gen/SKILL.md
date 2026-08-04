@@ -5,19 +5,19 @@ description: Run and improve the bid-gen-v3 engineering bid generation pipeline 
 
 # Bid Gen
 
-Use this skill for the local bid-gen-v3 project at `BID_GEN_HOME`. It is a script-backed pipeline, not a generic proposal-writing prompt.
+Use this skill for the local bid-gen-v3 project at `$BID_GEN_HOME`. It is a script-backed pipeline, not a generic proposal-writing prompt.
 
 ## First Moves
 
 1. Treat the user's tender directory as the project input. If no path is provided, ask for it.
-2. Set the repo root mentally as `BID_GEN_HOME=BID_GEN_HOME`.
+2. Set the repo root mentally as `BID_GEN_HOME=$BID_GEN_HOME`.
 3. Read `commands/bid-gen.md` for the full Step 0-6 operating prompt before running a real bid.
 4. Read `references/extraction-methodology.md` when working on Step 1, Step 1.5, Step 2, or extraction/plan verification bugs.
 5. For code changes, scan relevant `memory/feedback_bid_*.md` files first. These are production lessons and should override generic instincts.
 
 ## Operating Commands
 
-Use these commands from `BID_GEN_HOME`:
+Use these commands from `$BID_GEN_HOME`:
 
 ```bash
 python3 scripts/bid_run.py --doctor

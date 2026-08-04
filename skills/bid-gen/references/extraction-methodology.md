@@ -75,7 +75,7 @@ v2 的解决方案:**强制把骨架抽取交给机器(LLM 出 JSON),让 Claude 
 ### 2.1 命令
 
 ```bash
-cd "${BID_GEN_HOME:-BID_GEN_HOME}"
+cd "${BID_GEN_HOME:-.}"
 python3 scripts/bid_extract.py "$TENDER_DIR"
 python3 scripts/bid_fingerprint.py "$TENDER_DIR"  # 推荐
 ```
@@ -96,7 +96,7 @@ python3 scripts/bid_fingerprint.py "$TENDER_DIR"  # 推荐
 - `scoring`:评分办法
 - `outline`:**施组编制大纲(★ v2 新增)**
 
-`outline` 类的关键词在 `${BID_GEN_HOME:-BID_GEN_HOME}/configs/bid_vision_config.json`,包括"主要技术内容""技术标准和要求""施工组织设计编制要求"等。这是 v2 修复 R1 根因的第一道闸——保证招标第七章 16 项原文一定走视觉重抽,不被 pdfplumber 漏行。
+`outline` 类的关键词在 `${BID_GEN_HOME:-.}/configs/bid_vision_config.json`,包括"主要技术内容""技术标准和要求""施工组织设计编制要求"等。这是 v2 修复 R1 根因的第一道闸——保证招标第七章 16 项原文一定走视觉重抽,不被 pdfplumber 漏行。
 
 ### 2.4 完成判据
 
@@ -111,7 +111,7 @@ python3 scripts/bid_fingerprint.py "$TENDER_DIR"  # 推荐
 ### 3.1 命令
 
 ```bash
-cd "${BID_GEN_HOME:-BID_GEN_HOME}"
+cd "${BID_GEN_HOME:-.}"
 python3 scripts/bid_skeleton_extract.py "$TENDER_DIR"
 ```
 
@@ -337,7 +337,7 @@ python3 scripts/bid_skeleton_extract.py "$TENDER_DIR"
 ### 5.1 命令
 
 ```bash
-cd "${BID_GEN_HOME:-BID_GEN_HOME}"
+cd "${BID_GEN_HOME:-.}"
 python3 scripts/bid_plan_verify.py "$TENDER_DIR"
 ```
 
