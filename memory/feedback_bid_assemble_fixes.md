@@ -2,7 +2,6 @@
 name: bid_assemble.py 格式解析修复记录
 description: 2026-04-30 修复了YAML别名、行距规则、表格字号、H1字号、标题间距，新增页数自动检查
 type: feedback
-session: 已脱敏
 ---
 bid_assemble.py 的格式解析存在 YAML 键名与 disqualification_rules.md 不匹配的系统性问题，已修复。
 

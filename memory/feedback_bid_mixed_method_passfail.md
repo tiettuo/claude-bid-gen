@@ -2,7 +2,6 @@
 name: 混合制项目按合格制写施组
 description: 商务标评分+施组合格制不计分时,evaluation_method 强制归 passfail;brain.md 第五节和 chapter_plan 按合格制写,章节锚点 1:1 对齐必含大纲
 type: feedback
-session: 已脱敏
 ---
 **规则**:项目同时存在「商务标分值」和「施工组织设计合格制不计分」时,evaluation_method 强制归为 `passfail`(不论商务标加起来多少分)。brain.md 第五节和 chapter_plan.md 都按合格制策略写——章节锚点必须 1:1 对齐 mandatory_outline.json 的 topics,**不能因为商务标有分就允许章节合并/吸收/省略**。
 

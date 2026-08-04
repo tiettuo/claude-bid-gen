@@ -79,7 +79,7 @@ python $BID_GEN_HOME/scripts/bid_fingerprint.py "$ARGUMENTS"
 python $BID_GEN_HOME/scripts/bid_skeleton_extract.py "$ARGUMENTS"
 ```
 
-**为什么必跑：** 历史三个项目（仓储类项目A/学校类/仓储类项目B）暴露的根因是 Step 2 让 Claude 凭印象写 brain.md，导致招标第七章「主要技术内容 N 项」必含大纲被系统性漏抄、废标条款来源页号集中（如全部标 p75）。v2 方法论的核心是**把骨架从细节中分离**——机器先出 JSON，Claude 再翻译。
+**为什么必跑：** 历史三个项目（仓储类项目A/食堂/仓储类项目B）暴露的根因是 Step 2 让 Claude 凭印象写 brain.md，导致招标第七章「主要技术内容 N 项」必含大纲被系统性漏抄、废标条款来源页号集中（如全部标 p75）。v2 方法论的核心是**把骨架从细节中分离**——机器先出 JSON，Claude 再翻译。
 
 **产出（写入 `extracted/`）：**
 - `evaluation_method.json` — 评标方法（score/passfail）+ 评分项原文 + 否决项

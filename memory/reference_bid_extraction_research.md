@@ -2,7 +2,6 @@
 name: bid-gen Step1 研究成果
 description: bid-gen 招标文件提取 Step 1 自主研究成果(2026-05-05),含 17 条决策清单 + 5-6 天 MVP 改造方案
 type: reference
-session: 已脱敏
 ---
 研究目录:`~/research/bid-gen-extraction/`
 - `SUMMARY.md` — 一页纸总结(决策清单 + MVP 工时 + ROI Top3)

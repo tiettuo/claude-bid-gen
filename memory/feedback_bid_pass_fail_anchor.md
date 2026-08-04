@@ -2,7 +2,6 @@
 name: 合格制项目章节锚点不可省略
 description: bid-gen 合格制项目下大纲一级主题必须 1:1 转 chapter_plan 章节，禁止合并/吸收/省略
 type: feedback
-session: 已脱敏
 ---
 bid-gen 项目，**当 `disqualification_rules.md` 中 `tech_evaluation_method: 合格制`（或 `tech_total_score: 0`）时**，brain.md 第七节解析出的施组编制大纲一级主题必须**逐项独立成章**，不允许合并、不允许吸收到他章末段、不允许标"可选"省略。
 

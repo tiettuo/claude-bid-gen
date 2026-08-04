@@ -2,7 +2,6 @@
 name: bid_assemble 禁止硬编码字号字体
 description: 投标文件组装脚本所有字号/字体决策必须经 fmt 字典从招标规则解析；禁止凭"行业惯例"塞 Pt(数字)
 type: feedback
-session: 已脱敏
 ---
 bid_assemble.py 中**任何字号决策都必须从 `fmt` 字典读取**，不允许直接写 `Pt(数字)` 字面量；招标规则未指定的项必须有"回落到 `fmt['font_size_body']`"的明确路径。
 

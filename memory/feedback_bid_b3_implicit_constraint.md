@@ -2,7 +2,6 @@
 name: B3 废标抽取漏隐含硬约束
 description: bid_skeleton_extract.py 的 B3 prompt 关键词清单只覆盖"结果性触发词"(否决/废标/无效),漏掉"约束性触发词"(不得超过/必须),导致页数硬顶 70 页这类条款被漏抽
 type: feedback
-session: 已脱敏
 ---
 写施组前,在生成 brain.md 第六节"废标条款"和 disqualification_rules.md 时,**不能只信 disqualification.json**,必须手工去原文核对一类容易被漏的条款:**隐含废标后果的硬约束**。
 

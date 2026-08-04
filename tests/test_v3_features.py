@@ -25,11 +25,11 @@ def test_fingerprint_different():
     with tempfile.TemporaryDirectory() as td:
         a = Path(td) / "a" / "extracted"
         a.mkdir(parents=True)
-        (a / "project_brain.md").write_text("项目名称：民房类项目\n控制价：31514782.47 元", encoding="utf-8")
+        (a / "project_brain.md").write_text("项目名称：测试项目甲\n控制价：31514782.47 元", encoding="utf-8")
         fp_a = project_fingerprint(a)
         b = Path(td) / "b" / "extracted"
         b.mkdir(parents=True)
-        (b / "project_brain.md").write_text("项目名称：环境整治类项目\n控制价：3721200.00 元", encoding="utf-8")
+        (b / "project_brain.md").write_text("项目名称：测试项目乙\n控制价：3721200.00 元", encoding="utf-8")
         fp_b = project_fingerprint(b)
         assert fp_a["hash"] != fp_b["hash"]
 

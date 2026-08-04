@@ -2,7 +2,6 @@
 name: bid-gen Step 1 完整管道 (v2 + 5-Tier MIS)
 description: 西藏招标项目自动化提取完整管道,extract→template→facts→derive→skeleton→special→input_assemble,产 7 份 JSON+brain.md,一行命令端到端
 type: reference
-session: 已脱敏
 ---
 **完整方法论文档**:`skills/bid-gen/references/extraction-methodology.md`
 **研究背景**:`~/research/bid-gen-extraction/{SUMMARY,notes,progress}.md`

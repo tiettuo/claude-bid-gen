@@ -59,7 +59,7 @@ def test_collect_boq_deduplicates_overlapping_filename_globs(tmp_path):
 def test_derive_prefers_explicit_altitude(tmp_path):
     ext = tmp_path / "extracted"
     ext.mkdir()
-    (ext / "清单.txt").write_text("工程建设地点：示例县示例乡，平均海拔高度为4328米。", encoding="utf-8")
+    (ext / "清单.txt").write_text("工程建设地点：养殖类项目县日多乡，平均海拔高度为4328米。", encoding="utf-8")
     facts = {
         "location": {"value": "示例县示例乡"},
         "control_price": {"value": 3721200.0},

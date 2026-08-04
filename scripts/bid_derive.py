@@ -15,7 +15,7 @@ project_derived.json,直接驱动 brain.md / chapter_plan.md / Step 3 写作。
 
 用法:
   python bid_derive.py /path/to/tender/
-  python bid_derive.py --location 类乌齐县 --duration 110 --start 2026-05-31 --price 2025201
+  python bid_derive.py --location 示例县 --duration 110 --start 2026-05-31 --price 2025201
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ TIBET_ALTITUDE_DB: dict[str, int] = {
     # 日喀则市
     "日喀则市": 3836, "桑珠孜区": 3836,
     "南木林县": 4000, "江孜县": 4040, "定日县": 4300, "萨迦县": 4316,
-    "拉孜县": 4012, "昂仁县": 4500, "谢通门县": 4050, "白朗县": 3950,
+    "拉孜县": 4012, "仓储类项目B县": 4500, "谢通门县": 4050, "白朗县": 3950,
     "仁布县": 3950, "康马县": 4310, "定结县": 4350, "仲巴县": 4772,
     "亚东县": 2850, "吉隆县": 2700, "聂拉木县": 3810, "萨嘎县": 4500, "岗巴县": 4540,
     # 昌都市
@@ -100,7 +100,7 @@ def altitude_class(altitude_m: int | None) -> str:
 def lookup_altitude(location: str | None) -> int | None:
     """从地名抽出海拔。优先级:县/区(最具体) > 市 > 地区。
 
-    例:'西藏自治区日喀则市昂仁县' 应命中昂仁县(4500),不应命中日喀则市(3836)。
+    例:'西藏自治区日喀则市仓储类项目B县' 应命中仓储类项目B县(4500),不应命中日喀则市(3836)。
     """
     if not location:
         return None

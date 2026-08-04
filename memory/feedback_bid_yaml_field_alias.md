@@ -2,7 +2,6 @@
 name: bid_assemble yaml 字段名陷阱
 description: disqualification_rules.md 写 yaml 时短形式字段名（top_cm/line_spacing 不带 _rule）会被沉默回退到默认值，bug 在最终 docx 才暴露
 type: feedback
-session: 已脱敏
 ---
 bid_assemble.py 解析 disqualification_rules.md yaml 时，未识别的字段名会**沉默回退默认值**，不报错不告警。
 

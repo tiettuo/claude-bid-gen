@@ -7,7 +7,7 @@ bid_skeleton_extract.py - Step 1.5 骨架优先提取
 brain.md / chapter_plan.md / disqualification_rules.md 的源头依据。
 
 为什么需要这一步:
-  三个历史项目(仓储类项目A/学校类/仓储类项目B)的 brain.md 都不同程度漏抄了招标
+  三个历史项目(仓储类项目A/食堂/仓储类项目B)的 brain.md 都不同程度漏抄了招标
   文件第七章的「主要技术内容 16 项」必含大纲——但原文确实在 extracted/
   txt 里。根因是 Step 2 让 Claude 自由提取,凭印象写 brain.md。本步骤
   把「骨架」从「细节」中分离出来,先用 LLM 出结构化 JSON,再让 Claude

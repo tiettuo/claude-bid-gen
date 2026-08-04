@@ -2,7 +2,6 @@
 name: bid-gen output 目录布局标准
 description: bid-gen 流水线脚本统一使用 output/ 子目录分类，避免根目录混乱
 type: feedback
-session: 已脱敏
 ---
 bid-gen 项目的 `output/` 目录采用以下分层布局，bid_assemble / bid_compliance / bid_format_audit 已按此约定写入：
 

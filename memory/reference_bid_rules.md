@@ -2,7 +2,6 @@
 name: 评标细则规则参考
 description: 用户提供的招投标评标细则的完整规则解读，包含公式和扣分机制
 type: reference
-session: 已脱敏
 ---
 评标细则原始图片保存在：
 - （已归档）
