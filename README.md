@@ -1,5 +1,7 @@
 # bid-gen — 投标技术文件生成系统
 
+[English](README.en.md)
+
 工程类招投标的全流程施工组织设计生成管道，从原始招标 PDF/DOCX 抽取，到机器审校 + 合规检查 + 批量投标相似度防围标。
 
 **当前形态**：脚本管道 + 智能体编排。可移植到任何支持 prompt + bash 工具调用的智能体（Claude Code / Codex / pi / hermas 等）。
