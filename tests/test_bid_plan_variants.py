@@ -91,3 +91,41 @@ def test_fallback_subitems_uses_scope():
     subs = _fallback_subitems(ch)
     assert [s["title"] for s in subs] == ["范围界定", "组织机构", "供应商管理"]
     assert len(subs) == 3
+
+
+def test_load_criteria_skips_commercial_items_in_passfail(tmp_path):
+    """★ 合格制(含商务标有分+施组合格制混合制):scoring_items 是报价/信用/业绩等商务项,
+    不得按序号 zip 到技术章节当评分标准。见 memory/feedback_bid_mixed_method_passfail.md。"""
+    import json
+    from bid_plan_variants import _load_criteria
+
+    (tmp_path / "evaluation_method.json").write_text(json.dumps({
+        "evaluation_method": "passfail",
+        "tech_score_is_passfail": True,
+        "total_tech_score": 0,
+        "scoring_items": [
+            {"section": "投标报价", "title_original": "1. 投标报价：50分",
+             "score": 50, "criteria_original": "商务标准原文"},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    chapters = [{"num": "01", "title": "工程概况"}]
+
+    assert _load_criteria(tmp_path, chapters, _LOG) == {}
+
+
+def test_load_criteria_maps_scoring_items_when_scored(tmp_path):
+    """评分制项目照旧按序号映射评分标准原文(守旧行为不回归)。"""
+    import json
+    from bid_plan_variants import _load_criteria
+
+    (tmp_path / "evaluation_method.json").write_text(json.dumps({
+        "evaluation_method": "score",
+        "total_tech_score": 100,
+        "scoring_items": [
+            {"title_original": "1. 施工方案", "score": 50,
+             "criteria_original": "施工方案完整、针对性强"},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    chapters = [{"num": "01", "title": "施工方案"}]
+
+    assert _load_criteria(tmp_path, chapters, _LOG) == {"01": "施工方案完整、针对性强"}

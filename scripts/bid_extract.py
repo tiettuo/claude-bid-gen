@@ -22,6 +22,12 @@ import bid_vision  # noqa: E402
 # 增量提取缓存版本。提取逻辑(OCR/解析)有实质改动时 +1,使旧缓存失效。
 _EXTRACT_CACHE_VERSION = 1
 
+# bid_ingest_zip.py 保存入包原始归档的目录名。其内容已被归一化到项目根目录,
+# 重复解包/扫描会导致同一 PDF 被视觉 OCR 两次(双倍费用)。
+RAW_ARCHIVE_DIR = "原始文件"
+# 电子招标文件容器(本质是 zip,内含 File.zip → 招标项目/招标文件.pdf)。
+ZZ_EXTS = {".xzz", ".gkzj", ".zbwj", ".zbf", ".zbj"}
+
 
 def _file_md5(path: Path) -> str:
     """文件内容 md5(分块读,大 PDF 也快)。"""
@@ -891,7 +897,7 @@ def _zip_safe_extract(zf, dest: Path, log) -> list[Path]:
 
 
 def unpack_archives(input_dir: Path, log: logging.Logger) -> None:
-    """解开 .XZZ / .zip 招标包,内容落到 _unpacked/ 供后续扫描。
+    """解开 .XZZ / .GKZJ / .zip 招标包,内容落到 _unpacked/ 供后续扫描。
 
     西藏等地电子标书是 .XZZ(标准 zip),常见嵌套 GEFile.zip 内含
     「招标项目/招标文件.pdf」等真正的招标正文——不解包就只能拿到招标公告。
@@ -901,10 +907,11 @@ def unpack_archives(input_dir: Path, log: logging.Logger) -> None:
     unpacked_root = input_dir / "_unpacked"
     archives = sorted(
         f for f in input_dir.rglob("*")
-        if f.is_file() and f.suffix.lower() in (".xzz", ".zip")
+        if f.is_file() and f.suffix.lower() in (ZZ_EXTS | {".zip"})
         and "_unpacked" not in f.relative_to(input_dir).parts
         and "extracted" not in f.relative_to(input_dir).parts
         and "output" not in f.relative_to(input_dir).parts
+        and RAW_ARCHIVE_DIR not in f.relative_to(input_dir).parts
     )
     for arc in archives:
         dest = unpacked_root / arc.stem
@@ -921,9 +928,9 @@ def unpack_archives(input_dir: Path, log: logging.Logger) -> None:
         except Exception as e:
             log.warning(f"  解包 {arc.name} 失败: {e}")
             continue
-        # 递归解嵌套 zip(如 .XZZ 内的 GEFile.zip)
+        # 递归解嵌套 zip(如 .XZZ 内的 GEFile.zip / .GKZJ 内的 File.zip)
         for f in list(files):
-            if f.suffix.lower() == ".zip":
+            if f.suffix.lower() in (ZZ_EXTS | {".zip"}):
                 try:
                     with _zip.ZipFile(f) as zf2:
                         n2 = _zip_safe_extract(zf2, f.parent / f.stem, log)
@@ -989,7 +996,9 @@ def main():
     unpack_archives(input_dir, log)
 
     # 递归扫描所有子目录；跳过已生成的 extracted/ 和 output/ 避免自吞
-    skip_dirs = {"extracted", "output"}
+    # 原始文件/ 保存的是入包原始归档，其内容已由 bid_ingest_zip.py 归一化到
+    # 项目根目录，重复解包会导致同一 PDF 被视觉 OCR 两次（双倍费用）。
+    skip_dirs = {"extracted", "output", RAW_ARCHIVE_DIR}
     all_files = sorted([
         f for f in input_dir.rglob("*")
         if f.is_file()

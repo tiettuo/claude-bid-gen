@@ -143,7 +143,8 @@ def _make_project(tmp_path, n_variants=1):
     return ext, out, results
 
 
-def _fake_parse(client, model, system, user, log=None, max_tokens=12000):
+def _fake_parse(client, model, system, user, log=None, max_tokens=12000,
+                compact_suffix=""):
     """模拟 LLM：评分项返回 1 瑕疵 8 分；跨章返回矛盾。"""
     if "跨章节" in user:
         return {"cross_defects": [
@@ -186,7 +187,8 @@ def test_review_variant_with_mocked_llm(tmp_path, monkeypatch):
     assert (vdirs[0] / "expert_review.md").exists()
 
 
-def _fake_perfect(client, model, system, user, log=None, max_tokens=12000):
+def _fake_perfect(client, model, system, user, log=None, max_tokens=12000,
+                  compact_suffix=""):
     """模拟一个无瑕疵满分方案。"""
     if "跨章节" in user:
         return {"cross_defects": []}

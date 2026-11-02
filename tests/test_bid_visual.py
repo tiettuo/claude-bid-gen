@@ -135,9 +135,11 @@ def test_validation_delta_uses_error_kinds_when_officecli_is_capped():
 
 def test_pipeline_places_visual_steps_between_assemble_and_verify():
     a = bid_run.STEPS.index("assemble")
-    assert bid_run.STEPS[a + 1:a + 5] == [
-        "visual_style", "visual_render", "visual_verify", "verify"
+    assert bid_run.STEPS[a + 1:a + 6] == [
+        "visual_style", "visual_render", "visual_verify", "toc_fill", "verify"
     ]
+    # toc_fill 必须在 verify 之前：回填页码可能改变 docx，verify 要量最终产物
+    assert bid_run.STEPS.index("toc_fill") < bid_run.STEPS.index("verify")
 
 
 @pytest.mark.skipif(not (shutil.which("officecli") or (Path.home() / ".local/bin/officecli").exists()),

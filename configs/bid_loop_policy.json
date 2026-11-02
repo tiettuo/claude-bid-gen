@@ -13,7 +13,8 @@
       "max_retries": 1,
       "auto_fixable": {
         "response_keyword_miss": { "fix": "rewrite_chapter_then_rescan", "max": 1 },
-        "chart_missing": { "fix": "rewrite_chapter_then_rescan", "max": 1 }
+        "chart_missing": { "fix": "rewrite_chapter_then_rescan", "max": 1 },
+        "schedule_date_leak": { "fix": "rewrite_chapter_then_rescan", "max": 1 }
       },
       "requires_human": [
         "blind_violation", "alignment_failure", "format_severe",

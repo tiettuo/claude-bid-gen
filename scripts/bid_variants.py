@@ -15,11 +15,14 @@ bid_variants.py - 批量投标配置生成器
   python bid_variants.py <tender_dir> --companies-file companies.txt
 """
 
+from __future__ import annotations
+
 import argparse
 import hashlib
 import json
-import os
 import random
+import re
+from bid_common import get_config_dir  # noqa: E402
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -46,10 +49,16 @@ TEMP_BAND = 0.1
 DEFAULT_OUTPUT_CHAR_CAP = 5000
 
 # 数据指纹偏移范围
-SCHEDULE_OFFSET_RANGE = (-7, 7)          # 日历天，在招标要求内调整
+# 工期偏移只允许【负值或 0】(2026-09-16 用户指令:工期不能多,只能少)。
+# 理由:招标工期是实质性响应条款,正偏移会让网络图关键线路/横道跨度突破招标 180 天,
+# 触发 bid_compliance 工期废标门(超期即否决投标);负偏移=提前完工,只赚不亏。
+SCHEDULE_OFFSET_RANGE = (-9, -1)         # 日历天,只提前不延后
 LABOR_FACTOR_RANGE = (0.92, 1.10)        # 劳动力系数
 EQUIP_DELTA_ITEMS = ["挖掘机", "装载机", "压路机", "推土机", "自卸车", "搅拌车"]
-EQUIP_DELTA_RANGE = (-2, 2)
+# 设备差异幅度只允许 ±1 台(2026-09-16 用户指令)。旧值 ±2 会在小体量项目上
+# 产出“3 台挖掘机挖 46m³ 土方”这类不实配置,而设备差异会落到招标点名的
+# 附表一《拟投入本标段的主要施工设备表》上被评委逐台核对 → 失真即扣分。
+EQUIP_DELTA_RANGE = (-1, 1)
 STANDARD_YEARS = ["2017", "2020", "2023"]
 
 
@@ -107,23 +116,56 @@ def build_model_pool(models_cfg: dict) -> list[str]:
     return ordered
 
 
+def _derive_angles_from_difficulties(extracted: Path, count: int) -> list[str]:
+    """--angles 未提供时，从 difficulties.json 难点标题自动派生写作角度主线。
+
+    每家取一条互不相同的难点作主线（如"高海拔混凝土养护保障"），
+    治历史问题：angles 缺省 → 三家 angle 全空 → Block3 角度主线注入失效，
+    反串标只剩劳动力系数/机械增减三个弱差异。"""
+    p = extracted / "difficulties.json"
+    if not p.exists():
+        return []
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    titles: list[str] = []
+    _seen = set()
+    for n in d.get("难点", []) or []:
+        t = (n.get("title") or n.get("name") or "").strip() if isinstance(n, dict) else str(n or "").strip()
+        if 4 <= len(t) <= 24 and t not in _seen:
+            _seen.add(t)
+            titles.append(t)
+    return titles[:count]
+
+
 def _assign_model(idx: int, total: int, pool: list[str],
-                  models_cfg=None) -> tuple[str, float]:
+                  models_cfg=None, temp_cfg: dict | None = None) -> tuple[str, float]:
     """为第 idx 家分配模型与 temperature。
 
     idx < 模型池大小 → 每家一个不同模型(N 份 N 模型,文风各异);
     超出模型池 → 循环复用,用 temperature 区分。
+    温度真值源:config 顶层 default_temperature / temperature_variants
+    (历史缺陷:硬编码 0.6 + 模块级 DEFAULT_TEMPERATURES,改配置不生效)。
     force_temperature 模型(如 kimi-k2.5 固定 0.6)用其强制值。
     """
+    tc = temp_cfg or {}
+    default_temp = float(tc.get("default_temperature", 0.6) or 0.6)
+    tvars = [t for t in (tc.get("temperature_variants") or [])
+             if isinstance(t, (int, float)) and 0.0 <= float(t) <= 2.0]
+    if not tvars:
+        # 配置了单值 default_temperature 时优先于模块级兜底(真值源声明一致)
+        tvars = [default_temp] if 0.0 <= default_temp <= 2.0 else DEFAULT_TEMPERATURES
     if not pool:
         raise ValueError("模型池为空")
     if idx < len(pool):
         model = pool[idx]
-        temp = 0.6
+        # 池内轮转温度(≤池大小时也不全同,强化反串标温度差异)
+        temp = tvars[idx % len(tvars)]
     else:
         model = pool[idx % len(pool)]
-        temp = DEFAULT_TEMPERATURES[(idx // len(pool)) % len(DEFAULT_TEMPERATURES)]
-    if models_cfg and "force_temperature" in models_cfg.get(model, {}):
+        temp = tvars[(idx // len(pool)) % len(tvars)]
+    if models_cfg and isinstance(models_cfg.get(model), dict) and "force_temperature" in models_cfg[model]:
         temp = float(models_cfg[model]["force_temperature"])
     return model, temp
 
@@ -147,10 +189,12 @@ def _data_fingerprint(company: str, idx: int, total: int, rng: random.Random) ->
     labor_factor = round(rng.uniform(LABOR_FACTOR_RANGE[0], LABOR_FACTOR_RANGE[1]), 2)
 
     n_equip = rng.randint(2, 4)
-    equip_delta = {
-        rng.choice(EQUIP_DELTA_ITEMS): rng.randint(*EQUIP_DELTA_RANGE)
-        for _ in range(n_equip)
-    }
+    # sample 不重复抽取(历史缺陷:choice 可重复,实际差异项数 < n_equip,削弱反串标指纹)
+    _equip_names = rng.sample(EQUIP_DELTA_ITEMS, min(n_equip, len(EQUIP_DELTA_ITEMS)))
+    # 候选已排除 0,直接映射(原 if 过滤恒真)
+    _nz = [v for v in range(EQUIP_DELTA_RANGE[0], EQUIP_DELTA_RANGE[1] + 1) if v != 0]
+    equip_delta = {name: rng.choice(_nz) for name in _equip_names}
+
 
     standard_year = rng.choice(STANDARD_YEARS)
 
@@ -196,6 +240,11 @@ _ORG_PARADIGMS = [
 ]
 
 
+_GV_DIR_FALLBACK = ["TB", "LR"]
+_GANTT_BAR_LWS = [0.5, 0.9, 1.4, 1.9]
+_GANTT_LAYOUTS = ["classic_table", "phase_swimlane", "calendar_matrix"]
+
+
 def variant_chart_theme(idx: int) -> dict:
     """按方案序号(0-based)派发一套确定且互不相同的图表主题。
 
@@ -206,7 +255,9 @@ def variant_chart_theme(idx: int) -> dict:
     """
     idx = max(0, int(idx))
     engine, edir = _ORG_PARADIGMS[idx % len(_ORG_PARADIGMS)]
-    box = _GV_BOX[(idx // len(_ORG_PARADIGMS)) % 3]   # 引擎循环一轮后换框型
+    # 框型按方案序号直接轮转(idx % 3),让 ≤9 变体也用满 box/rounded/doubleframe 三态。
+    # 旧公式 (idx//5)%3 要到第 11 家才出现 doubleframe,小批量项目只用到两态。
+    box = _GV_BOX[idx % 3]
     spline = _GV_SPLINE[(idx // 2) % 4]
     filled = (idx % 4 != 0)  # 序号 0/4/8.. 白底, 其余浅灰填充
     direction = edir or _GV_DIR_FALLBACK[(idx // 3) % 2]
@@ -226,19 +277,6 @@ def variant_chart_theme(idx: int) -> dict:
     }
 
 
-_GV_DIR_FALLBACK = ["TB", "LR"]
-_GANTT_BAR_LWS = [0.5, 0.9, 1.4, 1.9]
-_GANTT_LAYOUTS = ["classic_table", "phase_swimlane", "calendar_matrix"]
-
-
-def _variant_index(variant_id: str, fallback: int) -> int:
-    """从 variant_id(如 V01/V12)取 0-based 方案序号;无数字则回退 hash 派生值。"""
-    digits = "".join(c for c in str(variant_id) if c.isdigit())
-    return (int(digits) - 1) if digits else (fallback % 24)
-
-# 排版套（对应 disqualification_rules.md 的 format_sets A-F,
-# bid_rules_synthesize._FORMAT_SET_PRESETS 生成同名 6 套,≤6 变体可两两不同)
-FORMAT_SET_KEYS = ["A", "B", "C", "D", "E", "F"]
 
 
 def generate_variant_style(variant_id: str, seed: int = 0) -> dict:
@@ -249,9 +287,11 @@ def generate_variant_style(variant_id: str, seed: int = 0) -> dict:
     """
     h = int(hashlib.md5(f"{seed}_{variant_id}".encode()).hexdigest()[:8], 16)
     rng = random.Random(h)
-    idx = _variant_index(variant_id, h)
     style = {
         # ── 序号方案 ──
+        # ★ 按序号派发而非 hash 随机:hash 会撞(N 家抽 6 套必然重复,
+        #   实测 V01/V03 均得 D → 编号体系这一层差异直接失效)。
+        #   此处先给 hash 值占位,下面再用 variant_chart_theme(idx) 统一覆盖。
         "numbering_scheme": rng.choice(NUMBERING_SCHEMES),
         # ── 图表层（原 chart_style） ──
         "org_direction": rng.choice(["TB", "LR"]),
@@ -283,18 +323,26 @@ def generate_variant_style(variant_id: str, seed: int = 0) -> dict:
         "sibling_shuffle_seed": h,
         # ── 文档软层（仅对 rules 未指定的参数生效） ──
         "doc_first_line_indent_chars": round(rng.uniform(1.92, 2.08), 2),
-        "doc_para_spacing_before_pt": round(rng.uniform(0, 2.5), 1),
-        "doc_para_spacing_after_pt": round(rng.uniform(0, 2.5), 1),
+        # 段前/段后与标题间距只影响页数(招标未规定),按"紧排"给窄区间:
+        # 历史教训:随机到 2.4pt+1.7pt 段间距 + h3_sp=14pt,1400 字/章多占 ~2.5 页,
+        # 70 页硬顶下直接把 3 家方案顶到 72/77 页(超页即废标)。
+        "doc_para_spacing_before_pt": round(rng.uniform(0, 0.6), 1),
+        "doc_para_spacing_after_pt": round(rng.uniform(0, 0.6), 1),
         "doc_line_spacing_offset": round(rng.uniform(-0.02, 0.02), 3),
         "doc_table_cell_padding_twips": rng.randint(40, 80),
-        "doc_h2_space_before_pt": rng.randint(12, 18),
-        "doc_h3_space_before_pt": rng.randint(8, 14),
+        "doc_h2_space_before_pt": rng.randint(6, 9),
+        "doc_h3_space_before_pt": rng.randint(3, 6),
         "doc_table_border_pt": round(rng.uniform(0.5, 1.0), 1),
         "doc_page_num_font_size_pt": round(rng.uniform(9.0, 10.5), 1),
         "doc_toc_indent_per_level_twips": rng.randint(300, 450),
     }
-    # 按方案序号注入互异的图表视觉主题(覆盖上面随机的 org_direction/box_shape/flow_direction)
+    # 图表视觉主题按方案序号派发(唯一入口;assemble 回填走 generate_chart_style 别名时
+    # 依赖此处)。去掉这一行后 docstring 承诺的「描边/填充/框型/连线/方向按序号派发」
+    # 实际退化为 hash 随机 → 调用方不自己覆盖时各家图表会撞脸。
+    _m = re.match(r"[Vv](\d+)", str(variant_id or ""))
+    idx = max(0, int(_m.group(1)) - 1) if _m else (h % len(_ORG_PARADIGMS))
     style.update(variant_chart_theme(idx))
+    style["numbering_scheme"] = NUMBERING_SCHEMES[idx % len(NUMBERING_SCHEMES)]
     return style
 
 
@@ -306,13 +354,6 @@ def _metadata(company: str, idx: int, rng: random.Random) -> dict:
         "create_time_offset_hours": rng.randint(-72, 0),
         "modified_time_offset_hours": rng.randint(-48, 0),
     }
-
-
-def _pick_by_hash(pool: list[str], hash_hex: str) -> str:
-    """按哈希前 8 位稳定选家（pool 先排序保证跨机器可复现）"""
-    pool_sorted = sorted(pool)
-    idx = int(hash_hex[:8], 16) % len(pool_sorted)
-    return pool_sorted[idx]
 
 
 def _hash_temp_in_band(hash_hex: str, lo: float, hi: float) -> float:
@@ -370,39 +411,47 @@ def _plan_chapter_models(
         subitem_assignments = []
 
         # 构建本章可用模型池（按字数上限 + writer_role 过滤）
-        is_system_ch = any(
-            kw in ch.get("title", "")
-            for kw in ("质量", "安全", "环保", "绿色", "工期", "文明", "民工", "进度")
-        )
+        from bid_common import MGMT_CHAPTER_KEYWORDS
+        is_system_ch = any(kw in ch.get("title", "") for kw in MGMT_CHAPTER_KEYWORDS)
         max_target = max(int(s["chars"]) for s in ch_subitems)
         chapter_pool = []
         for mk, mc in models_cfg.items():
-            cap = int(mc.get("output_char_cap", DEFAULT_OUTPUT_CHAR_CAP))
+            cap = int((mc or {}).get("output_char_cap", DEFAULT_OUTPUT_CHAR_CAP))
             if max_target > cap:
                 continue
-            role = mc.get("writer_role", "")
+            role = (mc or {}).get("writer_role", "")
             if role == "system_only" and not is_system_ch:
                 continue
             chapter_pool.append(mk)
         if not chapter_pool:
             chapter_pool = [main_model]
-        chapter_pool.sort()
+        # 角色偏好(config writer_role):管理章优先 mgmt_preferred,其余优先 data_preferred。
+        # 依据全库 400+ 章实测:kimi/sf_qwen_max 管理类 P/G 最高(1.10/1.26),glm 数据类稳健(1.53/0套话)。
+        prefer_role = "mgmt_preferred" if is_system_ch else "data_preferred"
+        chapter_pool.sort(
+            key=lambda mk: 0 if ((models_cfg.get(mk) or {}) if isinstance(models_cfg.get(mk), dict) else {}).get("writer_role") == prefer_role else 1
+        )
 
-        # 章内轮转分配：先用 hash 决定起始偏移，然后轮转保证同章内尽量不重复
+        # 章内轮转分配：按哈希洗牌池顺序，保证同章内尽量不重复
         # 5 个模型 8 个子项 → 前 5 个各不同，第 6-8 个进入第二轮
         ch_hash = hashlib.md5(f"{vid}|{ch_num}".encode()).hexdigest()
-        start_offset = int(ch_hash[:8], 16) % len(chapter_pool)
         # 按哈希洗牌池顺序，保证不同章/不同 variant 的轮转起点不同
         ch_rng = random.Random(int(ch_hash[:16], 16))
         shuffled_pool = chapter_pool[:]
         ch_rng.shuffle(shuffled_pool)
+        # 洗牌后稳定重排:角色偏好模型置前(组内顺序保持随机),轮转时优先分到子项
+        shuffled_pool.sort(
+            key=lambda mk: 0 if ((models_cfg.get(mk) or {}) if isinstance(models_cfg.get(mk), dict) else {}).get("writer_role") == prefer_role else 1
+        )
 
         for idx, sub in enumerate(ch_subitems):
             target_chars = int(sub["chars"])
             chosen = shuffled_pool[idx % len(shuffled_pool)]
 
             hash_hex = hashlib.md5(f"{vid}|{ch_num}|{idx}".encode()).hexdigest()
-            if "force_temperature" in models_cfg.get(chosen, {}):
+            if (isinstance(models_cfg.get(chosen), dict)
+                and isinstance(models_cfg[chosen].get("force_temperature"), (int, float))
+                and 0.0 <= float(models_cfg[chosen]["force_temperature"]) <= 2.0):
                 temp = float(models_cfg[chosen]["force_temperature"])
             else:
                 temp = _hash_temp_in_band(hash_hex, temp_lo, temp_hi)
@@ -425,6 +474,16 @@ def _plan_chapter_models(
     return plan
 
 
+FORMAT_SET_KEYS = ["A", "B", "C", "D", "E", "F"]
+
+
+def _assign_format_set(idx: int, available_sets: list[str] | None = None) -> str:
+    """分配格式集键:优先用 rules 实际渲染的可用键(强制格式项目只渲 A/B/C,
+    盲目轮转 D/E/F 会让 assemble raise ValueError 中断管道)。"""
+    keys = [k for k in (available_sets or []) if k] or FORMAT_SET_KEYS[:3]
+    return keys[idx % len(keys)]
+
+
 def build_variants(
     companies: list[str],
     project_name: str,
@@ -434,6 +493,9 @@ def build_variants(
     chapters=None,
     subitems_map=None,
     models_cfg=None,
+    angles: list[str] | None = None,
+    temp_cfg: dict | None = None,
+    available_format_sets: list[str] | None = None,
 ) -> dict:
     if not companies:
         raise ValueError("公司列表为空")
@@ -464,7 +526,7 @@ def build_variants(
     variants = []
     for idx, company in enumerate(companies):
         rng = random.Random(base_seed + idx * 17)
-        model, temperature = _assign_model(idx, total, model_pool, models_cfg)
+        model, temperature = _assign_model(idx, total, model_pool, models_cfg, temp_cfg=temp_cfg)
         fp = _data_fingerprint(company, idx, total, rng)
         md = _metadata(company, idx, rng)
 
@@ -480,12 +542,14 @@ def build_variants(
             "model": model,
             "temperature": temperature,
             "blind": blind,
-            "format_set": FORMAT_SET_KEYS[idx % len(FORMAT_SET_KEYS)],
+            "format_set": _assign_format_set(idx, available_format_sets),
             **fp,
             "metadata": md,
             "section_order_seed": base_seed + idx * 101,
             "chart_style": vstyle,
         }
+        if angles and idx < len(angles):
+            v_entry["angle"] = angles[idx]
 
         if can_cross_assign:
             v_entry["chapter_model_plan"] = _plan_chapter_models(
@@ -535,6 +599,7 @@ def main() -> int:
     p.add_argument("--cross-model", action="store_true",
                    help="启用旧 cross_model 模式（每章 4 子项并行 + 主笔润色）。默认走"
                         "单作者整章模式（1 模型 = 1 写手，每章 1 次调用，无润色）")
+    p.add_argument("--angles", help="逗号分隔的写作角度主线列表（与单位名同序），写入每家 variant.angle")
     args = p.parse_args()
 
     tender_dir = Path(args.tender_dir).expanduser().resolve()
@@ -552,11 +617,13 @@ def main() -> int:
 
     # 加载 LLM 配置(模型池来源)
     from bid_common import get_bid_gen_home as _ggh
-    llm_config_path = _ggh() / "configs" / "bid_llm_config.json"
+    llm_config_path = get_config_dir() / "bid_llm_config.json"
     models_cfg: dict = {}
+    llm_cfg_full: dict = {}
     if llm_config_path.is_file():
         try:
-            models_cfg = json.loads(llm_config_path.read_text(encoding="utf-8")).get("models", {})
+            llm_cfg_full = json.loads(llm_config_path.read_text(encoding="utf-8"))
+            models_cfg = llm_cfg_full.get("models", {})
         except Exception as e:
             print(f"⚠ bid_llm_config.json 读取失败: {e}")
 
@@ -602,10 +669,41 @@ def main() -> int:
     else:
         print(f"★ 单作者模式(1 模型 = 1 写手,{len(companies)} 家各一个模型)")
 
+    angles = [a.strip() for a in args.angles.split(",")] if args.angles else None
+    if angles is None:
+        # 自动派生:从 difficulties.json 难点标题取主线,不再依赖手动传参
+        try:
+            angles = _derive_angles_from_difficulties(extracted_dir, len(companies))
+        except Exception:
+            angles = []
+        if angles:
+            print(f"★ --angles 未提供，已从 difficulties.json 自动派生写作主线："
+                  f"{'；'.join(a[:16] for a in angles)}")
+    if angles and len(angles) != len(companies):  # 空派生(无 difficulties)不告警
+        if len(angles) < len(companies):
+            print(f"⚠ --angles 数量({len(angles)})少于单位数({len(companies)})："
+                  f"不足的单位不写入 angle（写作角度主线缺省）", file=sys.stderr)
+        else:
+            print(f"⚠ --angles 数量({len(angles)})多于单位数({len(companies)})："
+                  f"超出部分的 angle 将被忽略", file=sys.stderr)
+    # 探测 rules 实际渲染的 format_sets(强制格式项目只渲 A/B/C,轮到 D/E/F 会让 assemble 崩)
+    _avail_fs: list[str] = []
+    _dq = extracted_dir / "disqualification_rules.md"
+    _ar = extracted_dir / "authoring_rules.md"
+    for _rp in (_dq, _ar):
+        if _rp.exists():
+            import re as _re
+            _m = _re.search(r"```yaml\s*\nformat_sets:([\s\S]*?)```", _rp.read_text(encoding="utf-8", errors="ignore"))
+            if _m:
+                _avail_fs = sorted(set(_re.findall(r"^\s{2}([A-F]):", _m.group(1), _re.MULTILINE)))
+                break
     payload = build_variants(
         companies, project_name, pool,
         seed=args.seed, blind=blind,
         chapters=chapters, subitems_map=subitems_map, models_cfg=models_cfg,
+        temp_cfg=llm_cfg_full,
+        angles=angles,
+        available_format_sets=_avail_fs or None,
     )
     print_table(payload)
 

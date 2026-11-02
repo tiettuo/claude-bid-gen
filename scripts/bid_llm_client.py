@@ -42,9 +42,9 @@ _THINK_TAG_RE = re.compile(r"<think\b[^>]*>.*?</think>\s*", re.DOTALL | re.IGNOR
 
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bid_common import get_bid_gen_home as _get_bid_gen_home  # noqa: E402
+from bid_common import get_config_dir, get_bid_gen_home as _get_bid_gen_home  # noqa: E402
 _BID_GEN_HOME = _get_bid_gen_home()
-CONFIG_PATH = _BID_GEN_HOME / "configs" / "bid_llm_config.json"
+CONFIG_PATH = get_config_dir() / "bid_llm_config.json"
 
 
 def _load_env():
@@ -92,11 +92,16 @@ class LLMStats:
     calls: list[LLMUsage] = field(default_factory=list)
 
     def add(self, u: LLMUsage):
-        self.calls.append(u)
+        with _STATS_LOCK:
+            self.calls.append(u)
 
     def summary(self) -> dict:
+        """并发安全:与 add 共用 _STATS_LOCK,防迭代中列表扩容竞态。"""
+        # 快照一份再统计:遍历期间 add() 会 append 导致 len/各项求和口径不一致
+        with _STATS_LOCK:
+            snapshot = list(self.calls)
         by_model: dict[str, dict] = {}
-        for c in self.calls:
+        for c in snapshot:
             d = by_model.setdefault(c.model, {"calls": 0, "prompt": 0, "completion": 0, "total": 0, "seconds": 0.0})
             d["calls"] += 1
             d["prompt"] += c.prompt_tokens
@@ -104,17 +109,19 @@ class LLMStats:
             d["total"] += c.total_tokens
             d["seconds"] += c.elapsed_seconds
         return {
-            "total_calls": len(self.calls),
-            "total_tokens": sum(c.total_tokens for c in self.calls),
-            "total_seconds": sum(c.elapsed_seconds for c in self.calls),
+            "total_calls": len(snapshot),
+            "total_tokens": sum(c.total_tokens for c in snapshot),
+            "total_seconds": sum(c.elapsed_seconds for c in snapshot),
             "by_model": by_model,
         }
 
 
-_FLUSH_LOCK = threading.Lock()
+_STATS_LOCK = threading.RLock()
+# ★ 必须 RLock 而非 Lock:flush_stats_to_json() 已在 `with _STATS_LOCK` 内调用
+# stats.summary();summary() 也取同一把锁 → 普通 Lock 立即死锁(实测 pytest 挂死)。
 
 
-def _provider_key(endpoint: str) -> str:
+def provider_key(endpoint: str) -> str:
     """从 endpoint 域名派生厂商标识,用于按厂商(而非按模型)限并发。
 
     硅基流动等聚合厂商下挂多个 model key,必须按厂商账户共用一道并发闸,
@@ -178,7 +185,7 @@ class LLMClient:
         写的是累计值,同 label 重复 flush 幂等覆盖;跨脚本不同 label 累加。
         writer 每章完成调一次(成本大头不能等全部写完),concise 收尾调一次。
         """
-        with _FLUSH_LOCK:
+        with _STATS_LOCK:
             data: dict = {}
             try:
                 if path.exists():
@@ -200,9 +207,16 @@ class LLMClient:
         if model_key not in self.models:
             raise ValueError(f"未配置的模型: {model_key}")
         m = self.models[model_key]
-        api_key = os.environ.get(m["api_key_env"], "")
+        # 缺 api_key_env 的配置(本地端点常见)不应 KeyError;按无 key 处理,
+        # 非本地时下面会给出可读报错
+        _env_name = m.get("api_key_env") or ""
+        api_key = os.environ.get(_env_name, "") if _env_name else ""
+        is_local = ("127.0.0.1" in m.get("endpoint", "") or "localhost" in m.get("endpoint", ""))
+        if not api_key and not is_local:
+            raise RuntimeError(
+                f"环境变量 {_env_name or '(未配置 api_key_env)'} 未设置（模型 {model_key}）")
         if not api_key:
-            raise RuntimeError(f"环境变量 {m['api_key_env']} 未设置（模型 {model_key}）")
+            api_key = "local"  # 本地 llama-server 无需鉴权，占位即可
 
         try:
             from openai import OpenAI
@@ -267,11 +281,12 @@ class LLMClient:
         backoff = float(self.retry.get("backoff_seconds", 5))
 
         last_err = None
+        fail_fast_reason: str | None = None
         # 关推理等特殊参数走 extra_body 透传（如 GLM/Kimi thinking=disabled / MiniMax reasoning_split=true）
         extra_body = m.get("extra_body") or None
         strip_think = bool(m.get("strip_think_tag"))
 
-        sem = self._provider_sems[_provider_key(m.get("endpoint", ""))]
+        sem = self._provider_sems[provider_key(m.get("endpoint", ""))]
         for attempt in range(1, max_attempts + 1):
             start = time.time()
             try:
@@ -289,7 +304,53 @@ class LLMClient:
                 with sem:
                     resp = client.chat.completions.create(**create_kwargs)
                 elapsed = time.time() - start
-                text = resp.choices[0].message.content or ""
+                msg = resp.choices[0].message
+                text = msg.content or ""
+                reasoning = getattr(msg, "reasoning_content", None) or ""
+                # DeepSeek V4-Flash 等推理模型：思考过程在 reasoning_content、答案在 content，
+                # max_tokens 是两者共享配额。content 空要区分两种情况以便诊断：
+                #   ① reasoning_content 有内容 → max_tokens 被推理占满，需加大 max_tokens 或关推理；
+                #   ② reasoning_content 也空 → 真·空返回。
+                if not text:
+                    if reasoning:
+                        # 推理溢出：max_tokens 被推理内容占满（DeepSeek V4-Flash 等）。
+                        # 同 prompt 同配额重试必然复现、白耗推理 token → fail-fast，交由上层降级。
+                        # 仍计入 usage 统计，避免预算追踪漏掉已消耗的推理 token。
+                        usage = resp.usage
+                        u = LLMUsage(
+                            model=model_key,
+                            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+                            total_tokens=getattr(usage, "total_tokens", 0) or 0,
+                            elapsed_seconds=elapsed,
+                        )
+                        self.stats.add(u)
+                        last_err = RuntimeError(
+                            f"模型 content 为空但 reasoning_content 有 {len(reasoning)} 字符"
+                            f"（max_tokens 被推理占满，需加大 max_tokens 或配 extra_body 关推理）"
+                        )
+                        self.log.error(
+                            f"[{model_key}] 推理占满 max_tokens（reasoning {len(reasoning)} 字符），"
+                            f"fail-fast 不再重试，交由上层降级"
+                        )
+                        fail_fast_reason = "推理占满 max_tokens"
+                        break
+                    else:
+                        # ★ 与上面推理溢出分支同口径:空内容也已消耗 token,
+                        #   不记 usage 会让预算熔断漏计(重试多次就漏得更多)
+                        _u = resp.usage
+                        self.stats.add(LLMUsage(
+                            model=model_key,
+                            prompt_tokens=getattr(_u, "prompt_tokens", 0) or 0,
+                            completion_tokens=getattr(_u, "completion_tokens", 0) or 0,
+                            total_tokens=getattr(_u, "total_tokens", 0) or 0,
+                            elapsed_seconds=elapsed,
+                        ))
+                        last_err = RuntimeError(f"模型返回空内容 (completion_tokens={getattr(resp.usage, 'completion_tokens', 0) or 0})")
+                        self.log.warning(f"[{model_key}] 第 {attempt}/{max_attempts} 次空内容 ({elapsed:.1f}s)，将重试")
+                        if attempt < max_attempts:
+                            time.sleep(backoff * attempt)
+                        continue
                 if strip_think and text:
                     text = _THINK_TAG_RE.sub("", text).lstrip()
                 usage = resp.usage
@@ -311,6 +372,8 @@ class LLMClient:
                 if attempt < max_attempts:
                     time.sleep(backoff * attempt)
 
+        if fail_fast_reason:
+            raise RuntimeError(f"模型 {model_key} {fail_fast_reason}，fail-fast 未重试: {last_err}")
         raise RuntimeError(f"模型 {model_key} 重试 {max_attempts} 次后仍失败: {last_err}")
 
 

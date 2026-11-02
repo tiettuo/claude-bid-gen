@@ -271,7 +271,7 @@ def _strip_json_fence(text: str) -> str:
 
 def _parse_json_with_retry(client: LLMClient, model: str, system: str, user: str,
                           max_attempts: int = 2, log=None,
-                          max_tokens: int = 12000) -> dict | None:
+                          max_tokens: int = 12000, compact_suffix: str = "") -> dict | None:
     """调 LLM 拿 JSON,失败时重试一次,提示更严格。
 
     max_tokens 默认 12000(B1/B2 够用);B3 需枚举全文 28+ 条废标条款,输出会撑爆
@@ -280,8 +280,22 @@ def _parse_json_with_retry(client: LLMClient, model: str, system: str, user: str
     传入值直接透传给 API,不会被模型 config 的 max_tokens 夹住。骨架默认模型 deepseek
     (deepseek-v4-flash)config max_tokens 已是 16000,支持本处更大值;若改用其它模型
     (多数 config 仅 8000),调用方须自行确认目标模型真实 API 输出上限,勿盲目放大。
+    重试时抬 max_tokens 会封顶到模型 config 的 max_tokens：本代码库把 config.max_tokens
+    视为该模型输出上限（与 _call_with_retry 的 `mt = max_tokens or config.max_tokens` 默认值语义一致），
+    超过它可能触发 API 400（如 deepseek 16000→24000 会 400，封顶后只到 16000）。
+    初始值低于上限时抬升仍有效，仅当初始值已等于上限时抬升不生效。
     """
+    def _model_limit() -> int:
+        try:
+            v = int((client.config.get("models", {}) or {}).get(model, {}).get("max_tokens") or 0)
+            return v if v > 0 else 0
+        except (TypeError, ValueError, AttributeError):
+            return 0
+
     cur_max_tokens = max_tokens
+    limit = _model_limit()
+    if limit and cur_max_tokens > limit:
+        cur_max_tokens = limit
     for attempt in range(1, max_attempts + 1):
         try:
             resp = client.chat(
@@ -298,8 +312,11 @@ def _parse_json_with_retry(client: LLMClient, model: str, system: str, user: str
                 log.warning(f"  [{model}] JSON 解析失败 (尝试 {attempt}/{max_attempts}): {e}")
                 log.debug(f"  原文前 500 字: {raw[:500] if 'raw' in dir() else resp.text[:500]}")
             if attempt < max_attempts:
-                # 第二次:既加严格提示,也抬高 max_tokens(常见根因就是输出被截断)
+                # 第二次:既加严格提示,也抬高 max_tokens(常见根因就是输出被截断);
+                # 抬高后封顶到模型 config 真实上限,避免超限 400。
                 cur_max_tokens = int(cur_max_tokens * 1.5)
+                if limit and cur_max_tokens > limit:
+                    cur_max_tokens = limit
                 user = user + "\n\n上次输出无法解析为 JSON,请严格遵守"
                 user += "「只输出 JSON,无任何 markdown 标记」的要求重新生成。"
         except Exception as e:
@@ -307,6 +324,25 @@ def _parse_json_with_retry(client: LLMClient, model: str, system: str, user: str
                 log.warning(f"  [{model}] 调用异常: {e}")
             if attempt >= max_attempts:
                 raise
+
+    # 内重试耗尽(典型根因:输出过长被 API 截断,而 max_tokens 已封顶到模型上限)。
+    # 此时换一套“极度精简”的追加指令再要一次:宁可少抽几条,也不让整步失败。
+    # 调用方传 compact_suffix 才启用(如 Tier4 特殊条款、跳章一致性核对)。
+    if compact_suffix:
+        if log:
+            log.warning("  常规重试耗尽,改用精简版指令再试一次(限条数+限单条长度)")
+        try:
+            resp = client.chat(
+                model_key=model, system=system, user=user + compact_suffix,
+                temperature=0.2, max_tokens=cur_max_tokens,
+            )
+            return json.loads(_strip_json_fence(resp.text))
+        except json.JSONDecodeError as e:
+            if log:
+                log.warning(f"  [{model}] 精简版 JSON 仍解析失败: {e}")
+        except Exception as e:
+            if log:
+                log.warning(f"  [{model}] 精简版调用异常: {e}")
     return None
 
 

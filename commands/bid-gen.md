@@ -49,6 +49,26 @@ python $BID_GEN_HOME/scripts/bid_status.py "$ARGUMENTS"
 
 ## 工作流程
 
+### Step −1：入包解压与归一化（当用户直接给 .zip 时）
+
+```bash
+python $BID_GEN_HOME/scripts/bid_ingest_zip.py "<项目.zip>" --out-dir "<交付父目录>"
+```
+
+用户常直接给一个压缩包，里面**没有可直接读取的 招标文件.pdf**：真正的正文藏在电子标书容器里
+（`.XZZ` / `.GKZJ` / `.ZBWJ` 本质是 zip，内含 `File.zip` → `招标项目/招标文件.pdf`，嵌套 4~5 层）。
+
+该脚本（GBK 文件名安全 + 递归 + 幂等，`--force` 强制重解）：
+- 解到 `<交付父目录>/<项目名>/原始文件/`（原始归档原样保留，不删）
+- 递归拆容器，**把规范文件名提升到项目根**：`招标文件.pdf` / `控制价清单文件.pdf` / `招标公告.pdf` / `公平竞争自查表.pdf`，以及 `工程量清单/`、`图纸/`
+- 压平单子目录包装（`图纸/图纸/` → `图纸/`）
+- 写 `ingest_manifest.json`，退出码 0/2
+
+**不要回退的坑：** `bid_extract.py` 通过 `RAW_ARCHIVE_DIR` 跳过 `原始文件/`（`skip_dirs` + `unpack_archives` 两处）。
+否则保留的原始归档会被二次解包，同一 PDF 被视觉 OCR 两次（双倍 API 费用）。
+
+**项目文件夹名即交付名**，会一路传导到最终 DOCX 文件名。
+
 ### Step 1：提取所有文件文本
 
 ```bash
@@ -445,6 +465,7 @@ python $BID_GEN_HOME/scripts/bid_llm_client.py --test-all
 2. 读取 project_brain.md 中与本章主题相关的内容
 3. 读取 disqualification_rules.md 检查是否有针对本章的特殊要求
 4. **严格按 chapter_plan 的目标字数 ±15% 带写作，图表不计入字数**（不得再用"分值×300"线性估算——那是旧公式，与 Step 2 圈层理论冲突）
+5. **`extracted/unified_data_anchor.md`（统一数据锚点，自动生成）**：项目级硬数据（总工期/规模/质量标准/子工程量/控制价/海拔等），由 `bid_data_anchor.py` 在 write 步前自动生成并注入每章 prompt，用于强制跨章数据一致、禁止编造。**不要直接改这个文件**——`bid_run.py` 每次 write 前都会 `--force` 覆盖重生成。需要人工补充硬数据时，把内容写在 `<!-- MANUAL:BEGIN -->` 与 `<!-- MANUAL:END -->` 之间，重生成时会原样保留。
 
 **每章结构通用原则：**
 - 第一级标题（`#`）= chapter_plan 中的章节标题（字面一致）
@@ -529,7 +550,7 @@ python $BID_GEN_HOME/scripts/bid_reviewer.py "$ARGUMENTS" --variant V01
 
 | 章节主题（若评分表出现） | 附加要求 |
 |------------------------|---------|
-| 进度计划类 | 文末附 JSON 进度数据块（tasks/milestones），总工期≤招标要求 |
+| 进度计划类 | 文末附 JSON 进度数据块（tasks/milestones），总工期≤招标要求；**正文一律不出现具体日历日期**（用「总工期 N 日历天 / 开工后第 N 天 / 第 N 阶段」相对表达），具体日期只允许出现在进度图 JSON 数据块内且不得早于计划开工基准 |
 | 资源配置类 | 劳动力+机械+材料三张表，与工程量匹配 |
 | 质量措施类 | 各分项逐一对应施工方案中的分项，不漏项 |
 | 安全措施类 | 针对本项目实际风险源（高处/基坑/临电/机械等） |
@@ -559,6 +580,46 @@ python $BID_GEN_HOME/scripts/bid_assemble.py "$ARGUMENTS/output/" --batch
 - 扫描 `output/V*/` 每个子目录，生成 `V01_甲公司_xxx_施工组织设计.docx` 等
 - 按 variants.json 注入每家独立的 DOCX 元数据（creator / lastModifiedBy / created / modified）
 - 清空修订历史与元评论，避免元数据层雷同
+
+---
+
+### Step 4.4：目录页码回填（自动，不可跳过）
+
+```bash
+python $BID_GEN_HOME/scripts/bid_toc_fill.py "$ARGUMENTS"          # 回填静态目录页码
+python $BID_GEN_HOME/scripts/bid_toc_fill.py "$ARGUMENTS" --variant V01
+python $BID_GEN_HOME/scripts/bid_toc_fill.py "$ARGUMENTS" --dry-run  # 只报告不落盘
+```
+
+**为什么需要这一步：**产物 DOCX **绝不能**带 `w:updateFields=true`——Word 打开时
+必弹模态框「该文档包含的域可能引用了其他文件」，且**无任何 Word 偏好项可关**，
+会卡死 `bid_verify` 的 AppleScript 页数实测（实测弹窗 + -609 连接无效）。
+
+因此目录不再用 TOC 域，而是：
+- `bid_assemble._prepend_toc` 收集 Heading1/2，生成 **静态目录条目**
+  （左标题 + 右对齐点线制表位 + 页码占位符 `@@TOCPGn@@`）；
+- 本步用 Word 导出 PDF → PyMuPDF 定位每个标题所在页 → 回填真实页码。
+
+**不重排页数：** 占位符与最终页码同在右对齐制表位后，长度变化只改变点线、
+不增减行 → 回填不改变分页，无需二次量页。
+
+**降级：** 非 macOS / 未装 Word / 未装 PyMuPDF 时占位符替换为「—」并告警，
+目录仍可读（只是无页码），本步不阻断流水线。
+
+**验收：** `settings.xml` 无 `updateFields`、`document.xml` 无 `@@TOCPG` 残留、
+打开 docx 零弹窗且目录带真实页码。
+
+**排页数预算时要算上目录本身**：如 102 条条目 × 宋体四号 ≈ 4 页。
+
+---
+
+### Step 4.5：组装产物验证
+
+```bash
+python $BID_GEN_HOME/scripts/bid_verify.py "$ARGUMENTS"
+```
+
+检查封面存在 / 正文字体字号 / 页边距 / 页数 ≤ 招标硬顶 / 多份排版差异化 / 组装日志危险告警。
 
 ---
 

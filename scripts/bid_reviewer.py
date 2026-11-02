@@ -26,6 +26,7 @@ import argparse
 import json
 import logging
 import re
+from bid_common import get_config_dir  # noqa: E402
 import sys
 from pathlib import Path
 
@@ -51,7 +52,8 @@ _DECO_WARN_THRESHOLD = 10
 
 # ─── 子项标题规范化（H2 对齐核查用） ─────────────────────────────────────
 # 去掉层级编号（1.1、（一）、1)）、装饰性括号内容、空白和常见标点
-_NUM_PREFIX_RE = re.compile(r"^(?:[\d]+[.、\s]+|[（(][一二三四五六七八九十\d]+[)）]\s*)+")
+_NUM_PREFIX_RE = re.compile(
+    r"^(?:[\d]+[.、\s]+|[（(][一二三四五六七八九十\d]+[)）]\s*|[一二三四五六七八九十]+[、.\s]+)+")
 _TITLE_STRIP_RE = re.compile(r"[\s　、，,。；;()（）【】\[\]\-—：:]+")
 
 
@@ -82,7 +84,9 @@ def _fuzzy_has(norm_expected: str, norm_actuals: list[str], ratio_floor: float =
     for a in norm_actuals:
         if not a:
             continue
-        if norm_expected in a or a in norm_expected:
+        # 方向性下限:短 actual(如"质量")子串命中长 expected 是漏报源,限 ≥4 字;
+        # 短 expected(如"安全")含于长 actual 是正常截断匹配,不设限
+        if norm_expected in a or (len(a) >= 4 and a in norm_expected):
             return a
         if SequenceMatcher(None, norm_expected, a).ratio() >= ratio_floor:
             return a
@@ -91,21 +95,49 @@ def _fuzzy_has(norm_expected: str, norm_actuals: list[str], ratio_floor: float =
 
 def read_disqualification_terms(disq_path: Path) -> dict:
     """从废标规则提取：暗标禁用词、关键响应词"""
-    result = {"forbidden": [], "required_response": [], "is_blind": False}
+    result = {"forbidden": [], "required_response": [], "is_blind": False, "no_company_info": False}
     if not disq_path.exists():
         return result
     text = disq_path.read_text(encoding="utf-8")
-    result["is_blind"] = needs_blind_scan(disq_path.parent)
-    # 简单启发式：找 "必须响应" / "明确承诺" 附近的短语
-    for m in re.finditer(r"(?:必须|应当|须)\s*(?:响应|承诺|明确|包含)\s*[:：]?\s*([^\n。；]{2,30})", text):
-        phrase = m.group(1).strip(" 、，,")
-        if 2 <= len(phrase) <= 30:
-            result["required_response"].append(phrase)
-    # 暗标禁用词
-    for m in re.finditer(r"(?:不得|不能|禁止)\s*(?:出现|含有|包含)\s*[:：]?\s*([^\n。；]{2,30})", text):
-        phrase = m.group(1).strip(" 、，,")
-        if 2 <= len(phrase) <= 30:
-            result["forbidden"].append(phrase)
+    # 与 bid_common 同源:no_company_info 从结构化键/文本回填(暗标 gate 用)
+    try:
+        from bid_common import _parse_blind_flags_from_text
+        _bf = _parse_blind_flags_from_text(text)
+        result["is_blind"] = needs_blind_scan(disq_path.parent)
+        if _bf.get("no_company_info"):
+            result["no_company_info"] = True
+    except Exception:  # noqa: BLE001
+        result["is_blind"] = needs_blind_scan(disq_path.parent)
+    # 与 writer 同源:优先复用其结构化「关键响应」段解析(口径一致,防 review 误报/漏报),
+    # 启发式正则仅作兑底
+    try:
+        from bid_common import parse_response_keywords as _parse_kw_common
+        _kws = _parse_kw_common(text) or []
+        result["required_response"] = [
+            str(k.get("keyword", "")).strip() for k in _kws if 2 <= len(str(k.get("keyword", "")).strip()) <= 30
+        ] or result["required_response"]
+    except Exception:  # noqa: BLE001
+        pass
+    if not result["required_response"]:  # 结构化解析已命中则跳过启发式
+        # 简单启发式：找 "必须响应" / "明确承诺" 附近的短语
+        for m in re.finditer(r"(?:必须|应当|须)\s*(?:响应|承诺|明确|包含)\s*[:：]?\s*([^\n。；]{2,30})", text):
+            phrase = m.group(1).strip(" 、，,")
+            if 2 <= len(phrase) <= 30:
+                if phrase not in result["required_response"]:
+                    result["required_response"].append(phrase)
+    # 暗标禁用词(过滤通用词:这类短语正文合法出现,命中即判 major 会误触发重写)
+    _GENERIC_FORBIDDEN = {
+        "彩色内容", "公司信息", "彩色", "颜色", "标记", "标识", "附件", "页眉", "页脚",
+        "姓名", "单位名称", "投标人名称", "联系方式", "联系电话", "地址",
+    }
+    for m in re.finditer(r"(?:不得|不能|禁止)\s*(?:出现|含有|包含)\s*[:：]?\s*([^\n。；]{2,60})", text):
+        # 顿号/逗号切分:整段枚举(公司名称、地址、联系电话…)拆成单短语,
+        # 否则 30 字长串正文永不逐字命中 → 暗标禁用词漏报
+        for phrase in re.split(r"[、，,]", m.group(1)):
+            phrase = phrase.strip(" 、，,。；")
+            if 2 <= len(phrase) <= 30 and phrase not in _GENERIC_FORBIDDEN \
+                    and phrase not in result["forbidden"]:
+                result["forbidden"].append(phrase)
     return result
 
 
@@ -122,12 +154,13 @@ _STANDARD_RE = re.compile(
 )
 
 def _load_standards_truth() -> dict:
-    """加载标准版本真值表。"""
-    truth_path = Path(__file__).resolve().parent.parent / "configs" / "standards_truth.json"
-    if truth_path.exists():
-        with open(truth_path) as f:
+    """加载标准版本真值表(损坏/缺失时降级为空表,不阻断模块导入)。"""
+    truth_path = get_config_dir() / "standards_truth.json"
+    try:
+        with open(truth_path, encoding="utf-8") as f:
             return json.load(f).get("standards", {})
-    return {}
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 _STANDARDS_TRUTH = _load_standards_truth()
 
@@ -151,13 +184,41 @@ def _load_project_keywords(extracted_dir: Path) -> set[str]:
     }
 
 
+def _lazy_project_keywords() -> set:
+    """P/G 检查的项目词表惰性兜底(main 未填充时从 project_brain 前三节抓专名)。"""
+    kws: set = set()
+    try:
+        _brain = Path.cwd() / "extracted" / "project_brain.md"
+        if not _brain.exists():
+            for _c in Path.cwd().parents[:3]:
+                if (_c / "extracted" / "project_brain.md").exists():
+                    _brain = _c / "extracted" / "project_brain.md"
+                    break
+        if _brain.exists():
+            import re as _re
+            _head = _brain.read_text(encoding="utf-8", errors="ignore")[:3000]
+            for _m in _re.finditer(r"[\u4e00-\u9fff]{2,6}(?:县|市|区|乡|镇|村|项目|工程)", _head):
+                if len(_m.group()) >= 3:
+                    kws.add(_m.group())
+    except Exception:  # noqa: BLE001
+        pass
+    return kws
+
+
 def _check_pg_ratio(text: str, chapter: dict) -> dict:
     """检测项目专用词 vs 通用管理词的密度比（P/G 比）。
 
     项目专用词来源：项目级专有名词(_PROJECT_KEYWORDS) + 章节标题/notes 关键词。
     """
     # 项目专用词：项目级专有词 + 章节标题和 notes 提取
+    # (进程内直接调用而未经 main() 填充时,从同目录 project_brain.md 惰性补一次,
+    #  防 P/G 退化为仅章节标题词而误判 major)
     proj_kws = set(_PROJECT_KEYWORDS)
+    if not proj_kws:
+        # 仅当调用方未经过 main()(直接复用函数)时尝试兜底;cwd 定位不可靠时宁空勿错
+        _lk = _lazy_project_keywords()
+        if _lk:
+            proj_kws = _lk
     for src in [chapter.get("title", ""), chapter.get("notes", "")]:
         for kw in extract_keywords(str(src)):
             kw_clean = kw.strip()
@@ -168,15 +229,32 @@ def _check_pg_ratio(text: str, chapter: dict) -> dict:
         return {"ratio": 1.0, "project_hits": 0, "generic_hits": 0, "severity": "ok",
                 "detail": ""}
 
-    project_hits = sum(text.count(kw) for kw in proj_kws)
+    # 子串重叠去重:长词优先占位,短词只计未被长词覆盖的出现次数。
+    # ★ 不能像旧实现那样把被包含的短词整条剔除——“质量管理”会被“质量管理体系”
+    #   连坐清零,project_hits 系统性偏低 → 叠加收紧后的 P/G 阈值会把章节误判 major。
+    _sorted_kws = sorted(proj_kws, key=len, reverse=True)
+    _claimed = bytearray(len(text))
+    project_hits = 0
+    for _k in _sorted_kws:
+        _start = 0
+        while True:
+            _i = text.find(_k, _start)
+            if _i < 0:
+                break
+            if not any(_claimed[_i:_i + len(_k)]):
+                project_hits += 1
+                _claimed[_i:_i + len(_k)] = b"\x01" * len(_k)
+            _start = _i + 1
     generic_hits = sum(text.count(t) for t in _GENERIC_MGMT_TERMS)
     pg = project_hits / max(generic_hits, 1)
 
-    if pg < 0.2:
+    # 阈值收紧(2026-08-19 写作质量整改):全库实测管理类 P/G 均值 0.6-1.2,
+    # 旧阈值(0.2/0.4/0.6)下 0.49 的章节仅 minor 不触发任何修复。
+    if pg < 0.3:
         sev, msg = "major", f"项目针对性极低（P/G={pg:.2f}）：{project_hits} 项目词 / {generic_hits} 通用词，几乎全是套话"
-    elif pg < 0.4:
+    elif pg < 0.5:
         sev, msg = "moderate", f"项目针对性偏低（P/G={pg:.2f}）：{project_hits}/{generic_hits}，需要更多项目特有细节"
-    elif pg < 0.6:
+    elif pg < 0.7:
         sev, msg = "minor", f"项目针对性偏弱（P/G={pg:.2f}）：{project_hits}/{generic_hits}，可增加项目具体参数"
     else:
         sev, msg = "ok", ""
@@ -204,6 +282,19 @@ def _check_standards_in_text(text: str) -> dict:
                     fabricated += 1
                     details.append({"standard": key, "cited_year": year, "true_year": true_year})
                 break
+        else:
+            # 表外标准:真值表未收录——号段不合理(>99999)或年份超前视为疑似编造
+            try:
+                _num_i = int(num)
+                _yr_i = int(year)
+            except (TypeError, ValueError):
+                continue
+            if _num_i > 99999 or not (1980 <= _yr_i <= 2035):
+                fabricated += 1
+                details.append({"standard": f"{prefix}{num}", "cited_year": year,
+                                "true_year": "(表外/疑似编造)"})
+    if len(details) > 50:
+        details = details[:50]  # 上限,防 details 无限膨胀
     return {"total": total, "fabricated": fabricated, "details": details}
 
 
@@ -216,8 +307,9 @@ _PLACEHOLDER_RULES = [
         r"|某某|[张李王赵钱孙周吴郑刘陈杨黄徐马]某(?![一-鿿])")),
     ("XX/电话占位", re.compile(r"[xXＸｘ×]{2,}")),
     ("指令泄漏", re.compile(
-        r"按实际[^，。）\n]{0,12}填|此处[^，。）\n]{0,10}(?:填写?|响应|替换|修改|补充)"
+        r"按实际[^，。）\n]{0,10}填写?(?:后|时|并按)|此处[^，。）\n]{0,10}(?:填写?|响应|替换|修改|补充)"
         r"|待[填补]入|自行(?:填写|补充|确定)|占位符?")),
+    ("生成失败占位", re.compile(r"本(?:子节|章节|节)生成失败|需后续补写")),
     ("模板括号", re.compile(r"【[^】\n]{0,16}(?:填|待定|示例|占位|XXX)[^】\n]{0,6}】")),
 ]
 
@@ -239,7 +331,7 @@ def scan_placeholders(text: str) -> list[str]:
 # 这些是 LLM prompt 残渣,出现在投标正文里既不专业、又可能被评委察觉是机器生成。
 _PROMPT_LEAK_RULES = [
     ("写作指令", re.compile(
-        r"严禁(?:编造|出现虚假)|不得编造|请确保(?:每)?|本章(?:必须|应当?)(?:覆盖|包含|展开|围绕)"
+        r"严禁(?:编造|出现虚假)|不得编造|本章(?:必须|应当?)(?:覆盖|包含|展开|围绕)"
         r"|字数(?:要求|不少于|约为?\s*\d)|须?围绕[^。\n]{0,10}展开论述|按(?:上述|指定)维度切分")),
     ("元注释", re.compile(r"（注[:：][^）\n]{0,40}(?:不降效|占位|示例|按.*配置|此处|仅供|本工程不)[^）\n]*）")),
     ("悬空引图", re.compile(
@@ -249,15 +341,32 @@ _PROMPT_LEAK_RULES = [
 
 
 def scan_prompt_leak(text: str) -> list[str]:
-    """扫描指令泄漏 + 删图后悬空引图句(逐行,末尾型悬空引用)。返回去重命中。"""
+    """扫描指令泄漏 + 删图后悬空引图句(逐行,末尾型悬空引用)。返回去重命中。
+
+    ★ 「见下图/如下图所示」不是悬空引图,只要它**后面还有 ```json 图表块**——
+      本管道用 json 图表块经 bid_charts 渲染成 PNG 嵌入 docx,md 里本来就没有
+      图片引用,所以“引图句 + json 块”是正常成对结构。只有后面再无任何 json 图表块
+      (即图真的被删了)才算悬空。历史误报:V01 章 15「关键线路见下图。」被当成
+      写手指令泄漏,而其正下方就是 aoa_network 图表块。
+    """
+    lines = text.split("\n")
+    has_chart_after = [False] * (len(lines) + 1)
+    _seen_json = False
+    for i in range(len(lines) - 1, -1, -1):
+        has_chart_after[i] = _seen_json
+        if lines[i].strip().startswith("```json"):
+            _seen_json = True
+
     hits, seen = [], set()
-    for raw in text.split("\n"):
+    for i, raw in enumerate(lines):
         line = raw.strip()
         if not line:
             continue
         for kind, rx in _PROMPT_LEAK_RULES:
             m = rx.search(line)
             if m:
+                if kind == "悬空引图" and has_chart_after[i]:
+                    continue  # 后面还有 json 图表块 → 组装后会成图片,不是悬空
                 frag = m.group(0).strip()
                 if (kind, frag) not in seen:
                     seen.add((kind, frag))
@@ -317,9 +426,14 @@ def review_chapter(
     threshold = chapter_chars_floor(chapter["target_chars"])
     result["chars_pass"] = result["actual_chars"] >= threshold
     if not result["chars_pass"]:
+        _ratio = result["actual_chars"] / max(chapter["target_chars"], 1)
         result["issues"].append({
             "type": "chars_short",
-            "detail": f"实际 {result['actual_chars']} 字 < 目标 {threshold} 字（≥85%目标）"
+            "severity": "moderate" if _ratio < 0.70 else "minor",
+            "detail": (f"字数严重不足：实际 {result['actual_chars']} 字仅为目标 "
+                       f"{chapter['target_chars']} 的 {_ratio:.0%}（<70%，触发重写）")
+                      if _ratio < 0.70 else
+                      f"实际 {result['actual_chars']} 字 < 目标 {threshold} 字（≥85%目标）",
         })
 
     # 2.5. 套话检测（v3）
@@ -369,14 +483,16 @@ def review_chapter(
                 "detail": f"{result['keyword_coverage']:.0%} 覆盖（{len(hit)}/{len(notes_kws)}），缺失：{', '.join(miss[:10])}"
             })
 
-    # 4. 暗标禁用词扫描
+    # 4. 暗标禁用词扫描(仅暗标/禁公司信息项目启用;非暗标项目的"禁止出现X"短语
+    #    是对响应文件的整体要求而非正文词禁,命中即 major 会误触发重写)
     blind_hits = []
-    if disq.get("is_blind") and company_name:
-        if company_name in text:
-            blind_hits.append(("company_name", company_name))
-    for term in disq.get("forbidden", []):
-        if term and term in text:
-            blind_hits.append(("forbidden", term))
+    _blind_on = bool(disq.get("is_blind")) or bool(disq.get("no_company_info"))
+    if _blind_on and company_name and company_name in text:
+        blind_hits.append(("company_name", company_name))
+    if _blind_on:
+        for term in disq.get("forbidden", []):
+            if term and term in text:
+                blind_hits.append(("forbidden", term))
     result["blind_violations"] = blind_hits
     if blind_hits:
         result["issues"].append({
@@ -504,24 +620,30 @@ def review_chapter(
         })
 
     # 8. 严重性分级
+    # pg_low moderate 升格为整体 major(与 boilerplate 对齐):管理类空心化必须
+    # 触发 review gate 的 --force 重写(新 writer 下管理章走子项级,重写有效)
     types_present = {i["type"] for i in result["issues"]}
     sk_sev = next((i.get("severity") for i in result["issues"] if i["type"] == "skeleton_mismatch"), None)
     sub_sev = next((i.get("severity") for i in result["issues"] if i["type"] == "subitem_mismatch"), None)
     bp_sev = next((i.get("severity") for i in result["issues"] if i["type"] == "boilerplate"), None)
     pg_sev = next((i.get("severity") for i in result["issues"] if i["type"] == "pg_low"), None)
     std_sev = next((i.get("severity") for i in result["issues"] if i["type"] == "std_fabrication"), None)
+    # ★ 字数严重不足(<70%)必须在本轮就升 major:它原本写在最后的 elif,
+    #   会被 title_mismatch/prompt_leak/skeleton_mismatch 触发的 moderate 抢先 →
+    #   严重欠字章节只判 moderate、进不了 review gate 的重写路径。
+    cs_sev = next((i.get("severity") for i in result["issues"] if i.get("type") == "chars_short"), None)
     if "blind_violation" in types_present or "missing" in types_present \
             or "placeholder" in types_present \
             or sk_sev == "major" or sub_sev == "major" or bp_sev == "moderate" \
-            or pg_sev == "major" or std_sev == "moderate":
+            or pg_sev in ("major", "moderate") or std_sev == "moderate" \
+            or cs_sev == "moderate":
         result["severity"] = "major"
     elif "title_mismatch" in types_present or "prompt_leak" in types_present \
-            or sk_sev == "moderate" or sub_sev == "moderate" \
-            or pg_sev == "moderate":
+            or sk_sev == "moderate" or sub_sev == "moderate":
         result["severity"] = "moderate"
     elif "chars_short" in types_present or "keyword_coverage_low" in types_present \
             or "decorative_chars" in types_present or "decorative_arrows" in types_present \
-            or pg_sev == "minor" or std_sev == "minor":
+            or "boilerplate" in types_present or pg_sev == "minor" or std_sev == "minor":
         result["severity"] = "minor"
     else:
         result["severity"] = "ok"
@@ -539,9 +661,11 @@ def review_variant(
     """审一个 variant 目录（或单份的 output/ 根目录）"""
     subitems_map = subitems_map or {}
     results = []
+    ch_texts: list[str] = []
     for ch in chapters:
         md = chapter_dir / ch["filename"]
         ch_subitems = subitems_map.get(ch["num"], [])
+        ch_texts.append(md.read_text(encoding="utf-8", errors="ignore") if md.exists() else "")
         r = review_chapter(
             md, ch, disq, variant.get("company_name", ""), log,
             variant=variant, subitems=ch_subitems,
@@ -555,6 +679,36 @@ def review_variant(
             f"  {mark} {ch['num']} {ch['title'][:20]}  "
             f"chars={r.get('actual_chars', 0)}/{r['target_chars']}{sub_info}  severity={r['severity']}"
         )
+
+    # ── 废标关键响应词检查(docstring 第 5 条,历史缺陷:解析后从未消费)──
+    # 全文均未出现的短语 → 挂到标题相关度最高的章节(无命中时挂首章,响应词多为
+    # 项目级承诺,概况/部署章承载合理)。severity 保持 moderate:强制执行由
+    # compliance gate 的独立 response_check 扫描负责,此处为 review 层可见性上报,
+    # 不与 review gate 的 major 重写联动(启发式抽取的短语直接升 major 会烧尽重试轮次)。
+    _req = [ph for ph in (disq.get("required_response") or []) if 2 <= len(ph) <= 30]
+    if _req and results:
+        _norm = lambda s: re.sub(r"\s+", "", s or "")
+        _all_text = _norm("".join(ch_texts))
+        for ph in _req:
+            if _norm(ph) in _all_text:
+                continue
+            kws = [k for k in extract_keywords(ph) if len(k) >= 2]
+            best, best_hit = 0, -1
+            for ri, ch2 in enumerate(chapters):
+                hits = sum(1 for k in kws if k in ch2.get("title", ""))
+                if hits > best_hit:
+                    best, best_hit = ri, hits
+            target = results[best] if best < len(results) else results[0]
+            target.setdefault("issues", []).append({
+                "type": "response_keyword_miss",
+                "severity": "moderate",
+                "detail": f"废标关键响应词未在全文出现：{ph[:24]}",
+            })
+            if target["severity"] in ("ok", "minor"):
+                target["severity"] = "moderate"
+            log.warning(
+                f"  ⚠ 废标关键响应词缺失『{ph[:20]}』→ 挂到 {chapters[best]['num'] if best < len(chapters) else '?'} 章"
+            )
 
     severities = [r["severity"] for r in results]
     overall = "major" if "major" in severities else \
@@ -638,7 +792,20 @@ def main() -> int:
     else:
         log.warning("chapter_plan.md 无「## 子项分配」段 — 跳过 H2 1:1 核查（仅单份模式可接受）")
 
-    disq = read_disqualification_terms(extracted / "disqualification_rules.md")
+    # 与 writer 同源同文件:优先 authoring_rules.md(结构化「关键响应点」段在 ## 10,
+    # 由 rules_synthesize 生产),回退 disqualification_rules.md(与 writer 口径一致,
+    # 防启发式噪声短语误报 response_keyword_miss)
+    from bid_common import preferred_rules_path
+    _rp = preferred_rules_path(extracted)
+    disq = read_disqualification_terms(_rp if _rp.exists() else extracted / "disqualification_rules.md")
+    # authoring_rules.md 无完整废标条款全文(仅 8 条红线),"不得出现X"类禁用词
+    # 大量漏收——从 disqualification_rules.md 原文补采并合并(去重)
+    _dq = extracted / "disqualification_rules.md"
+    if _dq.exists() and _dq != _rp:
+        _extra = read_disqualification_terms(_dq)
+        for _f in _extra.get("forbidden", []):
+            if _f not in disq["forbidden"]:
+                disq["forbidden"].append(_f)
     log.info(f"chapter_plan: {len(chapters)} 章  is_blind={disq['is_blind']}  "
              f"forbidden_terms={len(disq['forbidden'])}")
 
@@ -660,6 +827,9 @@ def main() -> int:
         variants = payload["variants"]
         if args.variant:
             variants = [v for v in variants if v["id"].upper() == args.variant.upper()]
+            if not variants:
+                log.error(f"--variant {args.variant} 无匹配变体(静默空跑=假成功)")
+                return 2
 
         for v in variants:
             v_dir = output / v["id"]

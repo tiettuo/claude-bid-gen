@@ -127,15 +127,77 @@ def page_count(docx: Path, log) -> int | None:
     """用 Microsoft Word 实测页数(AppleScript with timeout,等分页完成)。"""
     if sys.platform != "darwin" or not Path("/Applications/Microsoft Word.app").exists():
         return None
+    # 清理 Word 残留锁文件(约 162 字节的 ~$*.docx)。存在锁时 Word 会弹窗/只读打开,
+    # AppleScript 随即超时或返回 -10004/-1708,页数实测静默失败(2026-09 实测踩坑)。
+    # ★ 只删目标文档自己的锁文件:glob("~$*.docx") 会把用户其它已打开文档的锁
+    #   一起删掉(Word 会重建,但并发写入/丢数据风险不值得冒)。
+    lock = docx.parent / f"~${docx.name}"
+    if lock.exists():
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+    # 注意:必须用 `open POSIX file "..."`。旧写法 `open file name (POSIX file "..." as string)`
+    # 在本机 Word 16.110 上稳定抛 -10004 权限违例,导致页数门形同虚设。
+    # ★ 不得用 `close every document saving no`——那会连用户无关的未保存文档一起丢弃
+    # (数据丢失风险),且 `document 1` 可能指向用户另一个文档 → 页数算错。
+    # ★ 也不可用 `set d to open POSIX file "..."`:该形式不返回文档引用
+    # (实测“变量 d 没有定义” -2753),必须 open 后按文件名取 document。
+    # ★ 关闭只针对“同一个文件”(full name 全路径比对,实测与 POSIX file as string 同口径),
+    # 光比文件名会误关用户另存的同名文件并丢掉其未保存修改。
+    _name = docx.name.replace("\\", "\\\\").replace('"', '\\"')
+    # 路径同样要转义:含 " 或 \ 时 AppleScript 语法错误 → 页数实测静默返回 None(门禁失效)
+    _path_esc = str(docx).replace("\\", "\\\\").replace('"', '\\"')
     script = f'''
 tell application "Microsoft Word"
-    open file name (POSIX file "{docx}" as string)
-    delay 4
-    set d to active document
+    activate
+    -- 防抱死:
+    -- 1) display alerts none —— 任何模态弹窗（文件占用/涳水/域更新）都会卡住本次
+    --    AppleScript 到 osascript timeout，页数门形同虚设。
+    -- 2) 真正的根因已从产物侧消除:bid_assemble 不再写 w:updateFields，
+    --    否则 Word 打开必弹「该文档包含的域可能引用了其他文件」(无偏好项可关，
+    --    2026-09 某西藏施组项目实测弹窗截图 + -609 连接无效)。此处仅作兜底。
+    set display alerts to none
+    set tgt to (POSIX file "{_path_esc}") as string
+    try
+        repeat with i from (count of documents) to 1 by -1
+            try
+                set dd to document i
+                if (full name of dd as string) is tgt then tell dd to close saving no
+            end try
+        end repeat
+    end try
+    delay 1
+    open POSIX file "{_path_esc}"
+    -- ★ 固定 delay 不够:冷启动/文档较大(图多)时 12s 内文档尚未进入 documents 集合,
+    --   `document "名字"` 抛 -1728 → 页数门静默失效(2026-09-27 某训练馆项目 V02 实测)。
+    --   改用轮询等待,与 bid_toc_fill.export_pdf 同口径。
+    --   判据用布尔标志,不要写 `if d is missing value`(对象引用相等判定恒 false)。
+    set found to false
+    repeat 90 times
+        delay 1
+        try
+            set d to document "{_name}"
+            set found to true
+            exit repeat
+        end try
+    end repeat
+    if found is false then error "Word 未能打开文档: {_name}"
     with timeout of 420 seconds
         set pg to (compute statistics d statistic (statistic pages))
     end timeout
-    close d saving no
+    -- ★ Word 16.x(本机实测 16.x/macOS 26)对 `document "名字"` 取到的引用不理解 close
+    --   (抛 -1708「不理解“close”信息」)。该错误发生在 return 之前 → 已算出的页数被
+    --   整个吞掉，页数门静默失效(2026-09-27 某训练馆项目实测)。
+    --   可靠写法：按 documents 索引取引用再 close(该形式实测可用)。
+    try
+        repeat with i from (count of documents) to 1 by -1
+            try
+                set d2 to document i
+                if (full name of d2 as string) is tgt then close d2 saving no
+            end try
+        end repeat
+    end try
     return (pg as string)
 end tell
 '''

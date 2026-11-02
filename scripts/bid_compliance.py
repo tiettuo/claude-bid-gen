@@ -19,8 +19,9 @@ from __future__ import annotations
 import sys
 import re
 import json
+from bid_common import get_config_dir  # noqa: E402
 import logging
-from datetime import date, datetime as _dt
+from datetime import date, datetime as _dt, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -38,7 +39,10 @@ from bid_plan_verify import topic_covered  # noqa: E402  复用语义匹配
 # 关键响应词提取规则：从 disqualification_rules.md 自动挖出数字+单位组合
 RESPONSE_RULES = [
     # (label, 正则-从规则文件中提取, 是否必须在 output 中出现)
-    ("工期响应", r"(\d{2,4}\s*日历天)", True),
+    # 工期响应:优先取结构化字段 schedule_milestones.total_duration_days(见 check_response)。
+    # 正则必须收紧到「工期」语境——裸 `(\d{2,4}\s*日历天)` 会先命中废标摘要里的
+    # 「投标有效期：90 日历天」,把投标有效期当工期响应词 → 稳定误报「工期未响应」。
+    ("工期响应", r"(?:总?工期|计划工期)[^\n。；]{0,12}?(\d{2,4})\s*日历天", True),
     ("暗标响应", r"(技术暗标|暗标格式)", False),
     ("双代号网络图", r"(双代号网络图)", False),
 ]
@@ -214,22 +218,135 @@ def _schedule_absolute_dates(data: dict) -> list[tuple[str, date]]:
     return hits
 
 
-_SCHEDULE_CONTEXT_RE = re.compile(r"(开工|竣工|施工|进度|阶段|计划|工期|浇筑|养护|验收|完成|里程碑)")
-_NON_SCHEDULE_CONTEXT_RE = re.compile(r"(投标|比选公告|公告发布|发布时间|获取|养老保险|造价信息|信息价)")
+# ── 正文禁日期豁免（全部按【日期级】判断，禁止整行豁免——整行豁免会漏报混排行如
+#    「本规范自2024-08-01起实施。计划2026-09-01开工。」和「开工令于2026-08-01发布」）──
+# 引用来源类：投标截止/公告/发布时间/获取/造价/保险等引用日期（如「招标公告发布日期」）。
+# 「投标」收窄为「投标截止」——「本工程投标后于X日开工」是工期语义，不得豁免；
+# 「发布」收窄为「发布时间」——「开工令于X日发布」是工期语义（无「时间」二字），不得豁免。
+# 只扫日期左侧上下文：引用来源词必然在日期前（「公告发布日期为X」），右侧「X开工，详见公告」是工期语义。
+# ★ 「公告」必须收紧成「公告发布/刊登/挂网」:「招标公告明确开工日期为2026年8月1日」
+#   里的「公告」只是普通主语,左侧 12 字窗口含它会把真实工期日期整条豁免掉。
+_REFERENCE_CTX_RE = re.compile(
+    r"(投标截止|开标(?:时间|日期)?|递交截止|提交截止|公示(?:期|日期|时间)?|评标(?:日期|时间)?"
+    r"|报名截止|公告(?:发布|刊登|挂网)|发布日期|发布时间|获取|领取|养老保险|造价|信息价"
+    # 证件有效期类事实「安全生产许可证有效期至2027年6月30日」不是排期日期
+    r"|有效期|届满|到期)")
+# 引用词与日期之间只允许“日期/时间/为/是”这类连接字——
+# 「获取开工许可后于X开工」「信息价采集完成后于X进场」夹着实词,不得豁免。
+_REF_GLUE_RE = re.compile(r"^[日时期间为之是编号至到：:\s]{0,5}$")
+# 规范生效类：规范类词后紧跟（最多 1 个标点）「自/从 + 日期 + 起实施/施行/生效」结构，
+# 如「本规范自2024年8月1日起实施」。只豁免被该结构匹配覆盖的那个日期，其余日期照报。
+# 规范类词不含「规定」——「按规定实施X」是施工语义。
+# 规范生效类：规范类词后紧跟（最多 1 个标点）「自/从 + 日期 + 起实施/施行/生效」结构，
+# 如「本规范自2024年8月1日起实施」。只豁免被该结构匹配覆盖的那个日期，其余日期照报。
+# 规范类词不含「规定」——「按规定实施X」是施工语义。
+_STANDARD_EFFECT_RE = re.compile(
+    # 允许标准名后紧跟书名号/引号收尾符(「《建设工程质量管理条例》自…施行」),
+    # 但不允许其他实词插入——「《验收统一标准》，本工程自…实施」仍必须被报出。
+    # ★ 「法」必须入表:「《安全生产法》自2021年9月1日起施行」是法规引用,
+    #   漏了它会被判成工期日期泄漏 → 无谓重写 + 重写后仍命中 → 合规门禁 abort。
+    #   (?<![方做手技工]) 避开「方法/做法/手法/技法/工法」这类普通名词
+    #   (「施工工法自…实施」不是法规引用,不得豁免)。
+    r"(规范|标准|办法|规程|条例|规则|指南|文件|(?<![方做手技工])法)[》」”’)\]】]*"
+    # 法规发文字号括号:「《建设工程质量管理条例》(国务院令第279号)自…施行」
+    # 中括号内必须含号/令/批准等发文字号特征词,避免把「标准》，本工程…」一并豁免。
+    # 括号内允许发文字号(国务院令第279号)与规范编号(GB/T 50502-2009 / JGJ 59-2011)
+    r"(?:[（(][^）)]{0,30}(?:令|号|批准|发布|修正|修订|[A-Z]{2,4}(?:\s*/?\s*T)?\s*\d{2,6})[^）)]{0,30}[）)])?"
+    r"[，、。]?(?:自|从)\s*"
+    r"\d{4}\s*[-/年]\s*\d{1,2}\s*[-/月]\s*\d{1,2}\s*日?(?:起|之日起)?(?:实施|施行|生效)"
+)
+# 历史事实类（获奖/公司成立/业绩等）：这些日期必然是过去的事实，不可能是计划工期。
+# 「成立」仅限「公司/企业/单位/我司…成立」模式——「于2026-08-01成立项目部」是排期里程碑，不得豁免。
+_HISTORICAL_CTX_RE = re.compile(
+    r"(获奖|荣获|获[^。，；\n]{0,8}奖|荣誉|沿革|历史|业绩|职称|招生|开学|搬迁"
+    # 既成事实类日期(不可能是计划工期):体系认证/取证/贯标/颁证/授牌。
+    # ★ 不得加入 竣工/验收/备案/许可/资质 等词:「本工程于2027-10-01竣工」
+    #   「于2026-10-02取得施工许可」都是真实计划工期日期,加了会把它们整条放行。
+    r"|认证|取证|贯标|颁证|授牌"
+    r"|(?:公司|企业|单位|我司|本司)[^。，；\n]{0,6}成立)"
+)
+# 流程类（送检/检测等）：日期紧邻这些词才是「已发生事实」。
+# 不含「试验」——「于X日进行试验段施工」是排期里程碑，不得豁免。
+# ★ 豁免必须限在同一小句内且距离近:±12 字窗口里夹着句末标点时,
+#   「本工程计划于2026年8月1日开工。混凝土试块送检合格后方可浇筑。」会把真实工期日期放行。
+_PROCESS_CTX_RE = re.compile(r"(送检|检测|校准|复检|见证)")
+# 小句边界(含顿号/逗号):历史事实与流程词的豁免都要求与日期同一小句内,
+# 「计划于X日开工，本公司业绩优良」跨逗号后不得再豁免。
+_CLAUSE_BREAK_RE = re.compile(r"[。；！？;!?，、\n]")
 _TEXT_DATE_RE = re.compile(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{4}年\s*\d{1,2}月\s*\d{1,2}日")
 
 
-def _text_schedule_dates_before(text: str, earliest_start: date) -> list[tuple[int, str, date]]:
-    hits: list[tuple[int, str, date]] = []
+def _parse_cn_date(s: str):
+    """解析「2026年10月2日 / 2026-10-2 / 2026/10/2」→ date;失败返回 None。"""
+    m = re.match(r"(\d{4})\s*[-/年]\s*(\d{1,2})\s*[-/月]\s*(\d{1,2})", s or "")
+    if not m:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
+def _prose_abs_dates(text: str, json_ranges: list[tuple[int, int]],
+                     baseline=None) -> list[tuple[int, str, str]]:
+    """散文正文中的绝对日历日期（跳过 ```json 图数据块）。
+
+    正文一律禁止具体日历日期（工期用「总工期 N 日历天 / 开工后第 N 天」相对表达），
+    具体日期只允许出现在进度图 JSON 数据块内。返回 [(行号, 日期原文, 行片段)]。
+    豁免全部按日期级判断：引用来源类/历史事实类/检测送检流程类取日期前后 12 字符上下文；
+    规范生效类仅豁免被结构匹配覆盖的那个日期——不做整行豁免，避免漏报真实工期日期。
+    baseline(计划开工基准)传入时,早于它的日期一律视为历史事实豁免(业绩/认证/既往竣工
+    等只可能是过去事实),这条比词表更可靠——「2020年8月10日竣工验收」与
+    「本工程于2027年10月1日竣工」靠词表无法区分,靠基准日可以。
+    """
+    hits: list[tuple[int, str, str]] = []
     for lineno, line in enumerate(text.splitlines(), 1):
-        if not _SCHEDULE_CONTEXT_RE.search(line):
+        if any(s <= lineno <= e for s, e in json_ranges):
             continue
-        if _NON_SCHEDULE_CONTEXT_RE.search(line):
-            continue
+        std_spans = [m.span() for m in _STANDARD_EFFECT_RE.finditer(line)]
         for m in _TEXT_DATE_RE.finditer(line):
-            d = _parse_abs_date(m.group(0))
-            if d and d < earliest_start:
-                hits.append((lineno, line.strip()[:120], d))
+            lo = max(0, m.start() - 12)
+            hi = min(len(line), m.end() + 12)
+            ctx = line[lo:hi]
+            # 引用来源类只扫日期左侧（引用词必在日期前），右侧不豁免，避免漏报真实工期日期。
+            left_ctx = line[max(0, m.start() - 12):m.start()]
+            # 取“离日期最近的那个可豁免匹配”:只查首个匹配时,
+            # 「造价信息发布日期为X」会先命中「造价」而整条不豁免。
+            if any(_REF_GLUE_RE.match(left_ctx[_r.end():])
+                   for _r in _REFERENCE_CTX_RE.finditer(left_ctx)):
+                continue
+            if baseline is not None:
+                _pd = _parse_cn_date(m.group(0))
+                # 只有「远早于基准(>1 年)」才当历史事实:基准前 1 年内的日期仍可能是
+                # 本项目写错的计划日期(如「计划于2026-07-01开工」而基准是 2026-07-23),
+                # 必须照常报出——否则该错日期两条检查都不报,静默放行。
+                if _pd is not None and _pd < baseline - timedelta(days=365):
+                    continue
+            if _HISTORICAL_CTX_RE.search(ctx):
+                # ★ 历史事实豁免也需同句:±12 字窗口跨句时,
+                #   「计划于2026年8月1日开工，本公司业绩优良」会被「业绩」放行真实排期日期。
+                _hm = _HISTORICAL_CTX_RE.search(ctx)
+                _hstart = lo + _hm.start()
+                _hend = lo + _hm.end()
+                _between = (line[_hend:m.start()] if _hend <= m.start()
+                            else line[m.end():_hstart])
+                if not _CLAUSE_BREAK_RE.search(_between):
+                    continue
+            if _PROCESS_CTX_RE.search(ctx):
+                # 流程词与日期同句且距离 ±8 字内才豁免(「试块于X日送检」);
+                # 隔句/远距离的「送检」不得放行真实排期日期。
+                # 句读只在“日期与流程词之间”检查(扫整个短窗会连句末句号一起命中,
+                # 把「已于X日送检合格。」这种正常句子误弃)。
+                _pl = line[max(0, m.start() - 8):m.start()]
+                _pr = line[m.end():min(len(line), m.end() + 8)]
+                _ml = _PROCESS_CTX_RE.search(_pl)
+                _mr = _PROCESS_CTX_RE.search(_pr)
+                if ((_ml and not _CLAUSE_BREAK_RE.search(_pl[_ml.end():]))
+                        or (_mr and not _CLAUSE_BREAK_RE.search(_pr[:_mr.start()]))):
+                    continue
+            if any(s <= m.start() and m.end() <= e for s, e in std_spans):
+                continue  # 该日期被「规范…自…起实施」结构覆盖 → 规范生效日期，豁免
+            hits.append((lineno, m.group(0), line.strip()[:120]))
     return hits
 
 
@@ -252,11 +369,16 @@ def check_schedule_duration(
     json_re = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
     for md in md_files:
         text = md.read_text(encoding="utf-8", errors="ignore")
+        json_ranges: list[tuple[int, int]] = []
         for m in json_re.finditer(text):
             try:
                 d = json.loads(m.group(1))
             except (ValueError, json.JSONDecodeError):
+                # 解析失败的 ```json 块不豁免：块内日期按正文泄漏处理，
+                # 避免同时逃过「正文日期泄漏」与「计划开工基准」两项检查。
                 continue
+            json_ranges.append((text[:m.start()].count("\n") + 1,
+                                text[:m.end()].count("\n") + 1))
             if d.get("type") == "aoa_network":
                 cp = _aoa_critical_path(d.get("activities") or [])
                 result["checked"] += 1
@@ -285,18 +407,20 @@ def check_schedule_duration(
                                     f"早于投标截止后第5个工作日 {earliest_start.isoformat()}"
                                 ),
                             })
-        if earliest_start:
-            for lineno, snippet, abs_date in _text_schedule_dates_before(text, earliest_start):
-                result["violations"].append({
-                    "file": md.name,
-                    "kind": "计划开工基准",
-                    "value": abs_date.isoformat(),
-                    "limit": earliest_start.isoformat(),
-                    "detail": (
-                        f"{md.name}:{lineno} 工期相关日期 {abs_date.isoformat()} "
-                        f"早于投标截止后第5个工作日 {earliest_start.isoformat()}：{snippet}"
-                    ),
-                })
+        # 正文日期泄漏：散文正文一律禁止具体日历日期（仅进度图 JSON 允许）
+        for lineno, date_str, snippet in _prose_abs_dates(text, json_ranges,
+                                                        baseline=earliest_start):
+            result["violations"].append({
+                "file": md.name,
+                "kind": "正文日期泄漏",
+                "value": date_str,
+                "limit": "无（正文禁止具体日期）",
+                "detail": (
+                    f"{md.name}:{lineno} 正文出现具体日历日期 {date_str}：{snippet} "
+                    "—— 工期一律用相对表达（总工期 N 日历天 / 开工后第 N 天 / 第 N 阶段），"
+                    "具体日期只允许出现在进度图 JSON 数据块内"
+                ),
+            })
         for pm in re.finditer(r"(?:总工期|计算工期)[^。\d]{0,6}(\d{2,3})\s*(?:日历)?天", text):
             val = int(pm.group(1))
             if has_tender_days and val > tender_days:
@@ -345,12 +469,24 @@ def scan_blind(md_files: list[Path], is_blind: bool, log: logging.Logger) -> lis
 def check_response(rules_text: str, all_md_text: str, log: logging.Logger) -> list[dict]:
     """检查关键响应词是否在章节中出现"""
     results = []
+    # 结构化真值(schedule_milestones.total_duration_days)优先于正则:
+    # 规则文件里可能同时存在「投标有效期 90 日历天」等多个 N 日历天,只有该字段是工期。
+    m_dur = re.search(r"^\s*total_duration_days\s*:\s*(\d{2,4})\s*$", rules_text, re.M)
+    duration_kw = f"{m_dur.group(1)} 日历天" if m_dur else ""
     for label, pat, required in RESPONSE_RULES:
         m_rule = re.search(pat, rules_text)
-        if not m_rule:
+        if label == "工期响应" and duration_kw:
+            keyword = duration_kw
+        elif m_rule:
+            # 正则只捕获数字,必须补回单位——否则正文出现任意同号数字即判「已响应」(假阴性)
+            keyword = (f"{m_rule.group(1)} 日历天" if label == "工期响应"
+                       else m_rule.group(1))
+        else:
             continue
-        keyword = m_rule.group(1)
-        present = keyword in all_md_text
+        # 比对去空白:正文写「450日历天」与规则「450 日历天」必须等价,
+        # 否则合规门反复误判未响应并触发无意义的章节重写(与 reviewer 的去空白口径一致)。
+        present = (keyword in all_md_text
+                   or re.sub(r"\s+", "", keyword) in re.sub(r"\s+", "", all_md_text))
         results.append({
             "label": label, "keyword": keyword,
             "required": required, "present": present,
@@ -814,7 +950,7 @@ def _run_single(root: Path, chapter_dir: Path, variant_id: str) -> int:
     blind_profile_result = _run_blind_profile_checks(root, chapter_dir, log)
 
     log.info("标准引用编造检测:")
-    config_dir = Path(__file__).resolve().parent.parent / "configs"
+    config_dir = get_config_dir()
     truth = load_standards_truth(config_dir)
     std_result = check_standards_fabrication(md_files, truth, log)
 
@@ -1022,7 +1158,8 @@ def _run_single(root: Path, chapter_dir: Path, variant_id: str) -> int:
             n_sv = len(format_audit_result.get("style_violations", []))
             log.error(f"DOCX 格式实测层硬违规：{n_v} 段落字号/字体偏离 + {n_sv} 样式偏离")
         if has_schedule_violation:
-            log.error(f"工期超招标硬顶（超期废标风险）：{len(schedule_check['violations'])} 处")
+            log.error("工期/正文日期硬违规："
+                      f"{len(schedule_check['violations'])} 处（超期废标 或 正文出现日历日期）")
             for v in schedule_check["violations"]:
                 log.error(f"    - {v['detail']}")
         if has_blind_profile_violation:

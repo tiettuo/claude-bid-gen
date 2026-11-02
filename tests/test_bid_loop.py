@@ -231,6 +231,23 @@ def test_classify_compliance_human_classes():
     assert classes == {"blind_violation", "format_severe", "schedule_violation"}
 
 
+def test_classify_compliance_date_leak_auto_fixable():
+    """「正文日期泄漏」单独成类并带章节号，可自动修复，不归入 schedule_violation。"""
+    scan = _scan(schedule_check={"violations": [
+        {"kind": "正文日期泄漏", "file": "09_施工进度计划.md",
+         "value": "2026-08-01", "detail": "09_施工进度计划.md:3 正文出现具体日历日期"},
+        {"kind": "网络图关键线路", "file": "09_施工进度计划.md",
+         "value": 120, "detail": "关键线路 120 天超期"},
+    ]})
+    issues = R._classify_compliance(scan)
+    classes = {i["class"] for i in issues}
+    assert classes == {"schedule_date_leak", "schedule_violation"}
+    leak = next(i for i in issues if i["class"] == "schedule_date_leak")
+    assert leak["chapter"] == "09"
+    sched = next(i for i in issues if i["class"] == "schedule_violation")
+    assert "chapter" not in sched
+
+
 def test_compliance_gate_blind_requires_human(tmp_path, monkeypatch):
     v_reports = tmp_path / "output" / "V01" / "reports"
     v_reports.mkdir(parents=True)

@@ -24,16 +24,18 @@ import json
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bid_common import make_script_logger, parse_chapter_plan, get_bid_gen_home  # noqa: E402
-from bid_llm_client import LLMClient  # noqa: E402
+from bid_llm_client import LLMClient, provider_key  # noqa: E402
 from bid_skeleton_extract import _parse_json_with_retry  # noqa: E402
 import bid_reviewer  # 复用 scan_placeholders / scan_prompt_leak / _check_standards_in_text  # noqa: E402
 
-DEFAULT_MODEL = "deepseek"  # feedback_bid_default_deepseek：GLM 偶发卡，deepseek 1-3s
+DEFAULT_MODEL = "deepseek"  # DeepSeek-V4-Flash(1M 上下文,可整本喂入评分表+章节)
+# 注:configs/bid_llm_config.json 已给 deepseek 配 extra_body.thinking=disabled(写作/合成都关推理),LLMClient.chat() 无按调用覆盖入口 → 本步实际不产生 reasoning_content,max_tokens 仍走 _model_max_tokens() 取模型真实上限(留余量,不硬编码 4000)。
 
 # ── 评标专家 persona ──────────────────────────────────────────────────
 SYSTEM_PROMPT = """你是一名拥有 20 年经验的资深工程评标专家，曾担任多个政府采购工程项目的评委。
@@ -85,6 +87,10 @@ CROSS_CHAPTER_USER_TEMPLATE = """【项目背景】
 （同一参数在不同章节出现不同数值：如建筑物长度/钢结构规格与数量/材料材质与厚度/设备吨位与数量/
 工期节点与天数/班组人数/用电容量/安全文明施工费金额 等）。
 不要报告单章内部问题（那由逐项评分负责），只报告跨章矛盾。
+
+★ 只输出**确实存在数值/表述冲突**的参数。核对后确认一致的参数**一律不要写进来**
+（不要输出“XX：各章均为…，无矛盾”这类逐参数核对清单）——那会把真问题淹在噪声里。
+若全文没有任何跨章矛盾，`cross_defects` 直接返回空数组 `[]`。
 
 【全章节内容】
 {all_chapters}
@@ -250,6 +256,42 @@ def scan_duration(text: str, duration_days) -> list[str]:
 
 
 # ── LLM 评分 ──────────────────────────────────────────────────────────
+def _model_max_tokens(client, model: str, default: int = 16000) -> int:
+    """取目标模型配置的 API 输出上限；避免硬编码超过模型真实上限触发 400。
+
+    deepseek(V4-Flash) config max_tokens=16000；deepseek_chat 仅 8192，
+    硬编码 16000 会超限（coherence_pass 复用 cross_chapter_check 时踩过）。
+    """
+    try:
+        if client is None:
+            return default
+        m = client.config.get("models", {}).get(model) or {}
+        v = int(m.get("max_tokens") or default)
+        return v if v > 0 else default
+    except (TypeError, ValueError, AttributeError):
+        return default
+
+
+def _model_concurrency(client, model: str, default: int = 6) -> int:
+    """取目标模型所属厂商的并发闸上限，作为专家评审打分的线程数。
+
+    max_workers 应与厂商并发闸一致：deepseek=6 可 6 路并行；local_qwen36(127.0.0.1:8080)=1
+    / zhipu=1 则单线程，避免空开线程排队白等。若某评分项回退到其它厂商，信号量仍按厂商限流，
+    此处只控主模型的并发度。
+    """
+    try:
+        if client is None:
+            return default
+        m = client.config.get("models", {}).get(model) or {}
+        key = provider_key(m.get("endpoint", ""))
+        mc = client.config.get("max_concurrency") or {}
+        v = mc.get(key, mc.get("default", 3)) if isinstance(mc, dict) else mc
+        v = int(v or default)
+        return v if v > 0 else default
+    except (TypeError, ValueError, AttributeError):
+        return default
+
+
 def score_one_item(client, model, score_item, chapter_md, project_brief, amount_truth_str, log):
     """对单个评分项打分。返回 dict 或 None。"""
     title = score_item.get("title_original", "")
@@ -261,12 +303,54 @@ def score_one_item(client, model, score_item, chapter_md, project_brief, amount_
         item_title=title, item_score=score, criteria_original=criteria,
         chapter_md=chapter_md[:6000],  # 截断防超长
     )
+    # 实测：跳章核对常因输出过长（几十条逐参数核对）被 API 截断 → JSON 不可解析。
+    # compact_suffix 让 helper 在常规重试耗尽后改用"限条数 + 限单条长度"再要一次。
+    compact = ("\n\n# 上次输出过长被截断，本次务必极度精简\n"
+               "只输出**真正构成跨章矛盾的**参数，**最多 8 条**；不要逐参数核对，"
+               "自述'一致/不构成矛盾'的条目一律不要写。每条 reason 不超过 50 字。")
     try:
         return _parse_json_with_retry(client, model, SYSTEM_PROMPT, user,
-                                      log=log, max_tokens=4000)
+                                      log=log, max_tokens=_model_max_tokens(client, model),
+                                      compact_suffix=compact)
     except Exception as e:
         log.warning(f"评分项「{title}」LLM 调用失败：{e}")
         return None
+
+
+def _filter_real_defects(defects: list, log=None) -> list:
+    """只保留真正构成矛盾的条目。
+
+    实测:模型经常把"逐参数核对"也写进 cross_defects——每条给出各章取值后,
+    在 reason 里自己结论"均为 XX,数值一致""不构成矛盾"。这类条目不是缺陷,却被
+    summary 当成"110 条跨章矛盾"报出,把真问题淹在噪声里、误导交付前自查。
+    做法:先剥掉否定短语(无矛盾/数值一致/不构成矛盾…),再看剩下文本还有没有
+    肯定性矛盾词(不一致/相差/不符/矛盾…)。注意顺序——必须先剥"无矛盾",否则
+    "矛盾"会误命中。
+    """
+    NOT_DEFECT = ("不构成", "非跳章", "无矛盾", "无冲突", "无差异", "数值一致",
+                  "表述一致", "完全一致", "均一致", "属单章缺项", "属单章新增",
+                  "不属", "并非", "非为", "同一参数",
+                  # 模型常用“属补充而非矛盾”“属章 N 漏列”表述自己结论“不是缺陷”: 
+                  "而非矛盾", "非矛盾", "属补充", "漏列", "未列该子目", "无跨章")
+    CONFLICT = ("不一致", "相差", "不符", "不匹配", "冲突", "不同", "矛盾", "错误")
+    kept, dropped = [], 0
+    for d in defects or []:
+        if not isinstance(d, dict):
+            continue
+        reason = str(d.get("reason") or "") + str(d.get("param") or "")
+        # 模型常常自己给出结论：核对后写“均一致”“属单章缺项，非跳章数值矛盾”。
+        # 它自述不是缺陷时信任它；否则再看有没有肯定性矛盾词。
+        if any(n in reason for n in NOT_DEFECT):
+            dropped += 1
+            continue
+        if any(c in reason for c in CONFLICT):
+            kept.append(d)
+        else:
+            dropped += 1
+    if dropped and log:
+        log.info(f"    跳章核对: 模型返回 {len(defects or [])} 项,其中 {dropped} 项"
+                 f"自述一致/未构成矛盾,已滤除;保留 {len(kept)} 项待核")
+    return kept
 
 
 def cross_chapter_check(client, model, all_chapters_md, project_brief, log):
@@ -275,9 +359,15 @@ def cross_chapter_check(client, model, all_chapters_md, project_brief, log):
         project_brief=project_brief,
         all_chapters=all_chapters_md[:12000],
     )
+    # 实测：跳章核对常因输出过长（几十条逐参数核对）被 API 截断 → JSON 不可解析。
+    # compact_suffix 让 helper 在常规重试耗尽后改用"限条数 + 限单条长度"再要一次。
+    compact = ("\n\n# 上次输出过长被截断，本次务必极度精简\n"
+               "只输出**真正构成跨章矛盾的**参数，**最多 8 条**；不要逐参数核对，"
+               "自述'一致/不构成矛盾'的条目一律不要写。每条 reason 不超过 50 字。")
     try:
         return _parse_json_with_retry(client, model, SYSTEM_PROMPT, user,
-                                      log=log, max_tokens=4000)
+                                      log=log, max_tokens=_model_max_tokens(client, model),
+                                      compact_suffix=compact)
     except Exception as e:
         log.warning(f"跨章一致性 LLM 调用失败：{e}")
         return None
@@ -331,8 +421,8 @@ def review_variant(name: str, variant_dir: Path, extracted: Path,
     pairs = pair_chapters_scoring(chapters, scoring_items)
     item_results: list[dict] = []
 
-    # 逐项打分
-    for ch, si in pairs:
+    # 逐项打分（并发：按厂商并发闸并行，deepseek=6 路，local_qwen36/zhipu=1 路串行）
+    def _load_and_score(ch, si):
         num = ch.get("num", "")
         md_path = variant_dir / ch.get("filename", "")
         if not md_path.exists():
@@ -341,20 +431,33 @@ def review_variant(name: str, variant_dir: Path, extracted: Path,
             if cands:
                 md_path = cands[0]
         if not md_path.exists():
-            log.warning(f"{name}：章节 {num} 的 md 缺失（{ch.get('filename')}）")
-            item_results.append({"item": si.get("title_original", ""),
-                                 "score": None, "defect_count": None,
-                                 "defects": [], "error": "章节 md 缺失"})
-            continue
+            return si.get("title_original", ""), None, "章节 md 缺失"
         chapter_md = md_path.read_text(encoding="utf-8", errors="ignore")
         r = score_one_item(client, model, si, chapter_md, project_brief, amount_truth_str, log)
-        if r is None:
-            item_results.append({"item": si.get("title_original", ""),
-                                 "score": None, "defect_count": None,
+        return si.get("title_original", ""), r, None
+
+    scored = [None] * len(pairs)
+    workers = _model_concurrency(client, model)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_load_and_score, ch, si): i for i, (ch, si) in enumerate(pairs)}
+        for fut in as_completed(futs):
+            i = futs[fut]
+            try:
+                scored[i] = fut.result()
+            except Exception as e:
+                log.warning(f"评分项并发异常：{e}")
+                scored[i] = ("", None, f"并发异常 {e}")
+
+    for title, r, err in scored:
+        if err:
+            item_results.append({"item": title, "score": None, "defect_count": None,
+                                 "defects": [], "error": err})
+        elif r is None:
+            item_results.append({"item": title, "score": None, "defect_count": None,
                                  "defects": [], "error": "LLM 评分失败"})
         else:
             item_results.append({
-                "item": si.get("title_original", ""),
+                "item": title,
                 "element_coverage": r.get("element_coverage", {}),
                 "defects": r.get("defects", []),
                 "defect_count": r.get("defect_count", len(r.get("defects", []))),
@@ -385,7 +488,8 @@ def review_variant(name: str, variant_dir: Path, extracted: Path,
 
     # 跨章一致性（LLM）
     cross = cross_chapter_check(client, model, "\n".join(all_md_parts), project_brief, log)
-    cross_defects = (cross or {}).get("cross_defects", []) if cross else []
+    cross_defects = _filter_real_defects(
+        (cross or {}).get("cross_defects", []) if cross else [], log)
 
     # 汇总
     valid_scores = [r["score"] for r in item_results if isinstance(r.get("score"), (int, float))]

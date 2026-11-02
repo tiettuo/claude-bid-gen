@@ -23,13 +23,18 @@ import argparse
 import json
 import os
 import re
+from bid_common import get_config_dir  # noqa: E402
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
-from bid_common import make_script_logger, repair_technical_criteria_alignment  # noqa: E402
+from bid_common import (  # noqa: E402
+    make_script_logger,
+    preferred_rules_path,
+    repair_technical_criteria_alignment,
+)
 from bid_derive import recommend_target_chars, size_class  # noqa: E402
 from bid_llm_client import LLMClient  # noqa: E402
 
@@ -124,6 +129,24 @@ STANDARD_SUBTOPICS: dict[str, list[str]] = {
 
 # ─── 工程类型识别(用于图表占比估算)──────────────────────────────────
 
+def _est_toc_entries(eval_method: str, outline_data: dict, eval_data: dict,
+                     n_topics: int) -> int:
+    """估算目录条目数(大章 + 子项/二级节),用于页数预算。
+
+    合格制:大章数 + 大纲各主题的二级/三级节数(取不到时按 3 条/章估);
+    评分制:大章数 + 评分项数(取不到时按 4 条/章估)。
+    目录一行一条 ≈ 30 条/页(12pt 单倍行距目录项)。
+    """
+    subs = 0
+    for t in (outline_data.get("topics") or []):
+        n = len(t.get("subsections_original") or [])
+        subs += max(1, n)
+    if not subs:
+        items = eval_data.get("scoring_items") or []
+        subs = len(items) if items else max(1, n_topics) * 4
+    return max(1, n_topics) + subs
+
+
 def detect_project_type(facts: dict, outline_topics: list[dict]) -> str:
     """从 facts + outline 关键词识别工程类型。"""
     scope = ""
@@ -144,9 +167,149 @@ def detect_project_type(facts: dict, outline_topics: list[dict]) -> str:
         return "water"       # 水利类:图表多
     if any(k in combo for k in ["园林", "绿化", "景观"]):
         return "landscape"   # 园林类:图表多
-    if any(k in combo for k in ["住宅", "办公", "学校", "医院", "厂房", "仓储", "民房"]):
+    if any(k in combo for k in ["住宅", "办公", "学校", "医院", "厂房", "仓储", "民房",
+                               "周转房", "安置房", "公寓", "宿舍", "教学楼", "门诊"]):
         return "building"    # 房建类:图表多
     return "general"
+
+
+# 大型复杂项目的类型特征词(规模判档矩阵第 3 维)
+_HIGHRISE_RE = re.compile(r"高层|超高层|\d{2,}\s*层|桥梁|隧道|地铁|电厂|大型场馆|大坝|枢纽|综合体")
+
+
+# 招标"70 页 / 100 页"二选硬顶的原文特征(命中才启用矩阵判档)
+_CHECKBOX_PAGE_CAP_RE = re.compile(
+    r"(?:100\s*页[\s\S]{0,80}?70\s*页)|(?:70\s*页[\s\S]{0,80}?100\s*页)")
+
+
+def _boq_volume_stats(ext: Path) -> dict:
+    """从 boq.json 汇总混凝土方量与管线长度(规模判档矩阵第 4 维"单专业体量")。"""
+    stats = {"concrete_m3": 0.0, "pipe_m": 0.0}
+    boq_path = ext / "boq.json"
+    if not boq_path.exists():
+        return stats
+    try:
+        boq = json.loads(boq_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return stats
+    # 旧提取器把 boq.json 写成裸数组 → 不能直接 .get
+    if not isinstance(boq, dict):
+        return stats
+    for cat in boq.get("categories", []) or []:
+        if not isinstance(cat, dict):
+            continue
+        for item in (cat.get("items") or []):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("project_name") or "")
+            unit = str(item.get("unit") or "")
+            try:
+                qty = float(item.get("qty") or item.get("quantity") or 0)
+            except (TypeError, ValueError):
+                continue
+            if unit in ("m³", "m3", "立方米") and any(
+                    k in name for k in ("混凝土", "独立基础", "基础梁", "构造柱", "圈梁",
+                                        "柱", "梁", "板", "垫层")):
+                stats["concrete_m3"] += qty
+            elif unit in ("m", "米", "延米") and "管" in name and not any(
+                    k in name for k in ("配管", "穿线", "电线管", "JDG", "PVC", "SC", "PC")):
+                stats["pipe_m"] += qty
+    return stats
+
+
+def _as_num(v):
+    """宽义取数:facts 里的工期/金额可能是 "180 日历天"、"1,200.00" 等文本。
+
+    取不到数字返回 None——不得直接 int() 抛 ValueError 掉链整条 Step 2 管道。
+    """
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    m = re.search(r"\d+(?:\.\d+)?", str(v).replace(",", ""))
+    return float(m.group(0)) if m else None
+
+
+def judge_size_matrix(
+    control_price: float | None,
+    duration_days: int | None,
+    project_type: str,
+    scope_text: str = "",
+    concrete_m3: float = 0.0,
+    pipe_m: float = 0.0,
+) -> dict:
+    """项目规模判档矩阵(memory/feedback_bid_size_judge_matrix.md)。
+
+    招标给"大型复杂 ≤100 页 / 中小型 ≤70 页"这种**例举式**硬顶时,不得让用户二选,
+    按 4 维矩阵自动判档:≥3 维中小 → 中小型(70 页);≥3 维大型 → 大型复杂(100 页);
+    平局/未明示多 → 取保守值(70 页,超页即废标,判保守只损失篇幅)。
+
+    返回 {rows:[(dim, verdict, basis)], small, large, unknown, size_class, conclusion}
+    """
+    rows: list[tuple[str, str, str]] = []
+
+    if control_price:
+        _cp = _as_num(control_price)
+        if _cp is None:
+            rows.append(("招标控制价", "未明示", "控制价非数值"))
+        else:
+            small = _cp < 10_000_000
+            rows.append(("招标控制价", "中小型" if small else "大型复杂",
+                         f"{_cp / 10000:,.0f} 万元"))
+    else:
+        rows.append(("招标控制价", "未明示", "招标文件未载明控制价"))
+
+    _dur = _as_num(duration_days)
+    if _dur:
+        small = _dur < 270
+        rows.append(("工期", "中小型" if small else "大型复杂", f"{_dur:g} 日历天"))
+    else:
+        rows.append(("工期", "未明示", "未明示"))
+
+    highrise = bool(_HIGHRISE_RE.search(scope_text or ""))
+    if project_type in ("building", "renovation", "municipal", "landscape") and not highrise:
+        rows.append(("工程类型", "中小型", "普通住宅/厂房/小型市政类"))
+    elif highrise:
+        rows.append(("工程类型", "大型复杂", "高层/桥梁/隧道/大型场馆类"))
+    else:
+        rows.append(("工程类型", "未明示", f"类型未识别({project_type})"))
+
+    if concrete_m3 or pipe_m:
+        # 主管控指标按工程类型选:房建类看混凝土方量,市政/水利类才看管线长度。
+        # (房建项目里的“电气配管”动辄数公里,计入会误判为大型)
+        _cm = _as_num(concrete_m3) or 0.0
+        _pm = _as_num(pipe_m) or 0.0
+        if project_type in ("building", "renovation"):
+            # 房建/改建:只用混凝土方量。方量为 0(清单未提供)时不得回落到管线长度
+            # ——那会把 70 页档翻成 100 页档,与“房建只看混凝土方量”口径矛盾。
+            if _cm:
+                rows.append(("单专业体量", "中小型" if _cm < 50_000 else "大型复杂",
+                             f"混凝土 {_cm:,.0f} m³"))
+            else:
+                rows.append(("单专业体量", "未明示", "房建类未取到混凝土方量"))
+        elif _pm:
+            small = _pm < 5_000 and _cm < 50_000
+            basis = "、".join(x for x in (
+                f"管线 {_pm:,.0f} m" if _pm else "",
+                f"混凝土 {_cm:,.0f} m³" if _cm else "") if x)
+            rows.append(("单专业体量", "中小型" if small else "大型复杂", basis))
+        else:
+            rows.append(("单专业体量", "中小型" if _cm < 50_000 else "大型复杂",
+                         f"混凝土 {_cm:,.0f} m³"))
+    else:
+        rows.append(("单专业体量", "未明示", "清单未提供可判体量"))
+
+    small_n = sum(1 for _, v, _ in rows if v == "中小型")
+    large_n = sum(1 for _, v, _ in rows if v == "大型复杂")
+    unknown_n = len(rows) - small_n - large_n
+    if large_n >= 3:
+        size_class, conclusion = "large", "大型复杂项目"
+    elif small_n >= 3:
+        size_class, conclusion = "small_medium", "中小型项目"
+    else:
+        size_class, conclusion = "small_medium", "中小型项目(保守取值:平局/未明示过半,超页即废标)"
+    return {"rows": rows, "small": small_n, "large": large_n, "unknown": unknown_n,
+            "size_class": size_class, "conclusion": conclusion}
 
 
 PROJECT_TYPE_FIG_RATIO = {
@@ -366,8 +529,16 @@ def llm_plan_subitems(
     total_llm = sum(int(it.get("chars", 0)) for it in items)
     if total_llm > 0 and abs(total_llm - target_chars) / target_chars > 0.05:
         scale = target_chars / total_llm
+        # ★ 下限不得高于“章节目标 ÷ 子项数”:小章(如 425 字 / 4 子项 = 106 字/项)
+        #   会被 300 字硬底撑到 1,200 字 → 子项合计 ≠ 章节目标,实际写作超预算撞页数硬顶。
+        floor = min(300, max(80, target_chars // max(1, len(items))))
         for it in items:
-            it["chars"] = max(300, int(int(it.get("chars", 0)) * scale))
+            it["chars"] = max(floor, int(int(it.get("chars", 0)) * scale))
+        # 取整 + 下限会留残差 → 差额补到最大子项,保证 Σ 子项 ≈ 章节目标
+        _diff = target_chars - sum(int(it["chars"]) for it in items)
+        if _diff:
+            _big = max(items, key=lambda x: int(x["chars"]))
+            _big["chars"] = max(floor, int(_big["chars"]) + _diff)
 
     # 覆盖性校验
     covered = set()
@@ -549,6 +720,8 @@ def _boq_work_complexity(ext: Path) -> int:
         boq = json.loads(boq_path.read_text(encoding="utf-8"))
     except Exception:
         return 0
+    if not isinstance(boq, dict):  # 旧提取器产出裸数组:守卫,勿崩整条 Step 2
+        return 0
     roots = set()
     for cat in boq.get("categories", []) or []:
         name = cat.get("name") or cat.get("category") or ""
@@ -566,6 +739,8 @@ def _boq_item_brief(ext: Path, limit: int = 12) -> str:
     try:
         boq = json.loads(boq_path.read_text(encoding="utf-8"))
     except Exception:
+        return ""
+    if not isinstance(boq, dict):  # 旧提取器产出裸数组:守卫
         return ""
     names: list[str] = []
     for cat in boq.get("categories", []) or []:
@@ -587,6 +762,8 @@ def render_chapter_plan(
     target_pages: int, target_chars: int, text_pages: int, figure_pages: int,
     chars_per_page_mid: int, max_safe_chars: int,
     topic_chapters: list[dict],
+    size_matrix: dict | None = None,
+    page_hard_cap: int | None = None,
 ) -> str:
     """组装 chapter_plan.md 全文。"""
 
@@ -602,10 +779,32 @@ def render_chapter_plan(
         "large": "大型项目", "extra_large": "特大型项目", "unknown": "未知规模",
     }.get(project_size, project_size)
     parts.append(f"**项目规模判档:** {size_zh}")
-    parts.append(f"**判档依据:**")
-    parts.append(f"- 合同控制价:{control_price:.0f} 元" if control_price else "- 合同控制价:未明示")
-    parts.append(f"- 工期:{duration_days} 日历天" if duration_days else "- 工期:未明示")
-    parts.append(f"- 工程类型:{project_type}")
+    if size_matrix:
+        parts.append(f"**判档结论:** {size_matrix['conclusion']}"
+                     f"（中小 {size_matrix['small']} : 大型 {size_matrix['large']}"
+                     f" : 未明示 {size_matrix['unknown']}）")
+        parts.append("")
+        parts.append("**判档依据（招标为“大型复杂 ≤100 页 / 中小型 ≤70 页”例举式二选硬顶，"
+                     "按 4 维矩阵自动判档，不让用户二选）:**")
+        parts.append("")
+        parts.append("| 维度 | 判档 | 依据 |")
+        parts.append("|---|---|---|")
+        for dim, verdict, basis in size_matrix["rows"]:
+            parts.append(f"| {dim} | {verdict} | {basis} |")
+        parts.append("")
+        if page_hard_cap:
+            if page_hard_cap in (70, 100):
+                parts.append(f"**招标页数硬顶:** {page_hard_cap} 页"
+                             "（招标原文：大型复杂项目≤100 页；中小型项目≤70 页）")
+            else:
+                # 非 70/100 二选型硬顶不得拿二选原文套上去(会与实际上限自相矛盾)
+                parts.append(f"**招标页数硬顶:** {page_hard_cap} 页")
+        parts.append("")
+    else:
+        parts.append(f"**判档依据:**")
+        parts.append(f"- 合同控制价:{control_price:.0f} 元" if control_price else "- 合同控制价:未明示")
+        parts.append(f"- 工期:{duration_days} 日历天" if duration_days else "- 工期:未明示")
+        parts.append(f"- 工程类型:{project_type}")
     parts.append(f"- 评标方式:{eval_method}")
     if eval_method == "score":
         parts.append("- 章节锚点:技术评分项 1:1 成章；非评分项只能并入相关章节子项，不单列 0 分大章")
@@ -700,16 +899,21 @@ def _val(facts: dict, key: str, default=None):
     return v if v is not None else default
 
 
-def _read_format_from_rules(rules_md: Path) -> tuple[float, float]:
-    """从 disqualification_rules.md 读 density.font_size_pt + line_spacing_value。
-    返回 (font_size_pt, line_spacing_value);未找到返回 (12.0, 1.5) 默认。
+def _read_format_from_rules(rules_md: Path) -> tuple[float, float, str]:
+    """从 rules.md 读 density.font_size_pt + line_spacing_value + line_spacing_rule。
+
+    返回 (font_size_pt, line_spacing_value, line_spacing_kind);未找到返回 (12.0, 1.5, "multiple")。
+    line_spacing_kind 必须是 multiple / exact / atLeast —— 固定行距项目(如
+    仿宋三号 + 固定 28 磅)按 multiple 查表会把 700-800 字/页错估成 450-580,
+    目标字数低估约 35%,写完严重不满页(或反向超页)。
     """
     if not rules_md.exists():
-        return (12.0, 1.5)
+        return (12.0, 1.5, "multiple")
     import re as _re
     t = rules_md.read_text(encoding="utf-8")
     fs = 12.0
     ls = 1.5
+    kind = "multiple"
     # 用 (?<![_a-zA-Z]) 排除 table_font_size_pt / heading_h1_size_pt 等同名子串
     m = _re.search(r"(?<![_a-zA-Z])font_size_pt:\s*(\d+(?:\.\d+)?)", t)
     if m:
@@ -723,7 +927,32 @@ def _read_format_from_rules(rules_md: Path) -> tuple[float, float]:
             ls = float(m.group(1))
         except ValueError:
             pass
-    return (fs, ls)
+    m = _re.search(r"(?<![_a-zA-Z])line_spacing_rule:\s*([A-Za-z]+)", t)
+    if m:
+        _k = m.group(1).strip().lower()
+        # ★ 必须归一成 _CHARS_PER_PAGE_TABLE 实际使用的键:multiple / fixed_pt。
+        #   rules_synthesize 写 "fixed",format_sets 预设想写 "exact",Word 语义都是
+        #   「固定磅值」→ 统一映射 fixed_pt;atLeast 也是绝对磅值,一并归入。
+        #   (曾错误映射成 "exact",表里没有该键 → 查表落空退化为保守档位。)
+        if _k == "multiple":
+            kind = "multiple"
+        elif _k in ("exact", "fixed", "fixed_pt", "atleast"):
+            kind = "fixed_pt"
+    return (fs, ls, kind)
+
+
+def _read_page_cap_from_rules(rules_md: Path) -> int | None:
+    """从 rules.md 读 format.page_hard_cap(招标页数硬顶)。未找到返回 None。"""
+    if not rules_md.exists():
+        return None
+    m = re.search(r"(?<![_a-zA-Z])page_hard_cap:\s*(\d+)", rules_md.read_text(encoding="utf-8"))
+    if not m:
+        return None
+    try:
+        v = int(m.group(1))
+    except ValueError:
+        return None
+    return v if 30 <= v <= 500 else None
 
 
 def synthesize(tender_dir: Path, target_pages: int | None = None,
@@ -753,7 +982,6 @@ def synthesize(tender_dir: Path, target_pages: int | None = None,
     project_name = _val(facts, "project_name", "")
     control_price = _val(facts, "control_price")
     duration_days = _val(facts, "duration_days")
-    project_size = size_class(float(control_price) if control_price else None)
     eval_method = eval_data.get("evaluation_method", "passfail")
     total_tech_score = eval_data.get("total_tech_score", 0)
 
@@ -763,24 +991,83 @@ def synthesize(tender_dir: Path, target_pages: int | None = None,
     work_complexity = _boq_work_complexity(ext)
     fig_ratio = PROJECT_TYPE_FIG_RATIO.get(project_type, 0.25)
 
-    # 目标页数:用户给 / 自动判档
+    # 规模判档:招标给“70 页 / 100 页”例举式硬顶时走 4 维矩阵
+    # (memory/feedback_bid_size_judge_matrix.md),否则回退价格分档
+    scope_text = f"{_val(facts, 'project_scope', '') or ''} {project_name}"
+    _vols = _boq_volume_stats(ext)
+    matrix = judge_size_matrix(
+        _as_num(control_price),
+        duration_days, project_type, scope_text,
+        _vols["concrete_m3"], _vols["pipe_m"],
+    )
+    _tender_text = ""
+    for _txt in sorted(ext.glob("*.txt")):
+        if "清单" in _txt.name or "BoQ" in _txt.name:
+            continue
+        try:
+            _tender_text += _txt.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            pass
+        if len(_tender_text) > 600_000:
+            break
+    use_matrix = bool(_CHECKBOX_PAGE_CAP_RE.search(_tender_text))
+    if use_matrix:
+        project_size = matrix["size_class"]
+    else:
+        project_size = size_class(_as_num(control_price))
+    log.info(f"  规模={project_size} (矩阵判档={use_matrix})  类型={project_type} "
+             f"体量: 混凝土 {_vols['concrete_m3']:.0f} m³ / 管线 {_vols['pipe_m']:.0f} m")
+
+    # 目标页数:用户给 / 自动判档（招标硬顶优先,不得超）
+    # 硬顶无论是否走矩阵、无论用户是否显式传 --target-pages 都要钳——
+    # 超页即废标,用户显式传值不构成越硬顶的理由。
+    page_hard_cap = _read_page_cap_from_rules(preferred_rules_path(ext))
+    # ★ 矩阵判“大型复杂”而 rules 侧硬顶是按控制价小档抽的 70 页时,两者矛盾:
+    #   rules_synthesize.extract_authoring_format_spec 用 size_class(control_price) 选档,
+    #   控制价缺失→unknown→保守取 70,但矩阵可能判大型(招标允许 100 页)。
+    #   此时用矩阵档位重抽一次硬顶,否则 chapter_plan 会同时写“大型复杂”与“硬顶 70”。
+    if use_matrix and page_hard_cap and _tender_text:
+        try:
+            from bid_rules_synthesize import extract_authoring_format_spec
+            _respec = extract_authoring_format_spec(_tender_text, log, project_size)
+            _cap2 = (_respec.get("page_hard_cap") or {}).get("value")
+            if _cap2 and 30 <= int(_cap2) <= 500 and int(_cap2) != page_hard_cap:
+                log.info(f"  按矩阵档位({project_size})重抽页数硬顶: {page_hard_cap} → {_cap2}")
+                page_hard_cap = int(_cap2)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"  按矩阵档位重抽页数硬顶失败({e}),沿用 {page_hard_cap}")
+
     if target_pages is None:
         target_pages = SIZE_TO_PAGES.get(project_size, SIZE_TO_PAGES["unknown"])["default"]
         if eval_method == "score" and total_tech_score and total_tech_score <= 20:
             target_pages = min(target_pages, 45)
-    log.info(f"  规模={project_size}  类型={project_type}  目标页数={target_pages}")
+    if page_hard_cap and page_hard_cap >= 30 and target_pages > page_hard_cap:
+        log.warning(f"  目标页数 {target_pages} 超招标硬顶 {page_hard_cap},已钳到硬顶")
+        target_pages = page_hard_cap
+    log.info(f"  目标页数={target_pages}" + (f" (硬顶 {page_hard_cap})" if page_hard_cap else ""))
 
     # 字数密度(从 rules.md 读字号/行距,无则默认 12pt+1.5)
     # Phase 3:优先 authoring_rules.md(方案规则),回退 disqualification_rules.md
-    from bid_common import preferred_rules_path
-    font_size_pt, line_spacing = _read_format_from_rules(preferred_rules_path(ext))
-    log.info(f"  字号={font_size_pt}pt 行距={line_spacing}倍")
+    font_size_pt, line_spacing, ls_kind = _read_format_from_rules(preferred_rules_path(ext))
+    log.info(f"  字号={font_size_pt}pt 行距={line_spacing}({ls_kind})")
+    # 页数预算口径(memory/feedback_bid_page_budget_and_fingerprint.md):
+    #   文字页 = 硬顶 − 封面(1) − 目录(条目/30) − 图表(张×0.45)
+    # 目录必须计入:大章 + 子项数量决定目录几页(111 个子项 ≈ 4.2 页),
+    # 漏算这 4 页是历史超页的主因之一。图表旧的 figure_ratio 比例扣法
+    # (15-30%) 与实测(≈5%) 不符,会把目标字数反向压低 20%。
+    _toc_entries = _est_toc_entries(eval_method, outline_data, eval_data, len(outline_topics or []))
+    _chart_count = max(2, len(outline_data.get("attachments") or []) or 4)
+    log.info(f"  页数预算: 封面 1 页 + 目录 {_toc_entries} 条(≈{_toc_entries/30:.1f} 页)"
+             f" + 图表 {_chart_count} 张(≈{_chart_count*0.45:.1f} 页)")
     rec = recommend_target_chars(
         target_pages=target_pages,
         font_size_pt=font_size_pt,
-        line_spacing_kind="multiple",
+        line_spacing_kind=ls_kind,
         line_spacing_value=line_spacing,
         figure_ratio=fig_ratio,
+        cover_pages=1.0,
+        toc_entries=_toc_entries,
+        chart_count=_chart_count,
     )
     target_chars = rec["target_chars_mid"]
     chars_per_page_mid = rec["density_mid"]
@@ -808,6 +1095,28 @@ def synthesize(tender_dir: Path, target_pages: int | None = None,
     if eval_method == "passfail" and outline_topics:
         for t in outline_topics:
             outline_subs_map[t.get("title_original", "")] = t.get("subsections_original", []) or []
+
+    # ★ 附图及附表章:强制锁定为招标大纲点名的附表(1:1),不交给 LLM 自由切分。
+    #   历史事故:大纲把 附表一…附表五 放在顶层 attachments 而非 topic 的
+    #   subsections_original 里 → 该章 subsections 为空 → LLM 自造“建筑结构附图”
+    #   等子项 → 附表一/二/四/五 全丢,chart_specs 也拿不到 required 的
+    #   施工总平面图/进度网络图(required 0/12),招标硬性附表静默缺失。
+    _attach_titles: list[str] = []
+    try:
+        _ol = json.loads((ext / "mandatory_outline.json").read_text(encoding="utf-8"))
+        for _a in (_ol.get("attachments") or []):
+            _t = (_a.get("title_original") or _a.get("title") or "") if isinstance(_a, dict) else str(_a)
+            if _t:
+                _lbl = (_a.get("label") or "") if isinstance(_a, dict) else ""
+                _attach_titles.append(f"{_lbl} {_t}".strip())
+    except (OSError, json.JSONDecodeError, AttributeError):
+        _attach_titles = []
+    if _attach_titles:
+        for _key in list(outline_subs_map):
+            if "附图" in _key or "附表" in _key:
+                outline_subs_map[_key] = _attach_titles + [s for s in outline_subs_map[_key]
+                                                           if s and s not in _attach_titles]
+                log.info(f"  章「{_key}」锁定为招标附表 {len(_attach_titles)} 项(1:1, 不再 LLM 自造)")
 
     # 项目简介(给 LLM 上下文,200 字内)
     scope_val = facts.get("project_scope", {}).get("value", "") if isinstance(facts.get("project_scope"), dict) else facts.get("project_scope", "")
@@ -895,7 +1204,7 @@ def synthesize(tender_dir: Path, target_pages: int | None = None,
     md = render_chapter_plan(
         project_name=project_name,
         project_size=project_size,
-        control_price=float(control_price) if control_price else None,
+        control_price=_as_num(control_price),
         duration_days=duration_days,
         project_type=project_type,
         eval_method=eval_method,
@@ -907,6 +1216,8 @@ def synthesize(tender_dir: Path, target_pages: int | None = None,
         chars_per_page_mid=chars_per_page_mid,
         max_safe_chars=max_safe_chars,
         topic_chapters=chapters_meta,
+        size_matrix=matrix if use_matrix else None,
+        page_hard_cap=page_hard_cap,
     )
 
     out_path.write_text(md, encoding="utf-8")
@@ -1058,7 +1369,7 @@ def _generate_intro_chapter(
     # config 开关
     try:
         from bid_common import get_bid_gen_home
-        cfg_path = get_bid_gen_home() / "configs" / "bid_coherence.json"
+        cfg_path = get_config_dir() / "bid_coherence.json"
         cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
     except Exception:
         cfg = {}

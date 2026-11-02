@@ -286,7 +286,7 @@ def detect_and_fix_conflicts(client, chapters: list[dict], chapters_text: dict,
         for ch in chapters
     )
 
-    result = cross_chapter_check(client, "deepseek", all_md, project_brief, log)
+    result = cross_chapter_check(client, "deepseek_chat", all_md, project_brief, log)
     if not result:
         log.info("  C-3 矛盾检测: 无输出或调用失败")
         return 0

@@ -53,16 +53,25 @@ def _tokenize(text: str) -> list[str]:
 # ─── 整体相似度（SimHash 优先，降级到 TF-IDF 余弦）──────────────────
 
 def _text_similarity_simhash(a: str, b: str) -> float:
-    """返回 0~1 的相似度"""
-    try:
-        from simhash import Simhash
-    except ImportError:
-        return _text_similarity_difflib(a, b)
+    """整体相似度:词级 5-gram Jaccard(与段落级同口径)。
 
-    sa = Simhash(_tokenize(a))
-    sb = Simhash(_tokenize(b))
-    distance = sa.distance(sb)  # 0~64
-    return 1 - distance / 64
+    ★ 不能用 simhash 库:实测它对中文长文本完全失去区分度——
+      「施工技术文 vs 静夜思」这种毫不相关的两段给出 **70.3%**,
+      同领域不同文 73.4%,同领域改词 15% 也只降到 76.6%。
+      原因是 simhash 指纹被共享的功能字/标点与文本长度主导,
+      于是 40% 阈值下任何一对都会"超阈值",门禁恒失败。
+      词级 5-gram Jaccard 对照:无关 0.0% / 同领域不同文 0.0% / 改词15% 9.8%,
+      区分度真实可用(函数名保留以兼容旧引用)。
+    """
+    return _text_similarity_ngram(a, b)
+
+
+def _text_similarity_ngram(a: str, b: str, n: int = 5) -> float:
+    """词级 n-gram Jaccard。短文本(<n token)退回 difflib。"""
+    ta, tb = _tokenize(a), _tokenize(b)
+    if len(ta) < n or len(tb) < n:
+        return _text_similarity_difflib(a, b)
+    return _jaccard(_ngram_set(a, n), _ngram_set(b, n))
 
 
 def _text_similarity_difflib(a: str, b: str) -> float:
@@ -79,8 +88,22 @@ def text_similarity(a: str, b: str) -> float:
 
 # ─── 段落级（MinHash LSH 近似匹配，降级到 n-gram Jaccard）───────────
 
+# 机器生成的围栏块(```json 图表数据 / ```mermaid)必须在比对前剥离:
+# 它们由管道自己注入、schema 由渲染器固定、数值来自同一份清单,各家天然高度相似,
+# 而 assemble 时会被渲染成 PNG 并从文档中剥离——评委看不到,不构成"雷同性"证据。
+# 不剥离会让 paragraph_max 被 JSON 骨架顶到 70-80% 而误判串标(实测 V01↔V03 81.8%
+# 的"最相似段落"就是 aoa_network 的 JSON 骨架)。
+_FENCE_RE = re.compile(r"```[^\n]*\n[\s\S]*?```", re.MULTILINE)
+
+
+def strip_machine_blocks(text: str) -> str:
+    """剥离 ```json / ```mermaid 等围栏块(只留人写正文)。"""
+    return _FENCE_RE.sub("\n\n", text or "")
+
+
 def _paragraphs(text: str, min_len: int = 50) -> list[str]:
-    """按空行切段，过滤太短段落"""
+    """按空行切段，过滤太短段落(先剥离机器生成的围栏块)"""
+    text = strip_machine_blocks(text)
     paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     return [p for p in paras if len(p) >= min_len]
 
@@ -213,7 +236,7 @@ def collect_variant_texts(output_dir: Path) -> dict[str, dict]:
                 continue
             if not re.match(r"^\d", md.stem):
                 continue
-            t = md.read_text(encoding="utf-8")
+            t = strip_machine_blocks(md.read_text(encoding="utf-8"))
             chapters[md.stem.split("_")[0]] = t
             all_text_parts.append(t)
         if chapters:
@@ -282,11 +305,10 @@ def build_matrix(variants_data: dict[str, dict], log: logging.Logger) -> dict:
             a_c, b_c = cache[a_id], cache[b_id]
             log.info(f"  对比 {a_id} vs {b_id}")
 
-            # 整体：SimHash 缓存对比或 difflib 降级
-            if "simhash" in a_c and "simhash" in b_c:
-                s_overall = 1 - a_c["simhash"].distance(b_c["simhash"]) / 64
-            else:
-                s_overall = _text_similarity_difflib(a_c["text"], b_c["text"])
+            # 整体相似度:走 text_similarity(词级 5-gram Jaccard)。
+            # ★ 不用缓存里的 simhash 指纹:该库对中文无区分度(无关文本也给 70%),
+            #   会让任何一对都"超阈值"→ 门禁恒失败(见 _text_similarity_simhash 注释)。
+            s_overall = text_similarity(a_c["text"], b_c["text"])
             overall[a_id][b_id] = round(s_overall, 3)
             overall[b_id][a_id] = round(s_overall, 3)
 

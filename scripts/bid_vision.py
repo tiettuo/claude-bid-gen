@@ -25,9 +25,9 @@ from typing import Iterable
 
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bid_common import get_bid_gen_home as _get_bid_gen_home  # noqa: E402
+from bid_common import get_config_dir, get_bid_gen_home as _get_bid_gen_home  # noqa: E402
 _BID_GEN_HOME = _get_bid_gen_home()
-CONFIG_PATH = _BID_GEN_HOME / "configs" / "bid_vision_config.json"
+CONFIG_PATH = get_config_dir() / "bid_vision_config.json"
 
 
 # ---------- 配置加载 ----------

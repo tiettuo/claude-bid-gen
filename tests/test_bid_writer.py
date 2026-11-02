@@ -130,3 +130,34 @@ def test_build_writer_tasks_interleaved_by_variant(tmp_path):
         ("V01", "02"), ("V02", "02"), ("V03", "02"),
         ("V01", "03"), ("V02", "03"), ("V03", "03"),
     ]
+
+
+def test_keyword_match_does_not_inject_all_keywords_when_hints_miss():
+    """有 hint 的响应词只在核心词命中时注入,不得灌进所有带"施工/措施"的章。"""
+    from bid_writer import _match_keywords_for_chapter
+    keywords = [
+        {"keyword": "365 日历天", "chapter_hint": "进度计划"},
+        {"keyword": "质量标准合格", "chapter_hint": ""},
+        {"keyword": "冬期施工", "chapter_hint": "季节性施工措施"},
+        {"keyword": "混凝土养护", "chapter_hint": "施工方案与技术措施"},
+    ]
+    got = [k["keyword"] for k in _match_keywords_for_chapter(keywords, "安全文明施工体系与措施")]
+    assert got == ["质量标准合格"], got
+
+
+def test_keyword_hint_core_match_survives_no_hint_hit():
+    """带 hint 的词不被 "not matched" 门控:核心词命中就要注入(旧实现会静默丢弃)。"""
+    from bid_writer import _match_keywords_for_chapter
+    keywords = [
+        {"keyword": "质量标准合格", "chapter_hint": ""},
+        {"keyword": "365 日历天", "chapter_hint": "进度计划"},
+    ]
+    got = [k["keyword"] for k in _match_keywords_for_chapter(keywords, "施工进度与工期保证措施")]
+    assert "365 日历天" in got, got
+
+
+def test_keyword_hint_core_strips_generic_suffixes():
+    from bid_writer import _hint_core
+    assert _hint_core("季节性施工措施") == "季节性"
+    assert _hint_core("进度计划") == "进度"
+    assert _hint_core("施工方案与技术措施") == ""

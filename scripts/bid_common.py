@@ -27,7 +27,9 @@ bid_writer / bid_reviewer / bid_similarity / bid_variants 中的重复实现。
 
 from __future__ import annotations
 
+import ast
 import itertools
+import json
 import logging
 import random
 import re
@@ -36,6 +38,37 @@ from pathlib import Path
 
 
 # ─── 统一日志 ─────────────────────────────────────────────────────────
+
+def loads_json_lenient(text: str):
+    """宽松 JSON 解析:LLM 输出常带尾逗号/单引号/注释/非标准转义,标准 json 会整块拒收。
+
+    依次尝试:json.loads → 去注释+去尾逗号 → ast.literal_eval(Python 字面量,天然容忍
+    单引号与尾逗号)。全部失败抛 json.JSONDecodeError,调用方保持原有失败处理。
+    """
+    if not text:
+        raise json.JSONDecodeError("empty", text or "", 0)
+    s = text.strip()
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+    # 去 // 行注释与 /* */ 块注释。行注释只在“空白/逗号/括号之后”才当注释(
+    # 避免把字符串里的 http:// 误删——严格 json.loads 已先试过,能走到这里说明它已失败)
+    no_comment = re.sub(r"/\*[\s\S]*?\*/", "", s)
+    no_comment = re.sub(r"(?:^|(?<=[\s,\[{]))//[^\n]*", "", no_comment, flags=re.M)
+    # 去尾逗号:  ,  } / ,  ]
+    no_trailing = re.sub(r",\s*([}\]])", r"\1", no_comment)
+    try:
+        return json.loads(no_trailing)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return ast.literal_eval(no_trailing)
+    except (ValueError, SyntaxError):
+        pass
+    # 最后一搏:仍报原始错误,便于排障
+    return json.loads(s)
+
 
 def make_script_logger(name: str, log_path, verbose: bool = False) -> logging.Logger:
     """脚本级 logger：自动推导 tender_dir，挂 tender/logs/bid.log 全局 handler。
@@ -72,7 +105,15 @@ def setup_logger(
     """
     logger = logging.getLogger(name)
     if logger.handlers:
-        return logger
+        # 同进程复用(loop/批处理):换绑新路径——清掉旧 handler 重挂。
+        # ★ 必须清全部 handler(不只 FileHandler):StreamHandler 遗留会让日志每行双打,
+        # 重复挂 FileHandler 会让同一条写进两个 tender 的日志文件。
+        for _h in list(logger.handlers):
+            logger.removeHandler(_h)
+            try:
+                _h.close()
+            except Exception:  # noqa: BLE001
+                pass
     logger.setLevel(logging.DEBUG)
 
     file_fmt = logging.Formatter(
@@ -144,6 +185,30 @@ def canonical_rules_path(extracted_dir) -> Path:
 
 # ─── chapter_plan.md 解析 ─────────────────────────────────────────────
 
+# 管理制度类章节关键词(单一定义:writer 强制子项级 / variants 模型偏好 / brain 重难点注入共用)
+MGMT_CHAPTER_KEYWORDS = ("质量", "安全", "环保", "绿色", "工期", "文明", "民工", "进度", "组织管理", "编制依据")
+
+
+def _num_strict(v):
+    """严格取数:仅当单元格是**纯数字**(允许千分位 / 字 / 页后缀)时返回数值,否则 None。
+
+    用于区分"章节字数单元格"与"写作要点自由文本单元格"——后者常含「工期365天」这类
+    数字,宽义解析会把要点里的数字当成字数,导致字数/页数预算整体爆炸。
+    ★ 必须自带解析:不得调用 parse_chapter_plan 内的局部 _num(会 NameError)。
+    """
+    s = str(v or "").strip()
+    if not s:
+        return None
+    m = re.fullmatch(r"([\d,]+(?:\.\d+)?)\s*(?:字|页)?", s)
+    if not m:
+        return None
+    try:
+        f = float(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    return int(f) if f == int(f) else f
+
+
 def parse_chapter_plan(plan_path: Path) -> list[dict]:
     """解析章节规划表（兼容旧 7 列与新 10 列格式）。
 
@@ -181,23 +246,87 @@ def parse_chapter_plan(plan_path: Path) -> list[dict]:
             continue
 
         score = _num(cells[4], float)
-        if len(cells) >= 10:
-            # 新 10 列格式
+        if len(cells) == 10 and re.match(r"^[\d,]+\s*[-–—~]\s*[\d,]+$", cells[7] or ""):
+            # 新 10 列格式(第7列=目标字数,第8列=字数带,第10列=页数估)
             subitem_count = _num(cells[5])
             target_chars = _num(cells[6])
             chart_count = _num(cells[8])
             est_pages = _num(cells[9], float)
-            notes = ""
-        else:
-            # 旧 7 列格式
+            notes = cells[7].strip() if len(cells) > 7 else ""
+            if notes and re.match(r"^[\d,\s\-–—]+$", notes):
+                notes = ""  # 第7列是字数带(如 1,625-2,198)时不作 notes
+        elif (len(cells) == 10 and _num(cells[5]) and _num(cells[5]) > 100
+              and _num(cells[6]) and _num(cells[6]) <= 100
+              and not re.match(r"^[\d,]+\s*[-–—~]\s*[\d,]+$", cells[7] or "")):
+            # 10 列但第7列非"N-M"字数带 → 疑似旧 7 列+尾随列,按旧语义(cells[5]=目标字数)
             subitem_count = 0
             target_chars = _num(cells[5])
             chart_count = 0
             est_pages = 0.0
             notes = cells[6] if len(cells) > 6 else ""
+        elif (len(cells) in (8, 9) and _num(cells[6]) and _num(cells[6]) > 100
+              and re.match(r"^[\d,]+\s*[-–—~]\s*[\d,]+$", cells[7] or "")):
+            # 8/9 列判新格式需双证据:cells[6] 是字数量级 且 cells[7] 是"N-M"字数带;
+            # 单证据(仅数字>100)会被旧 7 列纯数字要点列误触发
+            cells = cells + [""] * (10 - len(cells))
+            subitem_count = _num(cells[5])
+            target_chars = _num(cells[6])
+            chart_count = _num(cells[8]) if cells[8] else 0
+            est_pages = _num(cells[9], float) if cells[9] else 0.0
+            notes = cells[7].strip() if cells[7] else ""
+            if notes and re.match(r"^[\d,\s\-–—]+$", notes):
+                notes = ""
+        elif len(cells) in (7, 6) or (len(cells) in (8, 9) and not (_num(cells[6]) and _num(cells[6]) > 100)):
+            # 旧 7 列格式(可带尾随空列→8/9);6 列(无 notes 列)——cells[5] 均为目标字数
+            subitem_count = 0
+            target_chars = _num(cells[5])
+            chart_count = 0
+            est_pages = 0.0
+            notes = cells[6] if len(cells) > 6 else ""
+        elif len(cells) > 10:
+            # 超宽(如尾随空列):截断到前 10 列解析,不丢章
+            cells = cells[:10]
+            subitem_count = _num(cells[5])
+            target_chars = _num(cells[6])
+            chart_count = _num(cells[8])
+            est_pages = _num(cells[9], float)
+            notes = ""
+        elif len(cells) == 10:
+            # 10 列但第 7 列非"N-M"字数带(自由文本 notes) → 按 10 列解析但 notes=cells[7]
+            subitem_count = _num(cells[5])
+            target_chars = _num(cells[6])
+            chart_count = _num(cells[8])
+            est_pages = _num(cells[9], float)
+            notes = cells[7].strip()
+        elif len(cells) in (8, 9):
+            # 8/9 列但字数带为自由文本(双证据不中)→ **必须先确认第 7 列是纯数字**:
+            # 旧版式里第 6 列常是"写作要点"自由文本(如「目标工期365天、混凝土1200方」),
+            # 直接 _num 会把要点里的数字当成本章字数 → 预算爆炸(实测解析出 3,651,200 字)。
+            # 不是纯数字时回落到旧 7 列语义(目标字数在 cells[5])。
+            _padded = cells + [""] * (10 - len(cells))
+            if _num_strict(_padded[6]) is not None:
+                cells = _padded
+                subitem_count = _num(cells[5])
+                target_chars = _num_strict(cells[6])
+                chart_count = _num(cells[8]) if cells[8] else 0
+                est_pages = _num(cells[9], float) if cells[9] else 0.0
+                notes = cells[7].strip()
+            else:
+                subitem_count = 0
+                target_chars = _num(cells[5])
+                chart_count = 0
+                est_pages = 0.0
+                notes = cells[6] if len(cells) > 6 else ""
+        else:
+            # <6 列等真正异常:跳过(防 target_chars 取错列位)
+            continue
 
+        # notes 兜底:新格式(≥8列)无评分要点列时,用评分项名称拆词作覆盖关键词;
+        # 旧 7 列 notes 本就是写作要点列,不覆盖(防存量项目 keyword_coverage 判定漂移)
+        if not notes and len(cells) >= 8 and cells[3] and "#" not in cells[3]:
+            notes = cells[3]
         rows.append({
-            "num": cells[0],
+            "num": str(cells[0]).strip().zfill(2) if str(cells[0]).strip().isdigit() else cells[0],
             "filename": cells[1],
             "title": cells[2],
             "score_item": cells[3],
@@ -259,6 +388,47 @@ def parse_plan_budget(plan_path: Path) -> dict:
     return budget
 
 
+# ─── 关键响应词解析(writer 与 reviewer 共用,解跨模块私有函数耦合) ───
+def parse_response_keywords(disq_text: str) -> list[dict]:
+    """从规则的"关键响应"段落提取必须出现的关键词。
+
+    返回: [{"keyword": "180 日历天", "chapter_hint": "进度计划", "rule": "A-20"}, ...]
+    """
+    keywords = []
+    in_section = False
+    for line in (disq_text or "").splitlines():
+        if "关键响应" in line and line.strip().startswith("#"):
+            in_section = True
+            continue
+        if in_section:
+            if line.strip().startswith("#"):
+                break
+            if line.strip().startswith("- "):
+                entry = line.strip()[2:]
+                kw = ""
+                chapter_hint = ""
+                rule = ""
+                if "：" in entry:
+                    parts = entry.split("：", 1)
+                    rest = parts[1]
+                    if "——" in rest:
+                        kw = rest.split("——")[0].strip()
+                        desc = rest.split("——")[1].strip()
+                        _hm = re.search(r"在([^，。；]{1,12}?)章", desc)
+                        if _hm:
+                            chapter_hint = _hm.group(1).strip()
+                            if chapter_hint.startswith("招标文件") or chapter_hint.startswith("第"):
+                                chapter_hint = ""
+                        rule_m = re.search(r"[A-Z]-?\d+", desc)
+                        if rule_m:
+                            rule = rule_m.group()
+                    else:
+                        kw = rest.strip()
+                if kw:
+                    keywords.append({"keyword": kw, "chapter_hint": chapter_hint, "rule": rule})
+    return keywords
+
+
 def parse_plan_subitems(plan_path: Path) -> dict[str, list[dict]]:
     """解析"子项分配"段，返回 {章节号: [{title, chars}, ...]}。
 
@@ -281,7 +451,7 @@ def parse_plan_subitems(plan_path: Path) -> dict[str, list[dict]]:
         line_s = line.strip()
         h = re.match(r"^###\s*(\d{1,3})\b", line_s)
         if h:
-            current = h.group(1)
+            current = h.group(1).strip().zfill(2)  # 与 parse_chapter_plan 的 num 同口径
             result[current] = []
             continue
         if current is None:
@@ -331,6 +501,37 @@ def get_bid_gen_home() -> Path:
     if env:
         return Path(env).expanduser().resolve()
     return Path(__file__).resolve().parent.parent
+
+
+def get_config_dir() -> Path:
+    """返回配置目录,兼容"仓库开发态"与"技能包分发态"两种布局。
+
+    技能市场(WorkBuddy 等)只允许 SKILL.md / references / scripts / templates
+    四个顶层项进包,``configs/`` 无法留在包根,分发时会被整体塞进 ``scripts/configs/``。
+    因此配置目录不能硬编成 ``BID_GEN_HOME/"configs"``,必须按下面的顺序探测:
+
+      1. ``$BID_GEN_CONFIG_DIR``        显式覆盖(测试/多实例)
+      2. ``BID_GEN_HOME/configs``        仓库开发态
+      3. ``scripts/configs``             技能包分发态
+      4. ``BID_GEN_HOME/references/configs``  备用布局
+
+    找不到时返回 2 号路径(不存在),保持旧行为,让调用方自己的"缺文件"分支照常报警。
+    """
+    import os as _os
+    env = _os.environ.get("BID_GEN_CONFIG_DIR")
+    if env:
+        return Path(env).expanduser().resolve()
+
+    home = get_bid_gen_home()
+    candidates = (
+        home / "configs",
+        Path(__file__).resolve().parent / "configs",
+        home / "references" / "configs",
+    )
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return candidates[0]
 
 
 CN_FONT_SIZE_MAP = {
@@ -391,7 +592,7 @@ def project_fingerprint(ext_dir: "Path") -> dict:
             v = m.group(1).strip()
             if k=="price":
                 try: fp[k]=float(v.replace(",","").replace("，",""))
-                except: fp[k]=v
+                except Exception: fp[k]=v
             else: fp[k]=v
     fp["hash"]=hashlib.sha256((fp.get("name","")+fp.get("code","")+str(fp.get("price",""))).encode()).hexdigest()[:12]
     return fp
@@ -417,7 +618,7 @@ def check_boq_chapter_coverage(ext_dir: "Path", chapter_titles: list[str]) -> di
     bp = ext_dir / "boq.json"
     if not bp.exists(): return {"covered":[],"missing":[],"ratio":1.0}
     try: boq = _json.loads(bp.read_text(encoding="utf-8"))
-    except: return {"covered":[],"missing":[],"ratio":1.0}
+    except Exception: return {"covered":[],"missing":[],"ratio":1.0}
     cats = boq.get("categories",[]) or []
     if not cats: return {"covered":[],"missing":[],"ratio":1.0}
     cov=[]; mis=[]
@@ -593,7 +794,9 @@ def _parse_blind_flags_from_text(text: str) -> dict:
             if m:
                 key = m.group(1).strip()
                 if key in BLIND_TRIGGER_KEYS:
-                    flags[key] = _coerce_bool(m.group(2).strip().rstrip(",;"))
+                    _v = _coerce_bool(m.group(2).strip().rstrip(",;"))
+                    # 多代码块同名键:True 优先(先写 True 不被后写 False 覆盖,判定稳定)
+                    flags[key] = True if (flags[key] or _v) else _v
     flags["text_blind"] = bool(re.search(BLIND_TEXT_REGEX, text))
     return flags
 
@@ -781,7 +984,7 @@ def scan_blind_bid_violations(
         patterns.append((re.escape(company_name), "本单位公司名"))
     for t in custom_terms or ():
         if t:
-            patterns.append((t, "自定义禁用词"))
+            patterns.append((re.escape(t), "自定义禁用词"))  # 转义:正则元字符防抛错/误匹配
 
     hits: list[dict] = []
     for md in md_files:
@@ -874,6 +1077,55 @@ def strip_prompt_leaks(md_files, log: logging.Logger) -> None:
         log.info(f"prompt 回显清洗完成：{total_files} 个文件共 {total_hits} 字符")
     else:
         log.info("prompt 回显清洗：未发现泄露 ✓")
+
+
+# ─── 章节级禁止出图（页数硬顶项目的确定性闸门） ───────────────────────
+
+_JSON_CHART_BLOCK_RE = re.compile(r"\n*```json\s*\n.*?\n```[ \t]*\n?", re.DOTALL)
+
+
+def strip_suppressed_chart_blocks(md_files, extracted_dir, log: logging.Logger) -> None:
+    """按 chart_specs.json 的 suppress_chapters 剥除指定章节的 ```json 图表块。
+
+    为什么不能只靠 prompt：撰稿人在“整章单模型模式”与“子项级”两条路径上都会自发
+    补图（prompt 只能降低概率，无法归零）。页数硬顶项目（如合格制 70 页）每多一张图
+    约化 0.85 页，必须在装配前做确定性剪裁。
+
+    chart_specs.json 未声明 suppress_chapters 时本函数不动作（对其余项目零影响）。
+    """
+    spec_path = Path(extracted_dir) / "chart_specs.json"
+    if not spec_path.exists():
+        return
+    try:
+        payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(payload, dict):
+        return
+    nums = {str(c).zfill(2) for c in (payload.get("suppress_chapters") or [])
+            if str(c).strip()}
+    if not nums:
+        return
+
+    total_files = total_blocks = 0
+    for md in md_files:
+        m = re.match(r"^(\d{1,2})_", Path(md).name)
+        if not m or m.group(1).zfill(2) not in nums:
+            continue
+        try:
+            orig = Path(md).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        text, n = _JSON_CHART_BLOCK_RE.subn("\n", orig)
+        if n:
+            text = re.sub(r"\n{3,}", "\n\n", text)
+            Path(md).write_text(text, encoding="utf-8")
+            total_files += 1
+            total_blocks += n
+            log.info(f"  禁止出图章节图表块清洗: {Path(md).name}  删除 {n} 个 ```json 块")
+    if total_blocks:
+        log.info(f"禁止出图章节图表块清洗完成：{total_files} 个文件共 {total_blocks} 块"
+                 f"（章节号 {','.join(sorted(nums))}）")
 
 
 # ─── 章节文件收集 ─────────────────────────────────────────────────────
@@ -990,7 +1242,9 @@ def derive_variant_skeleton(chapter: dict, variant: dict | None) -> list[dict]:
     points = _split_notes(chapter.get("notes", ""))
     # notes 为空时兜底一个通用骨架，避免 writer 彻底无结构可用
     if not points:
-        points = ["总体策略", "关键措施", "实施要点", "过程监控"]
+        # 兜底骨架带章节语义(空泛词会被 writer 输出格式约束打回/评标视为模板化)
+        _tt = (chapter.get("title") or "本章").strip()
+        points = [f"{_tt}总体安排", f"{_tt}重点措施", f"{_tt}实施组织", f"{_tt}过程检查"]
 
     if variant is None or "section_order_seed" not in variant:
         return [{"level": 2, "title": p, "children": []} for p in points]
@@ -999,7 +1253,7 @@ def derive_variant_skeleton(chapter: dict, variant: dict | None) -> list[dict]:
         ch_num = int(re.sub(r"\D", "", str(chapter.get("num", "0"))) or "0")
     except ValueError:
         ch_num = 0
-    seed = int(variant["section_order_seed"]) ^ (ch_num * 2654435761 & 0xFFFFFFFF)
+    seed = int(variant.get("section_order_seed") or 0) ^ (ch_num * 2654435761 & 0xFFFFFFFF)
     rng = random.Random(seed)
 
     shuffled = points[:]
@@ -1069,6 +1323,7 @@ def extract_headings(text: str, levels: tuple[int, ...] = (2, 3, 4)) -> list[tup
 
 if __name__ == "__main__":
     import argparse
+
     p = argparse.ArgumentParser(description="bid_common 自检")
     p.add_argument("tender_dir", nargs="?", help="可选：对某投标目录做解析自检")
     args = p.parse_args()

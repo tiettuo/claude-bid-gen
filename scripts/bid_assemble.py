@@ -29,6 +29,7 @@ from bid_common import (  # noqa: E402
     read_project_name as _read_project_name,
     sanitize_decorative_chars,
     strip_prompt_leaks,
+    strip_suppressed_chart_blocks,
     scan_blind_bid_violations,
 )
 from bid_charts import preprocess_chapter_dir  # noqa: E402
@@ -55,6 +56,31 @@ def _find_pandoc() -> str:
     )
 
 
+# 单份/占位模式自动生成的占位公司名(不得印上封面标注,否则等于交付占位符)
+_BIDDER_PLACEHOLDERS = {
+    "投标单位名称", "投标人名称", "公司名称", "投标单位", "待定",
+}
+
+# 占位风格公司名(甲公司/乙公司/A公司/某公司/XX公司…)——draft 阶段常用
+# 占位风格公司名(甲公司/乙公司/A公司/某公司/XX公司/占位/待定…)——draft 阶段常用。
+# ★ 第二分支必须整名锚定:旧写法用 search 匹配子串,会让真实名
+#   「某某建筑工程有限公司」被误判占位、封面投标人被替换成填空线。
+_BIDDER_PLACEHOLDER_RE = re.compile(
+    r"^(?:(?:[\u7532\u4e59\u4e19\u4e01\u620a\u5df1\u5e9a\u8f9b]|\u67d0|X{1,2}|[A-Fa-f])?\u516c\u53f8"
+    r"|\u5360\u4f4d|\u5f85\u5b9a|\u67d0\u67d0\u516c\u53f8?|\u67d0\u67d0|\u67d0)$"
+)
+
+
+def _is_placeholder_bidder(name) -> bool:
+    """是否为占位公司名——占位名不得当真名印上封面(应留填空线人工填)。"""
+    s = str(name or "").strip()
+    if not s:
+        return True
+    if s in _BIDDER_PLACEHOLDERS:
+        return True
+    return bool(_BIDDER_PLACEHOLDER_RE.search(s))
+
+
 # ─── 默认格式配置（当废标条款未指定时使用）─────────────────────────
 DEFAULT_FORMAT = {
     "font_name_cn": "宋体",
@@ -77,6 +103,7 @@ DEFAULT_FORMAT = {
     "page_width_cm": 21.0,      # A4 宽
     "page_height_cm": 29.7,     # A4 高
     "blind_bid": False,
+    "doc_type": "施工组织设计",   # 文档类型（封面标题/目录标题/输出文件名）；监理类项目可置 监理服务方案
     "no_color": False,
     "no_cover": False,
     "no_toc": False,                     # 显式"不需要目录"才置 True(暗标常见)
@@ -98,6 +125,23 @@ DEFAULT_FORMAT = {
 from bid_common import PAGE_SIZE_CM, CN_FONT_SIZE_MAP as CN_SIZE_MAP  # noqa: E402, F401
 
 
+def _strip_yaml_section(block: str, section: str) -> str:
+    """从一段 YAML 文本里剔掉 `section:` 及其缩进子行(保留同块内其它内容)。"""
+    out: list[str] = []
+    skipping = False
+    for line in block.splitlines():
+        if re.match(rf"^\s*{re.escape(section)}\s*:", line):
+            skipping = True
+            continue
+        if skipping:
+            # 子行=空行或比自己缩进更深;回到顶层键即结束本节
+            if line.strip() and not line.startswith((" ", "\t")):
+                skipping = False
+        if not skipping:
+            out.append(line)
+    return "\n".join(out)
+
+
 def _parse_structured_block(text: str) -> dict:
     """解析围栏代码块中的 key: value 参数（YAML-like）
 
@@ -109,6 +153,13 @@ def _parse_structured_block(text: str) -> dict:
     """
     params = {}
     for block in re.findall(r"```[^\n]*\n(.*?)```", text, flags=re.DOTALL):
+        # ★ format_sets 是「多变体反串标排版预设」(A/B/C 三套封面/字体),不是招标格式要求。
+        #   混进来会把预设值(font_name_h1=黑体 等)当成"招标已指定"锁定,覆盖正文抽取结果。
+        #   但**不能整块 continue**:format_sets 与 format 常同在一个 yaml 块里,
+        #   整块跳过会把招标格式硬约束(字号/页边距/颜色)静默全丢(实测 16pt 回落 12pt)。
+        #   改为把 format_sets: 这一节(含其缩进子行)从块内剔掉再解析。
+        if re.search(r"^\s*format_sets\s*:", block, re.M):
+            block = _strip_yaml_section(block, "format_sets")
         for line in block.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
@@ -491,6 +542,8 @@ def _normalize_rule_param_keys(params: dict, log: logging.Logger) -> None:
         "h1_align": "align_h1",
         "heading_h1_size_pt": "font_size_h1",    # Phase 2 authoring 用
         "heading_h1_size_pt_source": "font_size_h1_source",
+        "heading_h2_size_pt_source": "font_size_h2_source",
+        "heading_h3_size_pt_source": "font_size_h3_source",
         "heading_h1_font": "font_name_h1",        # Phase 2 authoring 标题字体
         "heading_h1_font_source": "font_name_h1_source",
         "heading_h2_size_pt": "font_size_h2",
@@ -582,6 +635,13 @@ def parse_format_rules(rules_path: Path, log: logging.Logger) -> dict:
         specified.add("font_name_cn")
         log.info(f"  [结构化] font_name_cn = {fmt['font_name_cn']}")
 
+    # 文档类型（监理服务方案 / 施工组织设计 …）——决定封面标题、目录标题与输出文件名。
+    # 读侧 bid_verify._COVER_TITLE_KW 早已支持监理类文档，此处补齐写侧参数化。
+    if "doc_type" in params and str(params["doc_type"]).strip():
+        fmt["doc_type"] = str(params["doc_type"]).strip()
+        specified.add("doc_type")
+        log.info(f"  [结构化] doc_type = {fmt['doc_type']}")
+
     if "font_size_body" in params:
         n = _resolve_font_size(params["font_size_body"])
         if n:
@@ -613,6 +673,18 @@ def parse_format_rules(rules_path: Path, log: logging.Logger) -> dict:
         fmt["landscape_chart_kinds"] = str(params["landscape_chart_kinds"])
         specified.add("landscape_chart_kinds")
         log.info(f"  [结构化] landscape_chart_kinds = {fmt['landscape_chart_kinds']}")
+
+    if "landscape_only_in_chapter" in params:
+        n = _coerce_number(params["landscape_only_in_chapter"], None)
+        if n:
+            fmt["landscape_only_in_chapter"] = int(n)
+            specified.add("landscape_only_in_chapter")
+            log.info(f"  [结构化] landscape_only_in_chapter = {fmt['landscape_only_in_chapter']}")
+
+    if "force_portrait" in params:
+        fmt["force_portrait"] = _coerce_bool(params["force_portrait"])
+        specified.add("force_portrait")
+        log.info(f"  [结构化] force_portrait = {fmt['force_portrait']}")
 
     if "table_line_spacing_pt" in params:
         n = _coerce_number(params["table_line_spacing_pt"])
@@ -654,6 +726,16 @@ def parse_format_rules(rules_path: Path, log: logging.Logger) -> dict:
             # 同上：source=default 的字号是兜底默认，不视为招标指定
             if params.get("font_size_h1_source", "").strip().lower() != "default":
                 specified.add("font_size_h1")
+
+    # H2/H3 字号显式解析（旧代码只支持 H1；招标"全文宋体四号"等项目
+    # 需要 H2/H3 也按 rules 字号渲染，否则 H3 恒为小四 12pt 违反四号要求）
+    for _hkey, _fkey in (("font_size_h2", "font_size_h2"), ("font_size_h3", "font_size_h3")):
+        if _hkey in params:
+            _hn = _resolve_font_size(params[_hkey])
+            if _hn:
+                fmt[_fkey] = _hn
+                if params.get(f"{_hkey}_source", "").strip().lower() != "default":
+                    specified.add(_fkey)
     if "align_h1" in params:
         v = params["align_h1"].strip().lower()
         if v in ("center", "left", "right"):
@@ -766,10 +848,19 @@ def parse_format_rules(rules_path: Path, log: logging.Logger) -> dict:
     _extract_header_footer(text, params, fmt, log, specified)
 
     # 招标文件未单独指定标题字号时，H1/H2/H3 跟正文一致
-    if "font_size_h1" not in specified and "font_size_body" in specified:
-        fmt["font_size_h1"] = fmt["font_size_body"]
-        fmt["font_name_h1"] = fmt["font_name_cn"]
-        log.info(f"  [自动] 未指定标题字号，H1 跟随正文 = {fmt['font_size_body']}pt {fmt['font_name_cn']}")
+    if "font_size_body" in specified:
+        if "font_size_h1" not in specified:
+            fmt["font_size_h1"] = fmt["font_size_body"]
+            fmt["font_name_h1"] = fmt["font_name_cn"]
+            log.info(f"  [自动] 未指定标题字号，H1 跟随正文 = {fmt['font_size_body']}pt {fmt['font_name_cn']}")
+        # ★ H2/H3 同口径:rules 侧 font_size_h2/h3 带 source=default 时上面的解析循环
+        #   会把它们写成默认值(h3=12pt 小四),只有 H1 有 default 回落 →
+        #   “全文宋体四号(14pt)”项目里 H3 会渲染成 12pt(比正文还小)。
+        for _hk in ("font_size_h2", "font_size_h3"):
+            if _hk not in specified and fmt.get(_hk) != fmt["font_size_body"]:
+                old = fmt.get(_hk)
+                fmt[_hk] = fmt["font_size_body"]
+                log.info(f"  [自动] 未指定 {_hk} 字号，跟随正文: {old}pt → {fmt['font_size_body']}pt")
 
     # 招标文件指定了标题字号但未指定标题字体时，H1 字体回退到正文字体
     if "font_name_h1" not in specified and "font_name_cn" in specified and fmt.get("font_name_h1", "") != fmt["font_name_cn"]:
@@ -936,7 +1027,7 @@ def add_cover(doc, project_name: str, company_name: str, fmt: dict, log: logging
 
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = p.add_run("施  工  组  织  设  计")
+    run = p.add_run(_dt_wider)
     run.font.size = Pt(title_size)
     run.font.bold = True
     run.font.name = cover_title_font
@@ -954,7 +1045,9 @@ def add_cover(doc, project_name: str, company_name: str, fmt: dict, log: logging
     for _ in range(6):
         doc.add_paragraph()
 
-    if not fmt["blind_bid"] and company_name:
+    # 与 _prepend_cover 同口径:no_company_info 与盲标同效,且占位公司名不得印上封面
+    if (not (fmt["blind_bid"] or fmt.get("no_company_info"))
+            and company_name and not _is_placeholder_bidder(company_name)):
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run = p.add_run(f"投 标 人：{company_name}")
@@ -1001,6 +1094,13 @@ def build_reference_doc(fmt: dict, log: logging.Logger) -> Path:
         s.font.name = fmt["font_name_en"]
         s.font.size = Pt(size_pt)
         s.font.bold = bold
+        # 显式黑色:python-docx 默认模板的 Heading 1 自带蓝色(365F91),不覆盖会残留彩色内容,
+        # 而"整体文件不得出现彩色内容"是常见排版硬约束(触发即废标)。
+        try:
+            from docx.shared import RGBColor
+            s.font.color.rgb = RGBColor(0, 0, 0)
+        except Exception:
+            pass
         rPr = s.element.get_or_add_rPr()
         rFonts = rPr.get_or_add_rFonts()
         rFonts.set(qn("w:eastAsia"), cn_font)
@@ -1480,11 +1580,26 @@ def _fit_images(doc, fmt: dict, log, chart_order: list | None = None) -> None:
         # 平面布置图/进度图: 招标常要求横版编辑, 即使竖版放得下也强制横版
         # 暗标等强制格式项目可用 rules 的 landscape_chart_kinds 收窄横版类型
         # (如"仅施工总平面图及进度图可横向编辑" → landscape_chart_kinds: site_layout,schedule)
-        kind = chart_order[img_count - 1] if (chart_order and img_count - 1 < len(chart_order)) else None
+        # ★ landscape_only_in_chapter: 横版仅允许出现在指定章节(如 15 附图及附表),
+        #   其他章节的同类图(如第6章施工总平面布置示意图)一律保持纵向——
+        #   user 反馈: 1-14 章不得出现横向页面(feedback_landscape_only_chapter)。
+        entry = chart_order[img_count - 1] if (chart_order and img_count - 1 < len(chart_order)) else None
+        if isinstance(entry, dict):
+            kind = entry.get("type")
+            img_chapter = entry.get("chapter")
+        else:
+            kind = entry
+            img_chapter = None
         ls_kinds = _LANDSCAPE_CHART_KINDS
         if fmt.get("landscape_chart_kinds"):
             ls_kinds = {k.strip() for k in str(fmt["landscape_chart_kinds"]).replace("，", ",").split(",") if k.strip()}
-        force_ls = kind in ls_kinds
+        ls_only_ch = fmt.get("landscape_only_in_chapter")
+        # 旧版 _chart_order.json 存纯字符串条目 → img_chapter=None。
+        # 另:heading_chapter_prefix=false 时章节号写 0 → 同样无法定位章节。
+        # 两种情况都不得下發“仅本类章横版”的限制(否则招标硬性横向要求静默失效)。
+        in_ls_chapter = (ls_only_ch is None or not img_chapter
+                         or int(img_chapter) == int(ls_only_ch))
+        force_ls = (kind in ls_kinds) and in_ls_chapter
         need_landscape = force_ls or (
             (not fmt.get("force_portrait")) and (new_h > int(content_h_portrait * threshold)))
 
@@ -1937,7 +2052,8 @@ def postprocess_docx(docx_path: Path, fmt: dict, project_name: str,
                                lambda run, **kw: _pp_force_cn_font(run, fmt, **kw))
 
     # ─── 3. 插入封面 ─────────────────────────
-    # 封面由 no_cover 单独控制（_prepend_cover 已是暗标安全的：投标人留空下划线、不印公司名）。
+    # 封面由 no_cover 单独控制。_prepend_cover 按暗标安全处理：盲标（blind_bid）或
+    # 显式 no_company_info 时投标人留空下划线、不印公司名；其余且给了公司名时打印 company_name。
     # 暗标默认 no_cover=True（line ~760 自动置位），故既有暗标项目行为不变；
     # 仅当招标要求封面而显式设 no_cover=false 时，暗标项目才插入这张身份无关的封面。
     if not fmt["no_cover"]:
@@ -2016,15 +2132,16 @@ def _fix_settings_lang_and_proofing(doc, log):
             settings.append(OxmlElement(tag))
     log.info("  已隐藏拼写/语法标记 (hideSpellingErrors + hideGrammaticalErrors)")
 
-    # 让 Word 打开文档时自动更新所有字段（含 TOC）→ 用户无需按 F9
-    update_fields = settings.find(qn("w:updateFields"))
-    if update_fields is None:
-        update_fields = OxmlElement("w:updateFields")
-        update_fields.set(qn("w:val"), "true")
-        settings.append(update_fields)
-        log.info("  已设置 updateFields=true (Word 打开时自动更新目录字段)")
-    else:
-        update_fields.set(qn("w:val"), "true")
+    # ★ 不得设 w:updateFields=true：Word 对带该标志的文档在打开时**必定**弹模态框
+    #   「该文档包含的域可能引用了其他文件。是否更新该文档中的这些域？」，
+    #   无任何 Word 偏好项可关（安全提示，非用户设置），会卡住 bid_verify 的
+    #   AppleScript 页数实测（2026-09 某西藏施组项目实测：弹窗截图 + -609 连接无效）。
+    #   目录改为组装期静态生成 + bid_toc_fill.py 回填真实页码 → 无需更新域，自然无弹窗。
+    #   若历史/外部流程遗留了该标志，主动剔除，避免旧文档继续弹窗。
+    stale_uf = settings.find(qn("w:updateFields"))
+    if stale_uf is not None:
+        settings.remove(stale_uf)
+        log.info("  已移除 updateFields（否则 Word 打开必弹「域引用其他文件」模态框）")
 
 
 def _prepend_cover(doc, project_name: str, company_name: str, fmt: dict, log):
@@ -2101,13 +2218,22 @@ def _prepend_cover(doc, project_name: str, company_name: str, fmt: dict, log):
     ps = fmt["font_size_cover_project"]
     ms = fmt["font_size_cover_meta"]
     style = str(fmt.get("cover_style") or "A").upper()
-    bidder = "投 标 人：" + "_" * 22          # 占位公司名去掉,留填写下划线
+    # ★ 单份模式自动生成的占位公司名不能被印上封面(成品出现「投标单位名称」
+    #   等同把占位符交付,评审可直接判无效;此时回落到下划线填空样式)。
+    _placeholder_bidder = _is_placeholder_bidder(company_name)
+    _dt = fmt.get("doc_type", "施工组织设计")
+    _dt_wide = " ".join(_dt)
+    _dt_wider = "  ".join(_dt)
+    bidder = (f"投 标 人：{company_name}"
+              if (not (fmt.get("blind_bid") or fmt.get("no_company_info"))
+                  and company_name and not _placeholder_bidder)
+              else "投 标 人：" + "_" * 22)
     date_line = f"编 制 日 期：{datetime.now().strftime('%Y 年 %m 月')}"
 
     if style == "B":   # 横线分隔式
         for _ in range(7): _insert_para()
         _insert_para(rule=True)
-        _insert_para("施 工 组 织 设 计", ts, bold=True, cn_font=tf)
+        _insert_para(_dt_wide, ts, bold=True, cn_font=tf)
         _insert_para(rule=True)
         for _ in range(3): _insert_para()
         _insert_para(project_name, ps)
@@ -2116,7 +2242,7 @@ def _prepend_cover(doc, project_name: str, company_name: str, fmt: dict, log):
         _insert_para(date_line, ms)
     elif style == "C":  # 项目名突出 + 左对齐落款
         for _ in range(5): _insert_para()
-        _insert_para("施工组织设计", ts, cn_font=tf)
+        _insert_para(_dt, ts, cn_font=tf)
         for _ in range(4): _insert_para()
         _insert_para(project_name, ps, bold=True)
         for _ in range(9): _insert_para()
@@ -2126,7 +2252,7 @@ def _prepend_cover(doc, project_name: str, company_name: str, fmt: dict, log):
         for _ in range(6): _insert_para()
         _insert_para(rule=True)
         _insert_para()
-        _insert_para("施 工 组 织 设 计", ts, bold=True, cn_font=tf)
+        _insert_para(_dt_wide, ts, bold=True, cn_font=tf)
         _insert_para()
         _insert_para(rule=True)
         for _ in range(4): _insert_para()
@@ -2136,7 +2262,7 @@ def _prepend_cover(doc, project_name: str, company_name: str, fmt: dict, log):
         _insert_para(date_line, ms)
     elif style == "E":  # 简约右对齐落款式
         for _ in range(9): _insert_para()
-        _insert_para("施工组织设计", ts, cn_font=tf)
+        _insert_para(_dt, ts, cn_font=tf)
         for _ in range(5): _insert_para()
         _insert_para(project_name, ps)
         for _ in range(8): _insert_para()
@@ -2148,13 +2274,13 @@ def _prepend_cover(doc, project_name: str, company_name: str, fmt: dict, log):
         _insert_para()
         _insert_para(rule=True)
         for _ in range(5): _insert_para()
-        _insert_para("施  工  组  织  设  计", ts, bold=True, cn_font=tf)
+        _insert_para(_dt_wider, ts, bold=True, cn_font=tf)
         for _ in range(9): _insert_para()
         _insert_para(bidder, ms)
         _insert_para(date_line, ms)
     elif style == "G":  # 标题居上 + 项目名上下双线夹持式
         for _ in range(5): _insert_para()
-        _insert_para("施 工 组 织 设 计", ts, bold=True, cn_font=tf)
+        _insert_para(_dt_wide, ts, bold=True, cn_font=tf)
         for _ in range(5): _insert_para()
         _insert_para(rule=True)
         _insert_para(project_name, ps, bold=True)
@@ -2162,9 +2288,28 @@ def _prepend_cover(doc, project_name: str, company_name: str, fmt: dict, log):
         for _ in range(7): _insert_para()
         _insert_para(bidder, ms)
         _insert_para(date_line, ms)
+    elif style == "H":  # 标题左对齐+分隔线+落款右对齐式
+        for _ in range(6): _insert_para()
+        _insert_para(_dt, ts, bold=True, cn_font=tf, align="left")
+        _insert_para(rule=True)
+        for _ in range(5): _insert_para()
+        _insert_para(project_name, ps, bold=True)
+        for _ in range(8): _insert_para()
+        _insert_para(bidder, ms, align="right")
+        _insert_para(date_line, ms, align="right")
+    elif style == "I":  # 项目名置顶+标题底部双线夹持式
+        for _ in range(3): _insert_para()
+        _insert_para(project_name, ps, bold=True)
+        for _ in range(10): _insert_para()
+        _insert_para(rule=True)
+        _insert_para(_dt_wide, ts, bold=True, cn_font=tf)
+        _insert_para(rule=True)
+        for _ in range(6): _insert_para()
+        _insert_para(bidder, ms)
+        _insert_para(date_line, ms)
     else:               # A 居中经典
         for _ in range(8): _insert_para()
-        _insert_para("施  工  组  织  设  计", ts, bold=True, cn_font=tf)
+        _insert_para(_dt_wider, ts, bold=True, cn_font=tf)
         _insert_para()
         _insert_para(project_name, ps)
         for _ in range(6): _insert_para()
@@ -2229,7 +2374,7 @@ def _build_toc_title(fmt: dict):
     sz = OxmlElement("w:sz"); sz.set(qn("w:val"), str(int(toc_size * 2))); rPr.append(sz)
     r.append(rPr)
     _cs = str(fmt.get("cover_style") or "A").upper()
-    _toc_title = {"A": "目    录", "B": "施工组织设计目录", "C": "目  录"}.get(_cs, "目    录")
+    _toc_title = {"A": "目    录", "B": f"{fmt.get('doc_type', '施工组织设计')}目录", "C": "目  录"}.get(_cs, "目    录")
     t = OxmlElement("w:t"); t.text = _toc_title
     r.append(t)
     p.append(r)
@@ -2260,6 +2405,89 @@ def _build_toc_subtitle(fmt: dict):
     return p
 
 
+TOC_PAGE_TOKEN = "@@TOCPG{}@@"  # 与 bid_toc_fill.TOKEN_RE 必须完全一致
+
+
+def _collect_toc_entries(doc, upper_level: int = 2) -> list[tuple[int, str]]:
+    """按文档顺序收集目录条目 [(level, text)]。
+
+    等价于 Word 的 `TOC \\o "1-N"`：取 Heading1..HeadingN 段落文本。
+    level 从 1 开始编号。
+
+    ★ 为什么自己收集而不靠 Word 建域：带 `w:updateFields` 的文档在 Word 打开时必弹
+    模态框（无偏好项可关），会卡住页数实测；改为静态目录 + 组装后回填页码（见
+    bid_toc_fill.py），打开零弹窗、零人工步骤。
+    """
+    wanted = {f"Heading{i}" for i in range(1, upper_level + 1)}
+    out: list[tuple[int, str]] = []
+    for p in doc.paragraphs:
+        try:
+            sid = p.style.style_id or ""
+        except Exception:  # noqa: BLE001
+            continue
+        if sid not in wanted:
+            continue
+        text = (p.text or "").strip()
+        if not text:
+            continue
+        out.append((int(sid[-1]), text))
+    return out
+
+
+def _build_toc_entry(idx: int, level: int, text: str, fmt: dict):
+    """单条静态目录：右对齐制表位（点线）+ 页码占位符。
+
+    页码先写 `@@TOCPGn@@` 占位，由 bid_toc_fill.py 导出 PDF 量出真实页码后回填。
+    占位符比最终页码长，但右对齐制表位只改变点线长度、不新增行 → 回填不会重排分页。
+    """
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    p = OxmlElement("w:p")
+    pPr = OxmlElement("w:pPr")
+    tabs = OxmlElement("w:tabs")
+    tab = OxmlElement("w:tab")
+    tab.set(qn("w:val"), "right")
+    tab.set(qn("w:leader"), "dot")
+    # 可用宽度 = 页宽 - 左右页边距（twips）。缺值时按 A4 + 2.54cm 边距回退。
+    avail = int(fmt.get("toc_tab_pos") or 9026)
+    tab.set(qn("w:pos"), str(avail))
+    tabs.append(tab)
+    pPr.append(tabs)
+    if level > 1:
+        ind = OxmlElement("w:ind")
+        ind.set(qn("w:left"), str(420 * (level - 1)))
+        pPr.append(ind)
+    p.append(pPr)
+
+    def _run(content: str, is_tab: bool = False):
+        r = OxmlElement("w:r")
+        rPr = OxmlElement("w:rPr")
+        rFonts = OxmlElement("w:rFonts")
+        rFonts.set(qn("w:eastAsia"), fmt.get("font_name_cn", "宋体"))
+        rFonts.set(qn("w:ascii"), fmt.get("font_name_en", "Times New Roman"))
+        rFonts.set(qn("w:hAnsi"), fmt.get("font_name_en", "Times New Roman"))
+        rFonts.set(qn("w:cs"), fmt.get("font_name_en", "Times New Roman"))
+        rFonts.set(qn("w:hint"), "eastAsia")
+        rPr.append(rFonts)
+        sz = OxmlElement("w:sz")
+        sz.set(qn("w:val"), str(int(float(fmt.get("font_size_body", 14)) * 2)))
+        rPr.append(sz)
+        r.append(rPr)
+        if is_tab:
+            r.append(OxmlElement("w:tab"))
+        else:
+            t = OxmlElement("w:t")
+            t.set(qn("xml:space"), "preserve")
+            t.text = content
+            r.append(t)
+        return r
+
+    p.append(_run(text))
+    p.append(_run("", is_tab=True))
+    p.append(_run(TOC_PAGE_TOKEN.format(idx)))
+    return p
+
+
 def _build_toc_field(fmt: dict = None):
     """构造 TOC 域段落。"""
     from docx.oxml.ns import qn
@@ -2273,7 +2501,9 @@ def _build_toc_field(fmt: dict = None):
     instr = OxmlElement("w:instrText")
     instr.set(qn("xml:space"), "preserve")
     _cs = str((fmt or {}).get("cover_style") or "A").upper()
-    _lvl = "1-2" if _cs == "B" else "1-3"
+    # 目录层级直接吃页数:条目 ~30 条/页,三级目录(含大量 H3)可占 5-6 页。
+    # 样式 B/C 的文件 H3 多(合格制分组降级产生),统一用二级目录控页数。
+    _lvl = "1-2" if _cs in ("B", "C") else "1-3"
     instr.text = f'TOC \\o "{_lvl}" \\h \\z \\u'
     r.append(instr)
     fld2 = OxmlElement("w:fldChar"); fld2.set(qn("w:fldCharType"), "separate"); r.append(fld2)
@@ -2316,9 +2546,19 @@ def _prepend_toc(doc, fmt: dict, log):
     _insert(_build_toc_title(fmt))
     if str(fmt.get("cover_style") or "A").upper() == "C":
         _insert(_build_toc_subtitle(fmt))
-    _insert(_build_toc_field(fmt))
+    # 静态目录（无域、无 updateFields）→ Word 打开零弹窗；页码由 bid_toc_fill.py 回填。
+    upper = 2 if str(fmt.get("cover_style") or "A").upper() in ("B", "C") else 3
+    entries = _collect_toc_entries(doc, upper_level=upper)
+    if entries:
+        for i, (lvl, text) in enumerate(entries, 1):
+            _insert(_build_toc_entry(i, lvl, text, fmt))
+        log.info(f"  目录已插入：{len(entries)} 条静态条目（含 H1/H2，页码待回填）"
+                 f"，封面存在={cover_present}")
+    else:
+        _insert(_build_toc_field(fmt))
+        log.warning("  未收集到标题段落，回退为 TOC 域（需人工 F9 更新）")
     _insert(_build_section_break(body))
-    log.info(f"  目录已插入（封面存在={cover_present}），已插入分节符 → 正文独立 section")
+    log.info("  已插入分节符 → 正文独立 section")
 
 
 def _disable_headers(doc, log):
@@ -2824,10 +3064,13 @@ def _backfill_chart_theme(style: dict, variant_id: str) -> None:
     序号补全，老项目不刷 variants.json 也能拿到按家互异的图表主题。
     """
     try:
-        from bid_variants import variant_chart_theme, _variant_index
+        from bid_variants import variant_chart_theme
     except Exception:  # noqa: BLE001
         return
-    idx = _variant_index(variant_id, sum(ord(c) for c in str(variant_id)) if variant_id else 0)
+    # bid_variants 没有 _variant_index（旧导入名）→ ImportError 被吞后回填恒不生效,
+    # 旧项目各家图表主题撞脸。这里按 Vxx 序号自算(与 variant_chart_theme 的 idx 口径一致)。
+    _m = re.match(r"[Vv](\d+)", str(variant_id or ""))
+    idx = max(0, int(_m.group(1)) - 1) if _m else 0
     style.update(variant_chart_theme(idx))
 
 
@@ -3052,6 +3295,9 @@ def _assemble_one(
     #   - 非暗标项目：装饰符同样显不专业，一并清洗
     sanitize_decorative_chars(md_files, log)
     strip_prompt_leaks(md_files, log)
+    # 章节级禁止出图（chart_specs.json suppress_chapters，页数硬顶项目的确定性剪裁）：
+    # 撰稿人在整章/子项两条路径上都会自发补图，仅靠 prompt 无法归零，装配前直接剥除。
+    strip_suppressed_chart_blocks(md_files, extracted_dir, log)
     violations = scan_blind_bid_violations(
         md_files,
         company_name=fmt.get("company_name", ""),
@@ -3077,9 +3323,9 @@ def _assemble_one(
         # 占位公司名已去除,文件名用 variant id + 项目名区分三份
         safe_company = re.sub(r'[\\/:*?"<>|]', "_", variant.get("company_name", "") or "")[:20]
         seg = f"{safe_company}_" if safe_company else ""
-        out_path = output_dir / f"{variant['id']}_{seg}{safe_name}_施工组织设计.docx"
+        out_path = output_dir / f"{variant['id']}_{seg}{safe_name}_{fmt.get('doc_type', '施工组织设计')}.docx"
     else:
-        out_path = output_dir / f"{safe_name}_施工组织设计.docx"
+        out_path = output_dir / f"{safe_name}_{fmt.get('doc_type', '施工组织设计')}.docx"
 
     # ─── 图表预处理：剥离 JSON/mermaid，渲染进度甘特图 PNG ──
     variant_id = variant["id"] if variant else ""

@@ -137,14 +137,21 @@ def _expected_size(region, fmt):
         # 封面字号区间：[cover_meta, cover_title]，超出视为违规
         title = fmt.get("font_size_cover_title") or body
         meta = fmt.get("font_size_cover_meta") or body
-        return ("range", min(meta, body), max(title, body))
+        # C 版封面目录英文副标题(Contents)按设计比正文小 2pt(反串标差异化),
+        # 区间下限放宽到 body-2,避免把设计内差异误判为违规。
+        lo = min(meta, body, (body or 14) - 2)
+        return ("range", lo, max(title, body))
     return None
 
 
 def audit(tender_dir: Path, docx_path: Path):
     # Phase 3:优先 authoring_rules.md(方案规则),回退 disqualification_rules.md
-    from bid_common import preferred_rules_path
-    rules_md = preferred_rules_path(tender_dir / "extracted")
+    from bid_common import canonical_rules_path
+    # 格式审计以 canonical(disqualification_rules.md)为唯一真源：
+    # preferred( authoring_rules.md)的 format 块是嵌套 format: 结构,
+    # parse_format_rules 解析不到 heading_h1_size_pt 等键 → h1 期望回退正文 12pt,
+    # 与 assemble/verify 应用的 16pt 不一致,产生误报(实测历史: 12 段 H1 假违规)。
+    rules_md = canonical_rules_path(tender_dir / "extracted")
     if not rules_md.exists():
         print(f"[error] 找不到 {rules_md}", file=sys.stderr)
         return 2, {}
@@ -349,15 +356,21 @@ def main():
     if args.docx:
         docx_path = Path(args.docx).resolve()
     else:
-        candidates = sorted((tender / "output").glob("*_施工组织设计.docx"))
+        candidates = sorted((tender / "output").glob("*_施工组织设计.docx")) \
+            + sorted((tender / "output").glob("*_监理服务方案.docx"))
         if not candidates:
-            print(f"[error] {tender}/output 下未找到 *_施工组织设计.docx", file=sys.stderr)
+            print(f"[error] {tender}/output 下未找到 *_施工组织设计.docx / *_监理服务方案.docx", file=sys.stderr)
             sys.exit(2)
         docx_path = candidates[0]
 
     code, result = audit(tender, docx_path)
     out_dir = tender / "output" / "reports"
     out_dir.mkdir(parents=True, exist_ok=True)
+    if not result:
+        # rules 缺失等硬失败路径: 无结果可写报告,直接退出(避免 write_report 对空 dict
+        # 访问 result['docx'] 抛 KeyError,并把真实退出码透传给上层调用方)
+        print(f"格式审计失败(无结果),退出码 {code}", file=sys.stderr)
+        sys.exit(code)
     write_report(out_dir, result)
     print(f"格式审计 → output/reports/format_audit.md  退出码 {code}  违规 {len(result.get('violations', []))} 条")
     sys.exit(code)

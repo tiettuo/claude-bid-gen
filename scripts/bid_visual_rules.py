@@ -11,7 +11,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
 
-from bid_common import canonical_rules_path, get_bid_gen_home
+from bid_common import get_config_dir, canonical_rules_path, get_bid_gen_home
 from bid_assemble import parse_format_rules
 
 
@@ -40,7 +40,7 @@ def normalize_tender_dir(path: Path) -> Path:
 def load_profiles(config_path: Path | None = None) -> dict:
     if config_path is None:
         home = Path(os.environ.get("BID_GEN_HOME", str(get_bid_gen_home())))
-        config_path = home / "configs" / "bid_visual_profiles.json"
+        config_path = get_config_dir() / "bid_visual_profiles.json"
     return json.loads(config_path.read_text(encoding="utf-8"))
 
 

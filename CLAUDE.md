@@ -11,6 +11,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Run from repo root (`BID_GEN_HOME` defaults to this directory — `scripts/`'s parent — and rarely needs setting).
 
 ```bash
+# Step −1: ingest a raw tender .zip → normalized tender dir (GBK filenames, recursive
+# container unwrap for .XZZ/.GKZJ/.ZBWJ, canonical 招标文件.pdf promoted to the root)
+python3 scripts/bid_ingest_zip.py "<项目>.zip" --out-dir "<parent dir>"
+
+# Static-TOC page backfill (Word→PDF → PyMuPDF locate headings → fill @@TOCPGn@@).
+# Never write w:updateFields into a generated DOCX — Word then always shows a modal
+# "fields may refer to other files" alert that no preference can disable.
+python3 scripts/bid_toc_fill.py "<tender_dir>"
+
 # Health check (packages, scripts present, API keys). Run after any dep/env change.
 python3 scripts/bid_run.py --doctor
 

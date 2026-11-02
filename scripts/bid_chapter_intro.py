@@ -37,7 +37,7 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
-from bid_common import make_script_logger, parse_chapter_plan  # noqa: E402
+from bid_common import get_config_dir, make_script_logger, parse_chapter_plan  # noqa: E402
 from bid_llm_client import LLMClient  # noqa: E402
 
 OK = "✓"
@@ -270,7 +270,7 @@ def process_directory(
 def load_coherence_config() -> dict:
     """读 configs/bid_coherence.json。"""
     from bid_common import get_bid_gen_home
-    p = get_bid_gen_home() / "configs" / "bid_coherence.json"
+    p = get_config_dir() / "bid_coherence.json"
     try:
         return json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -311,6 +311,22 @@ def run(tender_dir: Path, variant_filter: str, log) -> int:
 
     client = LLMClient.load(log=log)
 
+    # 变体表(取 section_order_seed,与 bid_plan_variants 同口径)
+    _vseed: dict[str, int] = {}
+    _vangle: dict[str, str] = {}
+    _vj = ext / "variants.json"
+    if _vj.exists():
+        try:
+            _vp = json.loads(_vj.read_text(encoding="utf-8"))
+            _vlist = _vp.get("variants", []) if isinstance(_vp, dict) else _vp
+            for _v in (_vlist or []):
+                if isinstance(_v, dict) and _v.get("id"):
+                    _vseed[str(_v["id"])] = _v.get("section_order_seed") or 0
+                    if _v.get("angle"):
+                        _vangle[str(_v["id"])] = str(_v["angle"])
+        except (json.JSONDecodeError, OSError, AttributeError) as e:
+            log.warning(f"variants.json 读取失败({e}),叙事角度 seed 缺省")
+
     # 决定处理哪些目录
     targets: list[tuple[str, Path]] = []  # (variant_id_or_"单份", dir)
     variant_dirs = sorted(output.glob("V[0-9][0-9]"))
@@ -332,8 +348,28 @@ def run(tender_dir: Path, variant_filter: str, log) -> int:
         variant_angle = ""
         try:
             from bid_plan_variants import assign_strategy
-            idx = int(re.sub(r"\D", "", vid)) if vid != "单份" else 0
-            sname, sdesc = assign_strategy(idx)
+            # ★ 必须 0-based:bid_plan_variants 用 _orig_index(V01→0) 调 assign_strategy。
+            #   这里旧写法用 1-based(V01→1) 会整错一格 → 引言叙事角度与该变体实际 H2
+            #   切分维度不对应。
+            # ★ 优先直接读变体计划落盘的「切分维度【X】」——重算必然对不上:
+            #   bid_plan_variants 带 taken 强制换轴(similarity 门禁重种后必调),
+            #   而 taken 是跨变体累积态,本处无法复现 → 定向重生成后引言角度会错位。
+            sname = sdesc = ""
+            _vp = ch_dir / "chapter_plan_variant.md"
+            if _vp.exists():
+                _m = re.search(r"切分维度【([^】]+)】", _vp.read_text(encoding="utf-8"))
+                if _m:
+                    sname = _m.group(1).strip()
+            # 合格制项目 plan_variants 只写「大纲锁定」且无描述 → 3 家角度会完全相同,
+            # 反串标叙事注入形同虚设。此时改用 variants.json 自动派生的 angle(各家不同)。
+            if sname == "大纲锁定" or (sname and not sdesc):
+                sdesc = _vangle.get(vid, "") or _vangle.get(vid.upper(), "")
+            if not sname:
+                idx = int(re.sub(r"\D", "", vid)) - 1 if vid != "单份" else 0
+                sname, sdesc = assign_strategy(idx, variant_id=vid, seed=_vseed.get(vid))
+            if not sname:
+                sname = "大纲锁定"
+                sdesc = _vangle.get(vid, "")
             variant_angle = f"【本份叙事角度(反串标):{sname}】{sdesc}"
         except Exception:
             pass

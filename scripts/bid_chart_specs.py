@@ -46,10 +46,10 @@ _KEYWORD_RULES: list[tuple[str, list[str]]] = [
                        "工期计划", "进度安排"]),
     ("site_layout",   ["总平面图", "平面布置图", "总平面布置", "施工总平面",
                        "现场布置图", "临设布置"]),
-    ("org_chart",     ["组织机构", "组织框图", "管理机构", "组织架构",
-                       "项目组织", "管理组织", "框图"]),
     ("hierarchy_flow", ["管理体系", "体系图", "保证体系", "管理网络",
                         "管理框图"]),
+    ("org_chart",     ["组织机构", "组织框图", "管理机构", "组织架构",
+                       "项目组织", "管理组织"]),
     ("process_flow",  ["工艺流程", "流程图", "施工流程", "工序流程",
                        "验收流程", "检验流程"]),
     ("resource_curve", ["劳动力曲线", "投入曲线", "资源曲线", "资金曲线",
@@ -61,7 +61,7 @@ _KEYWORD_RULES: list[tuple[str, list[str]]] = [
 # 这些关键词命中即 required=true
 _REQUIRED_HINTS = [
     "施工总平面图", "总平面布置图",          # 招标第七章附表五
-    "施工进度网络图", "进度横道图", "网络计划图",  # 招标第七章附表四
+    "施工进度网络图", "进度横道图", "进度计划横道图", "网络计划图",  # 招标第七章附表四
 ]
 
 
@@ -143,11 +143,22 @@ def derive_chart_specs(plan_path: Path, log: logging.Logger) -> list[dict]:
         ch_num = row["num"].zfill(2)
         ch_title = row["title"]
         chart_count = int(row.get("chart_count") or 0)
-        if chart_count <= 0:
-            continue
 
         # 拿子节列表
         sub_list = subitems.get(ch_num, [])
+
+        # chart_count<=0 一般不配图(以计划为准,避免计划外插图吃页数)。
+        # ★ 但本章子节含招标硬性图关键词(总平面图/进度网络图)时必须继续落子:
+        #   _figure_count 恰好给「施工总进度计划/施工总平面布置」两章 0 图表数,
+        #   直接 continue 会让招标硬性附图静默无 spec → compliance 无从检出、
+        #   重写也补不出图(缺招标硬性附图 = 未响应)。
+        if chart_count <= 0:
+            _miss_req = [s[1] for s in sub_list if is_required_chart(s[1])]
+            if not _miss_req:
+                continue
+            (log.warning if log else print)(
+                f"  ⚠ 章 {ch_num}「{ch_title}」规划图表数为 0,但子节含招标硬性图"
+                f"关键词({'、'.join(_miss_req[:2])}) — 按硬性图落子并建议在 chapter_plan 补图表数")
 
         # 给本章拼 chart_count 张图。策略:
         # 1. 先扫子节,标题命中 type 关键词的子节,直接落一张图
@@ -157,8 +168,18 @@ def derive_chart_specs(plan_path: Path, log: logging.Logger) -> list[dict]:
         ch_specs: list[dict] = []
 
         # 第一遍:子节标题命中(跳过纯表格子节)
-        for sec_id, sec_title in sub_list:
-            if len(ch_specs) >= chart_count:
+        # required 硬性图子节(附表四进度图/附表五总平面图)**无条件落子**,不受
+        # chart_count 限制;否则同章前序普通图占满 chart_count 后 break → 硬性图
+        # 静默缺失,bid_compliance 无从检出(超页可减,缺图不可缺)。
+        _req_subs = [s for s in sub_list if is_required_chart(s[1])]
+        _opt_subs = [s for s in sub_list if not is_required_chart(s[1])]
+        _budget = max(chart_count, len(_req_subs))
+        if len(_req_subs) > chart_count:
+            (log.warning if log else print)(
+                f"  章 {ch_num} required 硬性图 {len(_req_subs)} 张 > 规划图表数 {chart_count},"
+                f"已按硬性图张数放大为 {_budget} 张")
+        for sec_id, sec_title in _req_subs + _opt_subs:
+            if len(ch_specs) >= _budget:
                 break
             if is_pure_table_section(sec_title):
                 used_subs.add(sec_id)  # 标记为已占用,避免第二遍兜底再用
@@ -177,7 +198,7 @@ def derive_chart_specs(plan_path: Path, log: logging.Logger) -> list[dict]:
                 used_subs.add(sec_id)
 
         # 第二遍:用章节标题推剩余张数的 type
-        remaining = chart_count - len(ch_specs)
+        remaining = _budget - len(ch_specs)
         if remaining > 0:
             ctype_fallback = classify_by_title(ch_title) or "process_flow"
             free_subs = [(sid, st) for sid, st in sub_list
@@ -187,6 +208,10 @@ def derive_chart_specs(plan_path: Path, log: logging.Logger) -> list[dict]:
                     sec_id, sec_title = free_subs[i]
                     hint = sec_title
                 else:
+                    # 可用子节耗尽 → 最多再落 1 张章级图,避免多条 title/data_hint
+                    # 完全相同的重复 spec(同章重复插图、页数膨胀)
+                    if ch_specs and not ch_specs[-1].get("section"):
+                        break
                     sec_id = ""
                     hint = ch_title
                 full_title = f"{ch_title}{' - ' + hint if hint != ch_title else ''}"
@@ -199,7 +224,18 @@ def derive_chart_specs(plan_path: Path, log: logging.Logger) -> list[dict]:
                     "title": full_title,
                 })
 
-        specs.extend(ch_specs)
+        # 同章同类型 required 图去重:章 06 的「施工总平面布置图应符合下列要求」与
+        # 「…应包括下列内容」会各落一张 site_layout,实际是同一张图 → 重复插图 + 双倍页数。
+        # 保留首张(章节顺序靠前的那个子节)。
+        _seen_req_ctype: set[str] = set()
+        _deduped: list[dict] = []
+        for _sp in ch_specs:
+            if _sp.get("required") and _sp["type"] in _seen_req_ctype:
+                continue
+            if _sp.get("required"):
+                _seen_req_ctype.add(_sp["type"])
+            _deduped.append(_sp)
+        specs.extend(_deduped)
 
     return specs
 

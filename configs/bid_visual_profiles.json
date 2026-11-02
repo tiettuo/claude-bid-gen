@@ -30,7 +30,7 @@
       "h3_space_after_pt": 3,
       "table_grammar": "horizontal_rules",
       "table_padding_twips": 120,
-      "image_align": "left"
+      "image_align": "center"
     },
     "C": {
       "description": "左对齐舒展章节 + 外框分层表格",
@@ -42,7 +42,7 @@
       "h3_space_after_pt": 4,
       "table_grammar": "frame_horizontal",
       "table_padding_twips": 95,
-      "image_align": "right"
+      "image_align": "center"
     },
     "D": {
       "description": "居中章节组 + 上下边界表格",
@@ -66,7 +66,7 @@
       "h3_space_after_pt": 2,
       "table_grammar": "outer_frame",
       "table_padding_twips": 55,
-      "image_align": "left"
+      "image_align": "center"
     },
     "F": {
       "description": "居中二级标题 + 轻横线表格",
@@ -78,7 +78,7 @@
       "h3_space_after_pt": 5,
       "table_grammar": "light_horizontal",
       "table_padding_twips": 110,
-      "image_align": "right"
+      "image_align": "center"
     }
   }
 }

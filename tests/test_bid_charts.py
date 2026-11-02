@@ -63,6 +63,130 @@ def test_schedule_accepts_chinese_day_labels_and_duration(tmp_path):
     assert out.stat().st_size > 10_000
 
 
+def test_hierarchy_flow_engine_and_frame_structurally_distinct(tmp_path):
+    """体系图换布局引擎/框型 → PNG 字节互异(反串标,非换皮)。"""
+    layers = [
+        {"name": "决策层", "nodes": ["项目经理"]},
+        {"name": "管理层", "nodes": ["技术负责人", "安全负责人", "质量负责人"]},
+        {"name": "执行层", "nodes": ["施工班组A", "施工班组B"]},
+    ]
+    conns = [["项目经理", "技术负责人"], ["项目经理", "安全负责人"],
+             ["项目经理", "质量负责人"], ["技术负责人", "施工班组A"],
+             ["技术负责人", "施工班组B"]]
+    styles = [
+        {"org_engine": "dot", "org_box_shape": "box"},
+        {"org_engine": "twopi", "org_box_shape": "doubleframe"},
+        {"org_engine": "circo", "org_box_shape": "rounded"},
+    ]
+    hashes = set()
+    for i, style in enumerate(styles):
+        path = tmp_path / f"hier_{i}.png"
+        assert C.render_hierarchy_flow({"layers": layers, "connections": conns},
+                                       path, "体系图", logging.getLogger(__name__), style)
+        assert path.stat().st_size > 10_000
+        hashes.add(hashlib.sha256(path.read_bytes()).hexdigest())
+    assert len(hashes) == 3
+
+
+def test_process_flow_box_shape_structurally_distinct(tmp_path):
+    """流程图框型三态(box/rounded/doubleframe)→ PNG 字节互异。"""
+    nodes = [{"id": "s1", "label": "材料进场", "shape": "box"},
+             {"id": "s2", "label": "现场抽检", "shape": "diamond"},
+             {"id": "s3", "label": "合格入库", "shape": "box"}]
+    edges = [{"from": "s1", "to": "s2"}, {"from": "s2", "to": "s3"}]
+    hashes = set()
+    for shape in ("box", "rounded", "doubleframe"):
+        path = tmp_path / f"proc_{shape}.png"
+        assert C.render_process_flow({"nodes": nodes, "edges": edges},
+                                     path, "流程", logging.getLogger(__name__),
+                                     {"org_box_shape": shape})
+        assert path.stat().st_size > 5_000
+        hashes.add(hashlib.sha256(path.read_bytes()).hexdigest())
+    assert len(hashes) == 3
+
+
+def test_adapt_process_flow_drops_garbage_edges():
+    """坏边(字符串化 list,端点不匹配任何节点)→ 丢弃并回退顺序连。"""
+    import json as _json
+    data = {
+        "nodes": [{"id": "n1", "label": "a"}, {"id": "n2", "label": "b"},
+                  {"id": "n3", "label": "c"}],
+        "edges": [{"from": "['n1','n3']", "to": "['n2','n3']"}],
+    }
+    out = C._adapt_process_flow_data(data)
+    assert [(e["from"], e["to"]) for e in out["edges"]] == [("n1", "n2"), ("n2", "n3")]
+
+
+def test_adapt_process_flow_keeps_valid_edges():
+    """合法边不被回退逻辑误删。"""
+    data = {
+        "nodes": [{"id": "n1", "label": "a"}, {"id": "n2", "label": "b"}],
+        "edges": [{"from": "n1", "to": "n2"}],
+    }
+    out = C._adapt_process_flow_data(data)
+    assert [(e["from"], e["to"]) for e in out["edges"]] == [("n1", "n2")]
+
+
+def test_variant_chart_theme_box_rotates_three_way():
+    """框型按 idx%3 轮转,≤9 变体用满 box/rounded/doubleframe。"""
+    import bid_variants as V
+    boxes = [V.variant_chart_theme(i)["org_box_shape"] for i in range(6)]
+    assert boxes[:3] == ["box", "rounded", "doubleframe"]
+    assert boxes[3:] == ["box", "rounded", "doubleframe"]
+
+
+def test_preprocess_md_reinjects_chart_from_backup(tmp_path):
+    """.md 丢 json 块时,preprocess_md 从 charts_data 兜底重注入(assemble 幂等)。"""
+    import json as _json
+    charts_dir = tmp_path / "charts"; charts_dir.mkdir()
+    data_dir = tmp_path / "charts_data"; data_dir.mkdir()
+    tmp_dir = tmp_path / ".assemble_tmp"; tmp_dir.mkdir()
+    stem = "08_test"
+    src = tmp_path / f"{stem}.md"
+    src.write_text("# 标题\n\n正文内容，无 json 块\n", encoding="utf-8")
+    data = {"type": "hierarchy_flow",
+            "layers": [{"name": "决策层", "nodes": ["项目经理"]},
+                       {"name": "执行层", "nodes": ["班组A"]}],
+            "connections": [["项目经理", "班组A"]]}
+    (data_dir / f"{stem}.hierarchy_flow.json").write_text(
+        _json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    out = C.preprocess_md(src, tmp_dir, charts_dir, data_dir, "V01", logging.getLogger(__name__))
+    assert (charts_dir / f"{stem}_hierarchy_flow.png").exists()
+    assert "charts/" in out.read_text(encoding="utf-8")
+
+
+def test_schedule_calendar_matrix_differs_by_style(tmp_path):
+    """同数据 + 不同 gantt_grays/hatch → 周历矩阵横道图 PNG 互异(反串标)。"""
+    import datetime as _dt
+    base = _dt.date(2026, 9, 1)
+    data = {
+        "tasks": [
+            {"name": "施工准备", "start": "2026-09-01", "end": "2026-09-09", "phase": "准备"},
+            {"name": "基础工程", "start": "2026-09-10", "end": "2026-09-30", "phase": "基础"},
+            {"name": "主体结构", "start": "2026-10-01", "end": "2026-10-31", "phase": "主体"},
+        ],
+    }
+    styles = [
+        {"gantt_layout": "calendar_matrix", "gantt_grays": ["#000000", "#333333", "#555555", "#777777", "#999999", "#BBBBBB"], "gantt_bar_hatch": ""},
+        {"gantt_layout": "calendar_matrix", "gantt_grays": ["#0D0D0D", "#2B2B2B", "#4A4A4A", "#6B6B6B", "#8C8C8C", "#ADADAD"], "gantt_bar_hatch": "|||"},
+    ]
+    hashes = set()
+    for i, st in enumerate(styles):
+        p = tmp_path / f"cal_{i}.png"
+        assert C.render_schedule_png(data, p, "横道", logging.getLogger(__name__), st)
+        hashes.add(hashlib.sha256(p.read_bytes()).hexdigest())
+    assert len(hashes) == 2
+
+
+def test_site_layout_template_rotates_three_way():
+    """裸数据 auto-diff:模板按 i%3 轮转 rect/L/U。"""
+    raw = {"type": "site_layout", "main_building": "宿舍楼",
+           "zones": {"north": ["材料堆场"], "south": ["办公区"], "east": ["机械停放"], "west": ["变压器"]}}
+    tpls = [C._auto_diff_site_layout(dict(raw), f"V{i+1:02d}")["template"] for i in range(6)]
+    assert tpls[:3] == ["rectangular_center", "L_shape", "U_shape"]
+    assert tpls[3:] == ["rectangular_center", "L_shape", "U_shape"]
+
+
 # ─── iter_fences ────────────────────────────────────────────────
 def test_iter_fences_extracts_lang_and_content():
     blocks = list(C.iter_fences("前文\n```json\n{\"a\":1}\n```\n后文"))
@@ -232,3 +356,82 @@ def test_adapt_schedule_duration_is_inclusive():
 
     assert out["tasks"][0]["start"] == 60
     assert out["tasks"][0]["end"] == 60
+
+
+def test_preprocess_md_does_not_resurrect_stale_backup_on_partial_loss(tmp_path):
+    """部分缺图不拿旧备份补回(刻意保守):备份属上一版草稿,数据可能已过期。
+
+    交付时缺图由 compliance 的 chart_missing 兜底(会重写章节);
+    而用陈旧备份补图会把旧日期/工程量描回正文,比缺图更难发现。
+    """
+    import json as _json
+
+    import bid_charts as C
+    charts_dir = tmp_path / "charts"; charts_dir.mkdir()
+    data_dir = tmp_path / "charts_data"; data_dir.mkdir()
+    tmp_dir = tmp_path / ".assemble_tmp"; tmp_dir.mkdir()
+    stem = "05_进度"
+    src = tmp_path / f"{stem}.md"
+    src.write_text(
+        "# 进度\n\n```json\n" + _json.dumps({
+            "type": "schedule",
+            "tasks": [{"name": "A", "start": "2026-10-02", "end": "2026-11-01"}],
+        }) + "\n```\n",
+        encoding="utf-8",
+    )
+    for i, suffix in enumerate(["", "_1"]):
+        (data_dir / f"{stem}.schedule{suffix}.json").write_text(_json.dumps({
+            "type": "schedule",
+            "tasks": [{"name": f"T{i}", "start": "2026-10-02", "end": "2026-11-01"}],
+        }), encoding="utf-8")
+
+    C.preprocess_md(src, tmp_dir, charts_dir, data_dir, "V01", logging.getLogger(__name__))
+    pngs = sorted(p.name for p in charts_dir.glob(f"{stem}_schedule*.png"))
+    assert pngs == [f"{stem}_schedule.png"], pngs
+
+
+def test_preprocess_md_reinjects_chart_from_backup_when_none_present(tmp_path):
+    """整章 json 块全丢(重写剥块)时仍从 charts_data 兜底重注入(assemble 幂等)。"""
+    import json as _json
+
+    import bid_charts as C
+    charts_dir = tmp_path / "charts"; charts_dir.mkdir()
+    data_dir = tmp_path / "charts_data"; data_dir.mkdir()
+    tmp_dir = tmp_path / ".assemble_tmp"; tmp_dir.mkdir()
+    stem = "06_质量"
+    src = tmp_path / f"{stem}.md"
+    src.write_text("# 质量\n\n正文，无 json 块\n", encoding="utf-8")
+    (data_dir / f"{stem}.hierarchy_flow.json").write_text(_json.dumps({
+        "type": "hierarchy_flow",
+        "layers": [{"name": "决策层", "nodes": ["项目经理"]}],
+    }), encoding="utf-8")
+
+    C.preprocess_md(src, tmp_dir, charts_dir, data_dir, "V01", logging.getLogger(__name__))
+    assert (charts_dir / f"{stem}_hierarchy_flow.png").exists()
+
+
+def test_chart_order_matches_document_order(tmp_path):
+    """chart_order 必须按文档顺序(bid_assemble._fit_images 按正序一一对应图片判横版)。"""
+    import json as _json
+
+    import bid_charts as C
+    root = tmp_path
+    plan = [
+        ("schedule", {"type": "schedule",
+                      "tasks": [{"name": "A", "start": "2026-10-02", "end": "2026-11-01"}]}),
+        ("org_chart", {"type": "org_chart",
+                       "root": {"name": "项目经理", "children": [{"name": "技术负责人"}]}}),
+        ("site_layout", {"type": "site_layout", "title": "总平面布置图",
+                         "zones": [{"name": "施工区", "items": ["a"]}]}),
+    ]
+    files = []
+    for i, (_, payload) in enumerate(plan, start=1):
+        p = root / f"{i:02d}_ch.md"
+        p.write_text(f"# {i:02d} 章\n\n```json\n"
+                     + _json.dumps(payload, ensure_ascii=False) + "\n```\n", encoding="utf-8")
+        files.append(p)
+
+    C.preprocess_chapter_dir(root, files, logging.getLogger(__name__), variant_id="V01")
+    order = _json.loads((root / "charts" / "_chart_order.json").read_text(encoding="utf-8"))
+    assert [o["type"] for o in order] == [c for c, _ in plan]
+    assert [o["chapter"] for o in order] == [1, 2, 3]

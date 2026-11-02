@@ -135,3 +135,41 @@ def test_parse_format_rules_missing_file_defaults(tmp_path):
     fmt = A.parse_format_rules(tmp_path / "不存在.md", _LOG)
     assert isinstance(fmt, dict)
     assert "font_size_body" in fmt
+
+
+def _cover_fmt(**overrides):
+    base = {
+        "font_name_cn": "宋体", "font_name_en": "Times New Roman",
+        "font_size_cover_title": 22, "font_size_cover_project": 16,
+        "font_size_cover_meta": 14, "blind_bid": False, "no_company_info": False,
+    }
+    base.update(overrides)
+    return base
+
+
+def _cover_xml(fmt, company="西藏天路建设工程有限公司"):
+    from docx import Document
+    doc = Document()
+    A._prepend_cover(doc, "某工程项目", company, fmt, logging.getLogger("test"))
+    return doc.element.body.xml
+
+
+def test_prepend_cover_no_company_info_hides_name():
+    """no_company_info=true（即使非盲标）→ 封面不印公司名，留空下划线。"""
+    xml = _cover_xml(_cover_fmt(no_company_info=True))
+    assert "西藏天路建设工程有限公司" not in xml
+    assert "投 标 人：" in xml
+
+
+def test_prepend_cover_non_blind_prints_name():
+    """非盲标且未禁公司名 → 封面印 company_name。"""
+    xml = _cover_xml(_cover_fmt())
+    assert "投 标 人：西藏天路建设工程有限公司" in xml
+
+
+def test_prepend_cover_placeholder_name_is_not_printed():
+    """占位公司名(甲公司/XX公司/待定…)不得当真名印上封面——应留填空线供人工填写。"""
+    for ph in ("甲公司", "乙公司", "XX公司", "待定", "投标单位名称"):
+        xml = _cover_xml(_cover_fmt(), company=ph)
+        assert ph not in xml, f"占位名被印上封面: {ph}"
+        assert "投 标 人：" in xml

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+from bid_common import get_config_dir  # noqa: E402
 import sys
 from pathlib import Path
 
@@ -165,7 +166,7 @@ def main() -> int:
 
     # API key
     from bid_common import get_bid_gen_home as _ggh
-    cfg = _ggh() / "configs" / "bid_llm_config.json"
+    cfg = get_config_dir() / "bid_llm_config.json"
     if cfg.exists():
         try:
             c = json.loads(cfg.read_text(encoding="utf-8"))

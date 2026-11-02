@@ -196,6 +196,13 @@ def _detect_table(data: dict) -> bool:
     return False
 
 
+def _as_dict(v) -> dict:
+    """LLM 常把本应是对象的字段写成字符串/数组(如 data["project"]="工期365天")
+    → 直接 .get 会 AttributeError 掀翻整个渲染器,进而让 assemble 静默回退成无图 DOCX。
+    这里统一收敛为 dict(非 dict 一律当空)。"""
+    return v if isinstance(v, dict) else {}
+
+
 def _parse_json_safe(content: str):
     try:
         return json.loads(content)
@@ -368,6 +375,29 @@ def _theme_from_style(style: dict) -> dict:
             "node_style": ",".join(parts), "spline": spline}
 
 
+def _node_frame_kw(style: dict, theme: dict) -> dict:
+    """把 org_box_shape 三态(box/rounded/doubleframe)映射成 graphviz 节点框型 kwargs。
+
+    历史坑:体系图/流程图渲染器硬编码 shape="box",org_box_shape 的 rounded/doubleframe
+    两档对它们失效,导致多家流程图只剩"圆角 vs 直角"1 位差异(且 doubleframe 完全没生效)。
+    本 helper 统一框型三态:box=直角框 / rounded=圆角框 / doubleframe=双线框(peripheries=2),
+    全灰阶、黑白打印仍可分辨。
+    """
+    shape = str(style.get("org_box_shape", "box") or "box")
+    parts: list[str] = []
+    if shape == "rounded":
+        parts.append("rounded")
+    if theme.get("filled"):
+        parts.append("filled")
+    kw: dict = {"shape": "box"}
+    if parts:
+        kw["style"] = ",".join(parts)
+        kw["fillcolor"] = theme.get("fill", "white")
+    if shape == "doubleframe":
+        kw["peripheries"] = "2"
+    return kw
+
+
 def _wrap_cjk(text: str, width: int = 14) -> str:
     """长标签每 width 字插入换行(graphviz \\n 转义),避免节点过宽把整图压扁。"""
     text = str(text or "")
@@ -528,21 +558,37 @@ def render_hierarchy_flow(data: dict, out_png: Path, title: str,
     spacing = style.get("spacing_factor", 1.0)
     theme = _theme_from_style(style)
 
-    gv_size = _graphviz_size_str(prefer_landscape=False)
-    g = graphviz.Digraph(format="png")
+    # ★ 布局范式换档(反串标):dot 分层堆叠 / twopi 辐射 / circo 环形 / fdp 力导,
+    #   与 org_chart 同一套范式,让各家的"管理体系图"结构层面就不同(非换皮)。
+    #   此前体系图锁死 dot + 硬编码 shape="box",多家撞脸。
+    engine = str(style.get("org_engine", "dot") or "dot")
+    if engine not in ("dot", "twopi", "circo", "fdp", "neato", "sfdp"):
+        engine = "dot"
+
+    g = graphviz.Digraph(format="png", engine=engine)
     gdpi = max(100, int(_RENDER_DPI * style.get("chart_scale", 1.0)))
-    g.attr(rankdir=direction, dpi=str(gdpi), bgcolor="white",
-           size=gv_size,
-           ranksep=str(round(0.7 * spacing, 2)),
-           nodesep=str(round(0.5 * spacing, 2)))
-    if theme["spline"]:
-        g.attr(splines=theme["spline"])
-    node_kw = dict(fontname="SimHei", fontsize=fs, shape="box",
-                   penwidth=line_w, margin="0.15,0.08",
+    if engine == "dot":
+        # 分层树:自然尺寸即可(compress 只缩不放,不拉伸铺满)
+        g.attr(dpi=str(gdpi), bgcolor="white",
+               size=_graphviz_size_str(prefer_landscape=False), ratio="compress",
+               rankdir=direction,
+               ranksep=str(round(0.7 * spacing, 2)),
+               nodesep=str(round(0.5 * spacing, 2)))
+        if theme["spline"]:
+            g.attr(splines=theme["spline"])
+    else:
+        # 辐射/环形/力导天然近方形,用方形盒 + fill 压成 1:1,避免 twopi 窄成竖条,
+        # 也不像整页铺满那样稀疏。不认 rankdir。
+        sq = f"{_CONTENT_W_IN:.1f},{_CONTENT_W_IN:.1f}"
+        g.attr(dpi=str(gdpi), bgcolor="white", size=sq, ratio="fill",
+               overlap="false", splines="true",
+               ranksep=str(round(0.7 * spacing, 2)),
+               nodesep=str(round(0.5 * spacing, 2)))
+
+    # 框型三态(box/rounded/doubleframe)+ 填充,统一走 _node_frame_kw(不再硬编码 box)
+    node_kw = _node_frame_kw(style, theme)
+    node_kw.update(fontname="SimHei", fontsize=fs, penwidth=line_w, margin="0.15,0.08",
                    color=theme["accent"], fontcolor=theme["accent"])
-    if theme["node_style"]:
-        node_kw["style"] = theme["node_style"]
-        node_kw["fillcolor"] = theme["fill"]
     g.attr("node", **node_kw)
     g.attr("edge", penwidth=line_w, arrowsize="0.7", color=theme["accent"])
 
@@ -550,30 +596,45 @@ def render_hierarchy_flow(data: dict, out_png: Path, title: str,
         g.attr(label=title, labelloc="t", fontname="SimHei", fontsize=str(int(fs) + 2))
 
     node_ids = {}
-    layer_first = []   # 每层一个代表节点,用于强制层间纵向排序
-    for li, layer in enumerate(layers):
-        first_in_layer = None
-        with g.subgraph() as s:
-            s.attr(rank="same")
-            layer_name = layer.get("name", "")
-            if layer_name:
-                invis_id = f"_layer_{li}"
-                s.node(invis_id, label=layer_name, shape="plaintext",
-                       fontname="SimHei", fontsize=str(int(fs) - 1))
-                first_in_layer = invis_id
-            for node_name in (layer.get("nodes") or []):
+    if engine == "dot":
+        # dot:每层 rank=same 子图 + 不可见边,强制层间纵向堆叠(层名作为 plaintext 标签)
+        layer_first = []
+        for li, layer in enumerate(layers):
+            first_in_layer = None
+            with g.subgraph() as s:
+                s.attr(rank="same")
+                layer_name = layer.get("name", "")
+                if layer_name:
+                    invis_id = f"_layer_{li}"
+                    s.node(invis_id, label=layer_name, shape="plaintext",
+                           fontname="SimHei", fontsize=str(int(fs) - 1))
+                    first_in_layer = invis_id
+                for node_name in (layer.get("nodes") or []):
+                    nid = f"L{li}_{node_name}"
+                    s.node(nid, label=_wrap_cjk(node_name))
+                    node_ids[node_name] = nid
+                    if first_in_layer is None:
+                        first_in_layer = nid
+            layer_first.append(first_in_layer)
+        # 强制层间纵向堆叠:相邻层代表节点连不可见边。否则 connections 缺失或
+        # 格式不符时,各层 rank=same 子图会塌成一行(渲染出 929x20 的横丝带)。
+        for a, b in zip(layer_first, layer_first[1:]):
+            if a and b:
+                g.edge(a, b, style="invis")
+    else:
+        # 非 dot:扁平成员节点,布局引擎自行辐射/环形/力导展开(层级语义由 connections 表达)。
+        # ★ 层名不能丢:占 3/5 变体的 twopi/circo/fdp 引擎下若照旧不加层名节点,
+        #   决策层/管理层/执行层标签会全部消失(与 dot 变体的图中信息不一致)。
+        #   这里不额外加节点(会扰动辐射/环形布局的重心),而是把层名并入该层首节点标签。
+        for li, layer in enumerate(layers):
+            layer_name = (layer.get("name") or "").strip()
+            for ni, node_name in enumerate(layer.get("nodes") or []):
                 nid = f"L{li}_{node_name}"
-                s.node(nid, label=_wrap_cjk(node_name))
+                label = _wrap_cjk(node_name)
+                if ni == 0 and layer_name:
+                    label = layer_name + "\n" + label
+                g.node(nid, label=label)
                 node_ids[node_name] = nid
-                if first_in_layer is None:
-                    first_in_layer = nid
-        layer_first.append(first_in_layer)
-
-    # 强制层间纵向堆叠:相邻层代表节点连不可见边。否则 connections 缺失或
-    # 格式不符时,各层 rank=same 子图会塌成一行(渲染出 929x20 的横丝带)。
-    for a, b in zip(layer_first, layer_first[1:]):
-        if a and b:
-            g.edge(a, b, style="invis")
 
     def _resolve_node(name):
         """连接端点名 → 节点 id;端点常用简称,支持精确 + 子串匹配。"""
@@ -604,11 +665,55 @@ def render_hierarchy_flow(data: dict, out_png: Path, title: str,
     stem = str(out_png.with_suffix(""))
     g.render(stem, cleanup=True)
     _rotate_png_if_wide(out_png, log)
-    log.info(f"  ✓ 渲染层级体系图: {out_png.name}  层数={len(layers)}")
+    log.info(f"  ✓ 渲染层级体系图: {out_png.name}  层数={len(layers)}  引擎={engine}")
     return True
 
 
 # ─── 工艺流程图渲染 ───────────────────────────────────────────────────
+
+def _process_flow_is_chain(nodes, edges) -> bool:
+    """链状流(树/路径/单环):有效边数 ≤ 节点数。这类横向铺开或竖排都会成细条,需折行。"""
+    ids = {str(n.get("id")) for n in nodes}
+    valid = [e for e in edges
+             if str(e.get("from", "")) in ids and str(e.get("to", "")) in ids
+             and str(e.get("from", "")) != str(e.get("to", ""))]
+    return len(valid) >= 3 and len(valid) <= len(nodes)
+
+
+def _process_flow_order(nodes, edges) -> list[str]:
+    """链状流阅读序:拓扑序;有环则退化为边首现序 + 剩余节点。"""
+    from collections import defaultdict, deque
+    ids = [str(n.get("id")) for n in nodes]
+    adj = defaultdict(list)
+    indeg = {i: 0 for i in ids}
+    for e in edges:
+        f, t = str(e.get("from", "")), str(e.get("to", ""))
+        if f in ids and t in ids and f != t:
+            adj[f].append(t)
+            indeg[t] += 1
+    q = deque(i for i in ids if indeg[i] == 0)
+    order = []
+    while q:
+        x = q.popleft()
+        order.append(x)
+        for y in adj[x]:
+            indeg[y] -= 1
+            if indeg[y] == 0:
+                q.append(y)
+    if len(order) == len(ids):
+        return order
+    seen = []
+    for e in edges:
+        f, t = str(e.get("from", "")), str(e.get("to", ""))
+        if f in ids and f not in seen:
+            seen.append(f)
+        if t in ids and t not in seen:
+            seen.append(t)
+    for i in ids:
+        if i not in seen:
+            seen.append(i)
+    return seen
+
 
 def render_process_flow(data: dict, out_png: Path, title: str,
                         log: logging.Logger, style: dict | None = None) -> bool:
@@ -626,8 +731,6 @@ def render_process_flow(data: dict, out_png: Path, title: str,
         log.warning(f"  process_flow 无 nodes，跳过 {out_png.name}")
         return False
 
-    default_dir = "LR" if len(nodes) >= 4 else "TB"
-    direction = style.get("flow_direction", default_dir)
     line_w = str(style.get("line_width", 0.8))
     fs = str(10 + style.get("font_size_offset", 0))
     spacing = style.get("spacing_factor", 1.0)
@@ -637,34 +740,67 @@ def render_process_flow(data: dict, out_png: Path, title: str,
                  "decision": "diamond"}
 
     theme = _theme_from_style(style)
+
+    # 链状流(纯线性/带单回边/单环)横向铺开成细条、竖排又窄成条,折成多列(S 形)最舒适;
+    # 分支流保留原方向布局。历史:ratio=fill 会把所有图硬拉铺满整页,节点被拉散,观感差。
+    chain_like = _process_flow_is_chain(nodes, edges) and len(nodes) >= 4
+    columns: list[list[str]] = []
+    if chain_like:
+        order = _process_flow_order(nodes, edges)
+        per_col = 4 if len(order) <= 12 else 5
+        columns = [order[ci:ci + per_col] for ci in range(0, len(order), per_col)]
+        direction = "LR"
+    else:
+        direction = style.get("flow_direction", "LR" if len(nodes) >= 4 else "TB")
+
     prefer_land = direction == "LR"
     gv_size = _graphviz_size_str(prefer_landscape=prefer_land)
     g = graphviz.Digraph(format="png")
     gdpi = max(100, int(_RENDER_DPI * style.get("chart_scale", 1.0)))
     g.attr(rankdir=direction, dpi=str(gdpi), bgcolor="white",
-           size=gv_size,
+           size=gv_size, ratio="compress",
            ranksep=str(round(0.6 * spacing, 2)),
            nodesep=str(round(0.4 * spacing, 2)))
     if theme["spline"]:
         g.attr(splines=theme["spline"])
-    node_kw = dict(fontname="SimHei", fontsize=fs, penwidth=line_w,
-                   margin="0.12,0.06",
-                   color=theme["accent"], fontcolor=theme["accent"])
-    if theme["node_style"]:
-        node_kw["style"] = theme["node_style"]
-        node_kw["fillcolor"] = theme["fill"]
-    g.attr("node", **node_kw)
+    # 全局默认只设字体/描边/字色;框型三态由 _node_frame_kw 按节点形状分别套用。
+    base_node = dict(fontname="SimHei", fontsize=fs, penwidth=line_w,
+                     margin="0.12,0.06",
+                     color=theme["accent"], fontcolor=theme["accent"])
+    g.attr("node", **base_node)
     g.attr("edge", fontname="SimHei", fontsize=str(int(fs) - 2),
            penwidth=line_w, arrowsize="0.7", color=theme["accent"])
 
     if title:
         g.attr(label=title, labelloc="t", fontname="SimHei", fontsize=str(int(fs) + 2))
 
-    for nd in nodes:
-        nid = str(nd.get("id", ""))
-        label = str(nd.get("label", nid))
-        shape = shape_map.get(nd.get("shape", "box"), "box")
-        g.node(nid, label=_wrap_cjk(label, 16), shape=shape)
+    node_by_id = {str(n.get("id")): n for n in nodes}
+
+    def _add_node(gx, nid):
+        nd = node_by_id.get(nid)
+        label = str(nd.get("label", nid)) if nd else nid
+        shape = shape_map.get(nd.get("shape", "box"), "box") if nd else "box"
+        if shape == "box":
+            # 直角框/圆角框/双线框 三态来自变体 org_box_shape(反串标),非 LLM 数据
+            gx.node(nid, label=_wrap_cjk(label, 16), **_node_frame_kw(style, theme))
+        else:
+            # diamond/oval 保留语义形状(判断/起止),变体填充仍生效
+            kw = {"shape": shape}
+            if theme["filled"]:
+                kw["style"] = "filled"
+                kw["fillcolor"] = theme["fill"]
+            gx.node(nid, label=_wrap_cjk(label, 16), **kw)
+
+    if chain_like:
+        # 蛇形:每列一个 rank=same 子图(列内竖排),列间由边横向串联
+        for grp in columns:
+            with g.subgraph() as s:
+                s.attr(rank="same")
+                for nid in grp:
+                    _add_node(s, nid)
+    else:
+        for nd in nodes:
+            _add_node(g, str(nd.get("id", "")))
 
     for ed in edges:
         g.edge(str(ed.get("from", "")), str(ed.get("to", "")), label=str(ed.get("label", "")))
@@ -942,18 +1078,26 @@ _SITE_SCALE_ROTATION = ["1:200", "1:150", "1:250"]
 
 
 def _auto_diff_site_layout(data: dict, variant_id: str) -> dict:
-    """多变体批量时,按变体序号给 site_layout 自动分配不同 模板/视觉风格/图号/比例。
-    仅在字段缺省时注入(JSON 已显式指定则尊重),使三家总平面图"不像一个人画的"。
-    单份模式(variant_id 非 V\\d+)不强制。"""
+    """多变体批量时,按变体序号给 site_layout 自动分配不同 模板/视觉风格/图号/比例,
+    使三家总平面图"不像一个人画的"。单份模式(variant_id 非 V\\d+)不改动。
+
+    ★ 批量下**强制覆盖**模板与视觉风格(旧实现用 setdefault):写手每次都会显式写出
+      `"template": "rectangular_center"`,setdefault 永远不生效 → 三家总平面图位形
+      一模一样(user 反馈 2026-09-16「看起来非常雷同需要变换」)。模板位形属排版风格、
+      不承载工程量数据,以反串标为准覆盖是安全的;若确需锁定,JSON 里加
+      `"template_locked": true`。
+    """
     m = re.match(r"[Vv](\d+)", variant_id or "")
     if not m:
         return data
     i = max(0, int(m.group(1)) - 1)
-    # 视觉风格走快(每家换一套, 6 套), 模板走慢(每 6 家换一种建筑位形): 二者解耦,
-    # 否则 template 与 site_style 同为 i%3 时只剩 3 种真实组合 → 各家总平面图雷同。
-    data.setdefault("site_style", _SITE_STYLE_ROTATION[i % len(_SITE_STYLE_ROTATION)])
-    data.setdefault("template",
-                    _SITE_TEMPLATE_ROTATION[(i // len(_SITE_STYLE_ROTATION)) % len(_SITE_TEMPLATE_ROTATION)])
+    if data.get("template_locked"):
+        return data
+    # 模板(建筑位形/主体位置)是总平面图最大的视觉差异,按 i%3 快轮转,让相邻变体
+    # 就换一种位形(矩形居中/L形/U形);视觉风格按 i%6 独立轮转(旧公式 i//3 →
+    # ≤3 家全落在 A,只有位形不同、画法仍雷同)。
+    data["template"] = _SITE_TEMPLATE_ROTATION[i % len(_SITE_TEMPLATE_ROTATION)]
+    data["site_style"] = _SITE_STYLE_ROTATION[i % len(_SITE_STYLE_ROTATION)]
     data.setdefault("scale", _SITE_SCALE_ROTATION[i % len(_SITE_SCALE_ROTATION)])
     data.setdefault("drawing_no", f"{_SITE_DRAWING_PREFIX[i % len(_SITE_DRAWING_PREFIX)]}-{i + 1:02d}")
     return data
@@ -1063,11 +1207,6 @@ def _sl_draw_main_building(ax, tpl, data, line_w, fs_off, ss=None):
                      edgecolor="black", facecolor=ss["building_fc"],
                      hatch=ss["building_hatch"], zorder=4)
     ax.add_patch(rect)
-    # 文字加白色描边底,避免压在网格/斜线上看不清
-    if ss["building_hatch"]:
-        ax.add_patch(Rectangle((b["x"] + b["w"] * 0.12, b["y"] + b["h"] * 0.38),
-                               b["w"] * 0.76, b["h"] * 0.24,
-                               linewidth=0, facecolor="white", alpha=0.85, zorder=4))
     cy_text = b["y"] + b["h"] / 2
     # 长主体标签自动换行 + 缩字号, 防止横向溢出建筑框、压住东西区标签
     # (feedback: DeepSeek 写 "村委会阳光棚780.79㎡及院内阳光棚878.4㎡" 22字横向溢出)
@@ -1075,17 +1214,23 @@ def _sl_draw_main_building(ax, tpl, data, line_w, fs_off, ss=None):
     main_label = _wrap_text(str(main_label), max_per_line)
     n_lines = main_label.count("\n") + 1
     fs_main = max(7, (10 + fs_off) - (1 if n_lines >= 2 else 0) - (1 if n_lines >= 3 else 0))
+    # ★ 白底贴字(bbox)而非固定尺寸白矩形：建筑填充可能是斜线/交叉网格(site_style B/C/F),
+    #   固定 76%×24% 的白块盖不住 2-3 行换行标签,文字仍压在网格上看不清。
+    #   白底=无彩色,不违反招标"整体不得出现彩色"。
+    _lbl_bbox = dict(boxstyle="round,pad=0.28", facecolor="white",
+                     edgecolor="none", alpha=0.92)
     if main_type or main_area:
         ax.text(b["x"] + b["w"] / 2, cy_text + 2.5, main_label,
                 ha="center", va="center", fontsize=fs_main,
-                fontweight="bold", zorder=5)
+                fontweight="bold", zorder=5, bbox=_lbl_bbox)
         sub = " ".join(s for s in (main_type, main_area) if s)
         ax.text(b["x"] + b["w"] / 2, cy_text - 2.5, sub,
-                ha="center", va="center", fontsize=8 + fs_off, zorder=5)
+                ha="center", va="center", fontsize=8 + fs_off, zorder=5,
+                bbox=_lbl_bbox)
     else:
         ax.text(b["x"] + b["w"] / 2, cy_text, main_label,
                 ha="center", va="center", fontsize=fs_main,
-                fontweight="bold", zorder=5)
+                fontweight="bold", zorder=5, bbox=_lbl_bbox)
 
 
 def _sl_draw_road(ax, tpl, line_w, dash=True):
@@ -1121,7 +1266,7 @@ def _sl_draw_gate(ax, tpl, line_w, fs_off):
                 fontweight="bold", zorder=4)
 
 
-def _sl_draw_cranes(ax, tpl, cranes, line_w, fs_off):
+def _sl_draw_cranes(ax, tpl, cranes, line_w, fs_off, xmax=None):
     """塔吊/汽车吊本体 + 回转半径警戒圈。"""
     from matplotlib.patches import Circle
     n_cranes = len(cranes)
@@ -1154,8 +1299,17 @@ def _sl_draw_cranes(ax, tpl, cranes, line_w, fs_off):
         ax.plot([cx, cx], [cy - 2.5, cy + 2.5], color="black",
                 linewidth=line_w + 0.5, zorder=5)
         label = cr.get("label", "塔吊")
-        ax.text(cx + 3, cy - 1, label, ha="left", va="top",
-                fontsize=7 + fs_off, fontweight="bold", zorder=5)
+        # ★ 白底贴字 + 贴建筑框内侧下沿放置。旧实现固定 (cx±3, cy-1) 左起画、无底色:
+        #   塔吊符号在建筑框内偏上(cy≈y+0.65h),标签恰好压在居中绘制的建筑名称上
+        #   (user 反馈 2026-09-16 V02/V03 平面图"汽车吊 8t"与建筑名叠字);无底色又让
+        #   标签压在斜线/交叉网格填充上不可读。建筑名称占纵向中带 → 标签改放框内下带。
+        _cl_bbox = dict(boxstyle="round,pad=0.2", facecolor="white",
+                        edgecolor="none", alpha=0.92)
+        _right = cx > (xmax / 2 if xmax else 50)
+        _lx = (bld["x"] + bld["w"] - 1.5) if _right else (bld["x"] + 1.5)
+        _ly = bld["y"] + 1.8 + idx * 4.0
+        ax.text(_lx, _ly, label, ha="right" if _right else "left", va="bottom",
+                fontsize=7 + fs_off, fontweight="bold", zorder=5, bbox=_cl_bbox)
 
 
 def _sl_draw_compass(ax, line_w, fs_off, ss=None, cx=None):
@@ -1436,7 +1590,7 @@ def render_site_layout(data: dict, out_png: Path, title: str,
     _sl_draw_road(ax, tpl, line_w, ss["road_dash"])
     _sl_draw_utilities(ax, line_w, fs_off, xmax)  # 临时水电线路 + 配电箱/消火栓符号
     _sl_draw_gate(ax, tpl, line_w, fs_off)
-    _sl_draw_cranes(ax, tpl, cranes, line_w, fs_off)
+    _sl_draw_cranes(ax, tpl, cranes, line_w, fs_off, xmax=xmax)
     _sl_draw_compass(ax, line_w, fs_off, ss, cx=compass_x)
     _sl_draw_scale_bar(ax, scale_str, line_w, fs_off, sx0=scale_sx0)
     _sl_draw_legend(ax, used_zones, line_w, fs_off, legend_x)
@@ -1454,6 +1608,18 @@ def render_site_layout(data: dict, out_png: Path, title: str,
 # ─── 甘特图渲染 ───────────────────────────────────────────────────────
 
 _FALLBACK_GANTT_GRAYS = ["#000000", "#333333", "#555555", "#777777", "#999999", "#BBBBBB"]
+
+
+def _hex_is_dark(hexstr: str) -> bool:
+    """判断灰阶色是否偏暗(用于选黑/白前景字)。"""
+    try:
+        h = str(hexstr).strip().lstrip("#")
+        if len(h) != 6:
+            return False
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return (r + g + b) / 3 < 128
+    except ValueError:
+        return False
 
 
 _NAME_STRIP_RE = re.compile(r"[=★☆⭐\ufe0f]+")
@@ -1500,7 +1666,7 @@ def _as_day_offset(v):
 
 def _resolve_baseline(data: dict):
     """从 JSON 里推断基准日（D1 对应的绝对日期）。找不到就用今天。"""
-    proj = data.get("project") or {}
+    proj = _as_dict(data.get("project"))
     # LLM 常把 project 写成项目名称字符串，而不是包含 start_date 的对象。
     # 日期解析应忽略这种展示字段，继续读取顶层 start_date，不能让整份图表
     # 预处理因一次 AttributeError 回退到完全无图状态。
@@ -1523,7 +1689,10 @@ def _inject_schedule_project_timing(data: dict, project_timing: dict | None) -> 
         return data
     start = project_timing.get("schedule_start_date") or project_timing.get("start_date")
     total = project_timing.get("duration_days") or project_timing.get("total_duration_days")
-    proj = data.setdefault("project", {})
+    # 归一化后必须写回 data:否则新建的 {} 与 data 脱钩,注入的基准丢失
+    # (原实现用 setdefault 是在原位改,改成 _as_dict 后需要显式回写)
+    proj = _as_dict(data.get("project"))
+    data["project"] = proj
     if start and not any(proj.get(k) for k in ("start_date", "schedule_start_date", "baseline_date", "baseline", "kickoff")):
         proj["start_date"] = start
     if total and not proj.get("total_duration_days"):
@@ -1566,7 +1735,9 @@ def _render_schedule_swimlane(parsed_tasks: list[dict], milestones: list[dict], 
     ordered = sorted(parsed_tasks, key=lambda t: (phases.index(t["_phase"]), t["start"], t["end"]))
     d0, d1 = min(t["start"] for t in ordered), max(t["end"] for t in ordered)
     span = max(1, (d1 - d0).days + 1)
-    hatch_pool = ["///", "\\\\\\", "...", "xxx", "+++"]
+    # 反串标:泳道底纹/横道纹理按变体 chart_style 派生
+    grays = style.get("gantt_grays") or _FALLBACK_GANTT_GRAYS
+    bar_hatch = style.get("gantt_bar_hatch", "")
     height = max(5.2, 0.62 * len(ordered) + 2.2)
     fig, ax = plt.subplots(figsize=(14.0, height), dpi=max(120, int(_RENDER_DPI * style.get("chart_scale", 1.0))))
 
@@ -1577,7 +1748,7 @@ def _render_schedule_swimlane(parsed_tasks: list[dict], milestones: list[dict], 
         rows = phase_ranges[phase]
         y0, y1 = min(rows) - 0.45, max(rows) + 0.45
         ax.add_patch(Rectangle((0, y0), span, y1 - y0,
-                               facecolor=("#F0F0F0" if pidx % 2 else "white"),
+                               facecolor=(grays[-1] if pidx % 2 else "white"),
                                edgecolor="none", zorder=0))
         ax.axhline(y1, color="#555555", linewidth=1.0, zorder=1)
         # 阶段标签放在右侧独立栏，避免与左侧工序名称叠压。
@@ -1592,7 +1763,7 @@ def _render_schedule_swimlane(parsed_tasks: list[dict], milestones: list[dict], 
         ax.broken_barh([(start, duration)], (i - 0.25, 0.5),
                        facecolors="white", edgecolors="black",
                        linewidth=style.get("gantt_bar_lw", 0.9),
-                       hatch=hatch_pool[pidx % len(hatch_pool)], zorder=3)
+                       hatch=bar_hatch, zorder=3)
         ax.text(start + duration / 2, i, f"D{start + 1}-D{start + duration}",
                 ha="center", va="center", fontsize=6.8, zorder=4)
 
@@ -1637,7 +1808,9 @@ def _render_schedule_calendar_matrix(parsed_tasks: list[dict], milestones: list[
     d0, d1 = min(t["start"] for t in ordered), max(t["end"] for t in ordered)
     span = max(1, (d1 - d0).days + 1)
     weeks = (span + 6) // 7
-    hatches = ["", "///", "...", "xxx", "+++"]
+    # 反串标:横道条填充色/填充纹理按变体 chart_style 派生,同布局不同家也不撞脸
+    grays = style.get("gantt_grays") or _FALLBACK_GANTT_GRAYS
+    bar_hatch = style.get("gantt_bar_hatch", "")
     phases = []
     for task in ordered:
         phase = str(task.get("phase") or "工序")
@@ -1654,14 +1827,15 @@ def _render_schedule_calendar_matrix(parsed_tasks: list[dict], milestones: list[
         start = max(0, (task["start"] - d0).days)
         end = min(span - 1, (task["end"] - d0).days)
         pidx = phases.index(str(task.get("phase") or "工序"))
+        fill = grays[pidx % len(grays)]
         for day in range(start, end + 1):
             is_edge = day in (start, end)
             ax.add_patch(Rectangle((day + 0.08, row - 0.34), 0.84, 0.68,
-                                   facecolor=("#222222" if pidx % 3 == 0 else "white"),
+                                   facecolor=fill,
                                    edgecolor="black", linewidth=(1.2 if is_edge else 0.45),
-                                   hatch=("" if pidx % 3 == 0 else hatches[pidx % len(hatches)]), zorder=3))
+                                   hatch=bar_hatch, zorder=3))
         ax.text(start + 0.5, row, f"{end - start + 1}d", ha="left", va="center",
-                fontsize=6.2, color=("white" if pidx % 3 == 0 and end > start else "black"), zorder=4)
+                fontsize=6.2, color=("white" if _hex_is_dark(fill) else "black"), zorder=4)
 
     for day in range(span + 1):
         ax.axvline(day, color=("black" if day % 7 == 0 else "#B0B0B0"),
@@ -1719,7 +1893,7 @@ def render_schedule_png(data: dict, out_png: Path, title: str,
     tasks = data.get("tasks") or data.get("schedule") or []
     milestones = data.get("milestones") or []
     baseline = _resolve_baseline(data)
-    total_days = (data.get("project") or {}).get("total_duration_days")
+    total_days = _as_dict(data.get("project")).get("total_duration_days")
 
     def _resolve_dt(val_date, val_day):
         """优先绝对日期，其次相对日偏移；都没有返回 None。"""
@@ -1884,7 +2058,7 @@ def render_schedule_png(data: dict, out_png: Path, title: str,
     # 备注行
     _rect(0, note_bot, 100, note_rows * row_h, lw=line_w + 0.2)
     note = (data.get("note") or data.get("remark")
-            or (data.get("project") or {}).get("note")
+            or _as_dict(data.get("project")).get("note")
             or f"计划总工期 {(d1 - d0).days + 1} 日历天，"
                f"{d0.strftime('%Y年%m月%d日')} 至 {d1.strftime('%Y年%m月%d日')}。")
     _t(1.5, note_bot + note_rows * row_h / 2, "备注：" + str(note)[:70], fs=7, ha="left")
@@ -2159,10 +2333,16 @@ def _adapt_process_flow_data(data: dict) -> dict:
     d["edges"] = _normalize_edges(raw_edges)
 
     if "nodes" in d:
-        if not d.get("edges") and len(d["nodes"]) > 1:
-            # 顺序连
-            d["edges"] = [{"from": d["nodes"][i]["id"], "to": d["nodes"][i + 1]["id"], "label": ""}
-                          for i in range(len(d["nodes"]) - 1)]
+        # 校验边端点是否真指向节点 id。LLM 偶发把 from/to 写成字符串化的 list
+        # (如 "['n1','n6']"),使所有节点断开、渲染成塌扁丝带。此时丢弃坏边,回退顺序连。
+        node_ids = {str(n.get("id")) for n in d["nodes"]}
+        valid = [e for e in d["edges"]
+                 if e.get("from") in node_ids and e.get("to") in node_ids
+                 and e.get("from") != e.get("to")]
+        if not valid and len(d["nodes"]) > 1:
+            valid = [{"from": d["nodes"][i]["id"], "to": d["nodes"][i + 1]["id"], "label": ""}
+                     for i in range(len(d["nodes"]) - 1)]
+        d["edges"] = valid
         return d
 
     # 从 steps/_items 推 nodes
@@ -2287,6 +2467,73 @@ def _adapt_hierarchy_flow_data(data: dict) -> dict:
         d["layers"] = layers
         d["connections"] = connections
         return d
+
+    # LLM 另一种常见写法:levels=[{name, children:[...]}] (嵌套树,键名不是 root)
+    # 实测 V01/V02/V03 章 08 的"质量保证体系层级"全写成 levels → 适配器不认 →
+    # hierarchy_flow 渲染失败被剥离,质量/安全管理体系图静默丢失。
+    _levels = d.get("levels")
+    if not d.get("layers") and isinstance(_levels, list) and _levels and isinstance(_levels[0], dict) \
+            and ("children" in _levels[0] or "nodes" not in _levels[0]):
+        layers, connections = [], []
+
+        def _walk2(node, depth, parent_name=None):
+            if not isinstance(node, dict):
+                return
+            while len(layers) <= depth:
+                layers.append({"name": "", "nodes": []})
+            name = node.get("name") or node.get("label") or node.get("title") or ""
+            if name:
+                layers[depth]["nodes"].append(name)
+            if parent_name and name:
+                connections.append({"from": parent_name, "to": name, "label": ""})
+            for child in (node.get("children") or node.get("nodes") or []):
+                if isinstance(child, dict):
+                    _walk2(child, depth + 1, name)
+
+        for _lv in _levels:
+            _walk2(_lv, 0)
+        if layers:
+            d["layers"] = layers
+            d["connections"] = connections or d.get("connections") or []
+            return d
+
+    # LLM 第三种写法:扁平 nodes=[{id,label}] + edges=[{from,to}](无 layers)
+    # 实测 V01 章 10 的"安全生产管理机构层级"如此 → 按 BFS 深度铺层
+    if not d.get("layers") and isinstance(d.get("nodes"), list) and d.get("nodes"):
+        _nodes = [n for n in d["nodes"] if isinstance(n, dict)]
+        _ids = {str(n.get("id")): (n.get("label") or n.get("name") or str(n.get("id"))) for n in _nodes}
+        _edges = [e for e in (d.get("edges") or d.get("connections") or []) if isinstance(e, dict)]
+        _children: dict[str, list[str]] = {}
+        _has_parent: set[str] = set()
+        for _e in _edges:
+            _f, _t2 = str(_e.get("from", "")), str(_e.get("to", ""))
+            if _f in _ids and _t2 in _ids:
+                _children.setdefault(_f, []).append(_t2)
+                _has_parent.add(_t2)
+        _roots = [k for k in _ids if k not in _has_parent] or list(_ids)[:1]
+        layers, connections = [], []
+        seen: set[str] = set()
+
+        def _bfs(nid, depth):
+            if nid in seen or depth > 8:
+                return
+            seen.add(nid)
+            while len(layers) <= depth:
+                layers.append({"name": "", "nodes": []})
+            layers[depth]["nodes"].append(_ids[nid])
+            for _c in _children.get(nid, []):
+                connections.append({"from": _ids[nid], "to": _ids.get(_c, _c), "label": ""})
+                _bfs(_c, depth + 1)
+
+        for _r in _roots:
+            _bfs(_r, 0)
+        for _k, _v in _ids.items():          # 环/孤立节点兜底,不丢组织单元
+            if _k not in seen:
+                _bfs(_k, len(layers))
+        if layers:
+            d["layers"] = layers
+            d["connections"] = connections
+            return d
 
     # layers 归一化
     raw = d.get("layers") or []
@@ -3100,7 +3347,10 @@ def _replace_pseudo_gantt_tables(
         ok = render_schedule_png(data, png_path, title, log, chart_style)
         if ok:
             rel = Path("..") / charts_dir.name / png_name
-            replacement = f"\n![{title}]({rel.as_posix()})\n"
+            # 空 alt：所有渲染器都把图题画进 PNG 内部（set_title / graphviz label），
+            # 再加 pandoc 图题会重复，且图题段落落在横版分节符之后 → 下一竖版页顶部
+            # 出现孤立图题行（实测第 60 页首行「施工总平面布置图」）。
+            replacement = f"\n![]({rel.as_posix()})\n"
             log.info(f"  [{stem}] 伪横道表格 → 甘特图 PNG: {png_name}")
         else:
             replacement = ""
@@ -3455,27 +3705,136 @@ def preprocess_md(
     heading_style: str = "B",
     chart_order: list | None = None,
     project_timing: dict | None = None,
+    ctype_caps: dict[str, int] | None = None,
+    chapter_in_specs: bool = False,
 ) -> Path:
     """处理单个 md，返回临时 md 的 Path。
 
     原文件保持不变；所有剥离/替换发生在临时副本上。
     chart_order: 若传入,按文档顺序追加每张成功嵌入的图表 ctype(供组装阶段判横版)。
+    chapter_in_specs: 本章在 chart_specs.json 里有规划条目。为 True 时,未列入
+        ctype_caps 的图类视为"本章规划 0 张",幂等兜底不得回灌历史备份——
+        否则人工删掉的重复图(如第 6 章与本标第 15 章附表五重复的施工总平面图)
+        会在下次 assemble 时被静默恢复(user 反馈 2026-09-16)。
     """
     text = src_md.read_text(encoding="utf-8")
     text = _normalize_md_lists(text)
     text = _prepend_chapter_number(text, chapter_idx)
     text = _normalize_heading_numbers(text, chapter_idx, heading_style)
-    blocks = list(iter_fences(text))
 
     stem = src_md.stem
+    # ── 幂等兜底 ──
+    # 历史某步(如 review 门禁 --force 重写章节)会把 .md 里的 ```json 图表块剥掉,
+    # 导致 assemble 重跑时无图可渲染、甚至产出无图 DOCX。这里在无 json 块时,
+    # 从 charts_data/ 的 `{stem}.{ctype}[_N].json` 备份兜底重注入,保证 assemble 幂等。
+    # 已有图表块按 ctype 计数(仅用于日志/判断本章是否已有图)
+    blocks = list(iter_fences(text))
+    present: dict[str, int] = {}
+    for _b in blocks:
+        if _b.lang != "json":
+            continue
+        _d = _parse_json_safe(_b.content)
+        if isinstance(_d, list) and len(_d) == 1 and isinstance(_d[0], dict):
+            _d = _d[0]
+        if isinstance(_d, dict):
+            _ct = classify_json(_d)
+            if _ct in _CHART_RENDERERS:
+                present[_ct] = present.get(_ct, 0) + 1
+    # 兜底重注入在“本章没有任何可渲染图表块”时触发(仅剩 table 类 JSON 也算没有图表——
+    # table 会被转成 markdown 表,不产生图;此时若有 charts_data 备份说明本章曾有过图表)。
+    # 语义:这是**次优恢复**——备份属于上一版草稿,数据可能已过时(日期/工程量),
+    # 但比起“整章零图”(招标硬性附图缺失 + assemble 重跑不幂等)仍是更好的选择。
+    # 刻意不做部分丢失补回:那种情况下 md 里已有一版新数据,拿旧备份混画更难发现。
+    # 部分缺图交给 compliance 的 chart_missing(它会重写章节)。
+    missing_backups: list[Path] = []
+    if not present and data_dir.is_dir():
+        # 用 iterdir + 前缀判而非 glob:stem 含 []/*/ ? 等 glob 元字符时 glob 会匹配失效,
+        # 导致图表块被剥离后静默丢图。(data_dir 可能不存在 → 先判 is_dir,否则抛
+        # FileNotFoundError 被 assemble 吞掉,静默产出整章无图 DOCX)
+        for f in sorted(data_dir.iterdir()):
+            if not f.is_file() or not f.name.endswith(".json"):
+                continue
+            rest = f.stem[len(stem) + 1:] if f.stem.startswith(stem + ".") else ""
+            for _ct in _CHART_RENDERERS:
+                if rest == _ct or rest.startswith(_ct + "_"):
+                    # 本章在 chart_specs 里有规划,但该类图规划 0 张 → 不回灌
+                    if chapter_in_specs and not (ctype_caps or {}).get(_ct):
+                        log.info(f"  [{src_md.name}] 跳过回灌 {f.name}:本章规划该类图 0 张")
+                        break
+                    missing_backups.append(f)
+                    break
+    if missing_backups:
+        injected = []
+        for f in missing_backups:
+            try:
+                injected.append("```json\n" + f.read_text(encoding="utf-8") + "\n```")
+            except OSError:
+                continue
+        if injected:
+            text = text.rstrip() + "\n\n" + "\n\n".join(injected) + "\n"
+            blocks = list(iter_fences(text))
+            log.warning(f"  [{src_md.name}] 本章无 json 图表块 → 从 charts_data 旧备份"
+                        f"重注入 {len(injected)} 个图表（数据可能属上一版草稿,请人工复核）")
+
+    # ── 同类型图表数量上限(确定性) ──
+    # 依据 chart_specs 规划数:超出部分一律剥离(未规划类型上限 1)。模型在"进度/工期"
+    # 等章会自愿多画横道图(实测 V03 章 05 两个子项各一张),这些块数据不同、内容去重
+    # 抓不到 → 只能按规划数封顶,否则重复插图白吃数页并顶页数硬顶。
+    _cap: dict[str, int] = dict(ctype_caps or {})
+
     type_counters: dict[str, int] = {}
     other_idx = 0
     mermaid_idx = 0
+    # ★ blocks 是**倒序**遍历的(从后往前拼接替换才能让 start/end 索引不失效),
+    #   因此 chart_order 的追加也是倒序;而 bid_assemble._fit_images 按“文档图片顺序”
+    #   一一对应 chart_order[img_count-1] 判横版 → 不翻转会把横版判定套到错误的图上。
+    _co_start = len(chart_order) if chart_order is not None else 0
+
+    # ── 图表块取舍:正序判定,统一成 drop 集合 ──
+    # 必须在**文档正序**下判定"保留哪一张/是否超规划数":倒序边遍历边计数会让
+    # 超限时保留文档靠后那张(与"重复块保留首张"口径相反),png 序号也会与规划序错位。
+    _drop_spans: set[tuple[int, int]] = set()
+    _seen_payload: set[str] = set()
+    _type_seen: dict[str, int] = {}
+    for _b in blocks:
+        if _b.lang != "json":
+            continue
+        _d = _parse_json_safe(_b.content)
+        if not isinstance(_d, dict):
+            continue
+        _ct = classify_json(_d)
+        # 只对**可渲染图表类型**做上限控制:
+        # "table" 走 markdown 表格转换(是内容不是插图),上限会把同章第二/三张表
+        # (如章 15 的附表一/二/三)静默剥掉;other 直接剥离,同样不参与计数。
+        if _ct not in _CHART_RENDERERS:
+            continue
+        _norm = json.dumps(_d, ensure_ascii=False, sort_keys=True)
+        if _norm in _seen_payload:
+            _drop_spans.add((_b.start, _b.end))
+            log.info(f"  [{src_md.name}] 剥离重复图表块(数据完全相同,已保留首张)")
+            continue
+        _seen_payload.add(_norm)
+        # specs 缺失(_cap 为空)时不设上限:宁可能多一张图,也不能拿"默认 1"把
+        # 计划内的多张同类图(如 07 章三张 process_flow)静默剥掉
+        if not _cap:
+            _type_seen[_ct] = _type_seen.get(_ct, 0) + 1
+            continue
+        _allowed = max(1, int(_cap.get(_ct, 1)))
+        if _type_seen.get(_ct, 0) >= _allowed:
+            _drop_spans.add((_b.start, _b.end))
+            log.warning(f"  [{src_md.name}] {_ct} 超过规划张数 {_allowed},"
+                        f"剥离多余图表块(防重复插图)")
+            continue
+        _type_seen[_ct] = _type_seen.get(_ct, 0) + 1
 
     for blk in reversed(blocks):
         replacement = None
 
         if blk.lang == "json":
+            if (blk.start, blk.end) in _drop_spans:
+                replacement = ""
+                text = text[:blk.start] + ("\n" if blk.start > 0 and not text[:blk.start].endswith("\n") else "") + replacement + text[blk.end:]
+                continue
             data = _parse_json_safe(blk.content)
             if data is None:
                 log.warning(f"  [{src_md.name}] JSON 解析失败，已剥离")
@@ -3539,9 +3898,11 @@ def preprocess_md(
                     ok = renderer(render_data, png_path, chart_title, log, chart_style)
                     if ok:
                         rel = Path("..") / charts_dir.name / png_name
-                        replacement = f"\n![{chart_title}]({rel.as_posix()})\n"
+                        # 空 alt：图题已在 PNG 内绘制，避免 pandoc 图题在横版分节处变成孤立行
+                        replacement = f"\n![]({rel.as_posix()})\n"
                         if chart_order is not None:
-                            chart_order.append(ctype)  # 按文档顺序记录成功嵌入的图表类型
+                            # 记录类型 + 章节号(横版判定需按章节限制,见 bid_assemble._fit_images)
+                            chart_order.append({"type": ctype, "chapter": chapter_idx})
                     else:
                         replacement = ""
                         log.warning(f"  [{src_md.name}] {ctype} 渲染失败，已剥离")
@@ -3583,6 +3944,11 @@ def preprocess_md(
 
     # 确保 markdown pipe table 前后有空行（pandoc 要求，否则当纯文本处理）
     text = _ensure_table_blank_lines(text)
+
+
+    # (blocks 倒序遍历 → 追加顺序也是倒的;bid_assemble._fit_images 按正序取用)
+    if chart_order is not None and len(chart_order) > _co_start:
+        chart_order[_co_start:] = list(reversed(chart_order[_co_start:]))
 
     out = tmp_dir / src_md.name
     out.write_text(text, encoding="utf-8")
@@ -3632,11 +3998,40 @@ def preprocess_chapter_dir(
             chapter_idx = int(m.group(1)) if m else idx
         else:
             chapter_idx = 0
+        # 读本标的 chart_specs.json(取规划张数作为同类型图上限);缺失则不设上限
+        _caps: dict[str, int] = {}
+        _ch_in_specs = False
+        try:
+            _spec_p = chapter_dir / "extracted" / "chart_specs.json"
+            if not _spec_p.exists():
+                for _up in (chapter_dir.parent, chapter_dir.parent.parent):
+                    if (_up / "extracted" / "chart_specs.json").exists():
+                        _spec_p = _up / "extracted" / "chart_specs.json"
+                        break
+            _raw = json.loads(_spec_p.read_text(encoding="utf-8"))
+            _list = _raw.get("specs", []) if isinstance(_raw, dict) else _raw
+            # 章节号兼容 05_xxx.md 与 05-xxx.md(旧写法 split("_")[0] 遇 "-" 分隔取不到,
+            # 会让规划上限退化为 1 → 计划内的第二张同类图被静默剥离)
+            _m_ch = re.match(r"(\d{1,3})", src.stem)
+            _ch = _m_ch.group(1).zfill(2) if _m_ch else ""
+            for _sp in (_list or []):
+                if not isinstance(_sp, dict) or _sp.get("_skip"):
+                    continue
+                if str(_sp.get("chapter", "")).zfill(2) != _ch:
+                    continue
+                _ct = _sp.get("_override_type") or _sp.get("type") or ""
+                if _ct:
+                    _ch_in_specs = True
+                    _caps[_ct] = _caps.get(_ct, 0) + 1
+        except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+            _caps = {}
         tmp = preprocess_md(src, tmp_dir, charts_dir, data_dir, variant_id, log,
                             chapter_idx=chapter_idx, chart_style=chart_style,
                             heading_style=heading_style, chart_order=chart_order,
-                            project_timing=project_timing)
+                            project_timing=project_timing, ctype_caps=_caps,
+                            chapter_in_specs=_ch_in_specs)
         tmp_paths.append(tmp)
+
     # 写出图表顺序清单，供 bid_assemble._fit_images 判定哪些图需横版(平面布置图/进度图)
     try:
         (charts_dir / "_chart_order.json").write_text(

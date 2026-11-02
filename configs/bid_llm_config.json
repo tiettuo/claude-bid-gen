@@ -14,7 +14,8 @@
           "type": "disabled"
         }
       },
-      "notes": "中文公文能力强；GLM-4.6 默认自动判断是否推理，extra_body 强制关"
+      "notes": "中文公文能力强；GLM-4.6 默认自动判断是否推理，extra_body 强制关",
+      "writer_role": "data_preferred"
     },
     "deepseek": {
       "display_name": "DeepSeek-V4-Flash",
@@ -24,7 +25,12 @@
       "max_tokens": 16000,
       "output_char_cap": 8000,
       "supports_openai_compat": true,
-      "notes": "1M context(够装整本招标),非推理模式;输入 $0.14/1M tokens;输出 $0.28/1M。提取/翻译场景专用（需吞整本招标）。 [2026-05-20实测]单次约8200中文字,output_char_cap由12000校准为8000。"
+      "notes": "1M context(够装整本招标),返回 reasoning_content(与 content 共享 max_tokens=16000,client 已做溢出 fail-fast);输入 $0.14/1M tokens;输出 $0.28/1M。提取/翻译场景专用（需吞整本招标）。 [2026-05-20实测]单次约8200中文字,output_char_cap由12000校准为8000。 [2026-09实测]加 extra_body thinking=disabled 可完全关掉 reasoning_content(实测 248→0 字符),避免与正文共享 max_tokens 触发\"推理占满\"fail-fast 白跑一轮;写作/合成场景必须关,需整本招标吞入的提取场景如需推理可单独覆盖。",
+      "extra_body": {
+        "thinking": {
+          "type": "disabled"
+        }
+      }
     },
     "deepseek_chat": {
       "display_name": "DeepSeek-V3-Chat",
@@ -59,9 +65,9 @@
       "notes": "替代 qwen3-max；实测81%字数达成率（vs 69%），仅用于制度管理类章节和兜底，writer_role=system_only 阻止进入核心章节"
     },
     "kimi": {
-      "display_name": "月之暗面 Kimi-K2.5",
+      "display_name": "月之暗面 Kimi-K2.6",
       "endpoint": "https://api.moonshot.cn/v1",
-      "model_name": "kimi-k2.5",
+      "model_name": "kimi-k2.6",
       "api_key_env": "MOONSHOT_API_KEY",
       "max_tokens": 8000,
       "output_char_cap": 5500,
@@ -72,7 +78,8 @@
           "type": "disabled"
         }
       },
-      "notes": "长文档一致性好；kimi-k2.5 温度不可变强制 0.6（k2-thinking 才是 1.0）；extra_body 关深度思考"
+      "notes": "长文档一致性好；kimi-k2.6 温度不可变强制 0.6；extra_body 关深度思考。2026-09 实测 kimi-k2.5 已下线(404 model_not_found)，账号可用:k2.6 / k2.7-code / k3",
+      "writer_role": "mgmt_preferred"
     },
     "minimax": {
       "display_name": "MiniMax-M2.5",
@@ -185,7 +192,8 @@
       "extra_body": {
         "enable_thinking": false
       },
-      "notes": "硅基流动托管 Qwen3.5-397B 旗舰 MoE；enable_thinking=false 关推理"
+      "notes": "硅基流动托管 Qwen3.5-397B 旗舰 MoE；enable_thinking=false 关推理",
+      "writer_role": "mgmt_preferred"
     },
     "sf_glm47": {
       "display_name": "硅基流动 GLM-4.7",
@@ -221,6 +229,22 @@
       "output_char_cap": 5500,
       "supports_openai_compat": true,
       "notes": "硅基流动托管 Kimi-K2.6(Pro)，比 K2.5 更新"
+    },
+    "local_qwen36": {
+      "display_name": "本地 Qwen3.6-35B-A3B（千问3.6 / llama-server）",
+      "endpoint": "http://127.0.0.1:8080/v1",
+      "model_name": "qwen3.6-35b-a3b",
+      "api_key_env": "LOCAL_LLM_KEY",
+      "max_tokens": 8000,
+      "output_char_cap": 5000,
+      "supports_openai_compat": true,
+      "extra_body": {
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      },
+      "notes": "本地 llama-server 部署 Qwen3.6-35B-A3B MoE（多模态，OpenAI兼容/v1）。chat_template_kwargs.enable_thinking=false 强制关思考（否则 n-predict 全被 think 消耗）。服务端 --n-predict 8192 --parallel 1，故 output_char_cap=5000、并发上限=1。",
+      "writer_role": "system_only"
     }
   },
   "retry": {
@@ -228,13 +252,12 @@
     "backoff_seconds": 30,
     "timeout_seconds": 180
   },
-  "default_model": "deepseek",
+  "default_model": "deepseek_chat",
   "fallback_order": [
-    "kimi",
-    "deepseek",
     "deepseek_chat",
+    "sf_deepseek",
     "glm",
-    "qwen35",
+    "kimi",
     "minimax_m27"
   ],
   "default_temperature": 0.6,
@@ -249,6 +272,8 @@
     "siliconflow": 6,
     "zhipu": 1,
     "dashscope": 1,
-    "minimax": 2
+    "minimax": 2,
+    "127.0.0.1:8080": 1,
+    "deepseek": 6
   }
 }

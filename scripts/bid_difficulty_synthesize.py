@@ -25,7 +25,7 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
-from bid_common import make_script_logger  # noqa: E402
+from bid_common import loads_json_lenient, make_script_logger  # noqa: E402
 from bid_llm_client import LLMClient  # noqa: E402
 from bid_facts_extract import pick_main_tender_text  # noqa: E402
 
@@ -75,8 +75,50 @@ SYSTEM_PROMPT = (
 )
 
 
+def _boq_summary(boq: dict | None, max_items: int = 40, max_chars: int = 2000) -> str:
+    """把 boq.json 压成一段「类目 + 工程量明细」文本,供重点/难点合成引用真实量。
+
+    boq.json: {categories: [{name, items: [{name, qty, unit, code}]}]}
+    历史 bug:此处原读 special.get("boq_summary"),但 bid_special_extract 从不写该字段,
+    导致重点/难点合成时永远看不到工程量 → 重点/难点无真实数字可依。现改为直接读 boq.json。
+    """
+    if not isinstance(boq, dict) or not boq.get("categories"):
+        return ""
+    lines = []
+    count = 0
+    for cat in boq["categories"]:
+        # 脏 boq(categories 含 null/标量)不得掀翻本步——否则重点/难点静默空白
+        if not isinstance(cat, dict):
+            continue
+        name = (cat.get("name") or "").strip()
+        items = cat.get("items") or []
+        if not name or not items:
+            continue
+        lines.append(f"### {name}")
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            if count >= max_items:
+                break
+            it_name = (it.get("name") or "").strip()
+            # qty 缺失时不得拼出字面量 "None" 注入 prompt
+            _q = it.get("qty", "")
+            qty = "" if _q is None else _q
+            unit = it.get("unit", "") or ""
+            if not it_name:
+                continue
+            lines.append(f"- {it_name} {qty}{unit}".rstrip())
+            count += 1
+        if count >= max_items:
+            break
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + "\n…(其余清单条目省略)"
+    return text
+
+
 def build_user_prompt(facts: dict, outline: dict, special: dict | None,
-                      main_text: str) -> str:
+                      main_text: str, boq: dict | None = None) -> str:
     """构造 user prompt。"""
     facts_lines = []
     for k, v in facts.items():
@@ -99,9 +141,9 @@ def build_user_prompt(facts: dict, outline: dict, special: dict | None,
             special_block = "\n## 特殊条款摘录\n" + "\n".join(
                 f"- {c.get('text', '')[:200]}" for c in special_clauses[:10]
             )
-        boq = special.get("boq_summary")
-        if boq:
-            special_block += f"\n\n## 工程量清单摘要\n{json.dumps(boq, ensure_ascii=False, indent=2)[:2000]}"
+    boq_block = _boq_summary(boq)
+    if boq_block:
+        special_block += f"\n\n## 工程量清单摘要\n{boq_block}"
 
     # 截取主文档前 30K 字符(约 60 页)
     text_snippet = main_text[:30000] if len(main_text) > 30000 else main_text
@@ -154,6 +196,18 @@ def synthesize(tender_dir: Path, force: bool = False, log=None) -> int:
     special_path = ext / "special_clauses.json"
     special = json.loads(special_path.read_text(encoding="utf-8")) if special_path.exists() else None
 
+    # 直接读 boq.json,注入真实工程量(替换原 special.boq_summary 死引用)
+    # 文件截断/损坏时不得抛栈退出:本步失败只会被 ensure_step2 当软警告,
+    # 但失败会导致 brain 第 3/4 节(重点/难点)静默空白
+    boq_path = ext / "boq.json"
+    boq = None
+    if boq_path.exists():
+        try:
+            boq = json.loads(boq_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning(f"  boq.json 解析失败({e}),重点/难点将无工程量可依")
+            boq = None
+
     main_txt = pick_main_tender_text(ext)
     if not main_txt:
         log.error("找不到主文档")
@@ -161,7 +215,7 @@ def synthesize(tender_dir: Path, force: bool = False, log=None) -> int:
     main_text = main_txt.read_text(encoding="utf-8")
     log.info(f"  主文档: {main_txt.name} ({len(main_text):,} 字符)")
 
-    user = build_user_prompt(facts, outline, special, main_text)
+    user = build_user_prompt(facts, outline, special, main_text, boq=boq)
     log.info(f"  prompt 长度: {len(user):,} 字符")
 
     # 调 DeepSeek
@@ -189,10 +243,13 @@ def synthesize(tender_dir: Path, force: bool = False, log=None) -> int:
         raw = "\n".join(lines).strip()
 
     try:
-        data = json.loads(raw)
+        data = loads_json_lenient(raw)
     except json.JSONDecodeError as e:
         log.error(f"  JSON 解析失败: {e}")
         log.debug(f"  原文前 500 字: {raw[:500]}")
+        return 2
+    if not isinstance(data, dict):
+        log.error(f"  JSON 顶层不是对象: {type(data).__name__}")
         return 2
 
     # 校验 schema
@@ -214,6 +271,7 @@ def synthesize(tender_dir: Path, force: bool = False, log=None) -> int:
         "model": "deepseek",
         "facts_hit": sum(1 for v in facts.values() if isinstance(v, dict) and v.get("value") is not None),
         "has_special": special is not None,
+        "has_boq": bool(isinstance(boq, dict) and boq.get("categories")),
     }
 
     out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2),

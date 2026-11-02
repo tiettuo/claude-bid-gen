@@ -334,21 +334,43 @@ def chars_per_page(font_size_pt: float, line_spacing_kind: str,
 
 def recommend_target_chars(target_pages: int, font_size_pt: float,
                            line_spacing_kind: str, line_spacing_value: float,
-                           figure_ratio: float = 0.25) -> dict:
+                           figure_ratio: float = 0.25,
+                           *, cover_pages: float | None = 1.0,
+                           toc_entries: int = 0,
+                           chart_count: int | None = None) -> dict:
     """根据目标页数 + 字号行距推荐目标总字数。
 
+    页数预算口径（memory/feedback_bid_page_budget_and_fingerprint.md）：
+        文字页 = 硬顶 − 封面 − 目录 − 图表页
+    - 封面固定 1 页（传 cover_pages=None 可回退到旧口径）
+    - 目录页 = 目录条目数 / 30（一行一条，三级目录可达 5-6 页，**必须计入**）
+    - 图表页 = 图表数 × 0.45（实测值；旧的 figure_ratio 按比例扣法会把图表
+      摊到 15-30% 篇幅，实测只有 5% 左右，导致目标字数被反向压低）
+
     返回 {density_lo, density_hi, density_mid, text_pages, target_chars_lo,
-          target_chars_hi, target_chars_mid}。
+          target_chars_hi, target_chars_mid, toc_pages, figure_pages}。
     """
     lo, hi = chars_per_page(font_size_pt, line_spacing_kind, line_spacing_value)
     mid = (lo + hi) // 2
-    text_pages = int(round(target_pages * (1 - figure_ratio)))
+    toc_pages = (toc_entries / 30.0) if toc_entries else 0.0
+    if chart_count is None or cover_pages is None:
+        # 旧口径（向后兼容）：按 figure_ratio 比例扣
+        _cover = 0.0 if cover_pages is None else cover_pages
+        figure_pages = round(target_pages * figure_ratio, 1)
+        toc_pages = 0.0
+    else:
+        _cover = cover_pages
+        figure_pages = round(chart_count * 0.45, 1)
+    text_pages = int(round(target_pages - _cover - toc_pages - figure_pages))
+    text_pages = max(1, text_pages)
     return {
         "density_lo": lo,
         "density_hi": hi,
         "density_mid": mid,
         "text_pages": text_pages,
-        "figure_pages": target_pages - text_pages,
+        "figure_pages": figure_pages,
+        "toc_pages": round(toc_pages, 1),
+        "cover_pages": _cover,
         "target_chars_lo": text_pages * lo,
         "target_chars_hi": text_pages * hi,
         "target_chars_mid": text_pages * mid,
@@ -479,7 +501,11 @@ def main() -> int:
     p.add_argument("--line-kind", choices=["multiple", "fixed_pt"], default="multiple",
                    help="行距类型:multiple 倍数 / fixed_pt 固定磅(默认 multiple)")
     p.add_argument("--figure-ratio", type=float, default=0.25,
-                   help="图表页占比(默认 0.25)")
+                   help="图表页占比(旧口径,仅在未给 --charts 时生效)")
+    p.add_argument("--toc-entries", type=int, default=0,
+                   help="目录条目数(大章+子项),按 30 条/页计入预算")
+    p.add_argument("--charts", type=int, default=None,
+                   help="图表张数(实测口径 0.45 页/张);给了就走新口径")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
@@ -487,8 +513,9 @@ def main() -> int:
     if args.recommend_chars:
         if not args.pages:
             p.error("--recommend-chars 需要 --pages")
-        rec = recommend_target_chars(args.pages, args.font, args.line_kind,
-                                     args.line, args.figure_ratio)
+        rec = recommend_target_chars(
+            args.pages, args.font, args.line_kind, args.line, args.figure_ratio,
+            cover_pages=1.0, toc_entries=args.toc_entries, chart_count=args.charts)
         print(json.dumps({
             "input": {
                 "target_pages": args.pages,

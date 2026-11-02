@@ -26,16 +26,16 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
 
-from bid_common import make_script_logger, get_bid_gen_home  # noqa: E402
+from bid_common import get_config_dir, make_script_logger, get_bid_gen_home  # noqa: E402
 from bid_escalation import notify  # noqa: E402
 from bid_failures import append_failure  # noqa: E402
 
 STATE_REL = Path("output") / ".bid_loop.state.json"
-NO_RETRY_EXITS = {2: "hard_fail", 3: "budget_exceeded"}
+NO_RETRY_EXITS = {2: "hard_fail", 3: "budget_exceeded", 4: "partial_chapter_miss"}
 
 
 def load_policy(path: Path | None = None) -> dict:
-    p = path or (get_bid_gen_home() / "configs" / "bid_loop_policy.json")
+    p = path or (get_config_dir() / "bid_loop_policy.json")
     try:
         return json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -145,7 +145,10 @@ def main() -> int:
             }, lookback_days=lookback)
 
         if rc in NO_RETRY_EXITS:
-            reason = "预算熔断" if rc == 3 else "环境硬失败"
+            # 文案由退出码映射表派生:旧实现只分 rc==3 / 其余,exit 4
+            # (partial_chapter_miss) 会被报成“环境硬失败”,排障方向被带偏
+            _zh = {2: "环境硬失败", 3: "预算熔断", 4: "部分章节未命中(部分变体/章节未生成)"}
+            reason = _zh.get(rc, "不重试退出")
             log.error(f"{reason}(exit={rc}),不重试,转人工")
             notify(policy, "failure", f"bid-gen {reason}: {project}", detail,
                    "error", log=log)

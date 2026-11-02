@@ -28,7 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from bid_common import canonical_rules_path, needs_blind_scan  # noqa: E402
+from bid_common import get_config_dir, canonical_rules_path, needs_blind_scan  # noqa: E402
 
 # ─── 可选依赖（缺失时对应检测优雅跳过）────────────────────────────
 try:
@@ -53,7 +53,7 @@ def pil_available() -> bool:
 # ─── 配置加载 ────────────────────────────────────────────────────
 
 def _config_path() -> Path:
-    return Path(__file__).resolve().parent.parent / "configs" / "bid_blind_profiles.json"
+    return get_config_dir() / "bid_blind_profiles.json"
 
 
 def load_profiles() -> dict:
