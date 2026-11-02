@@ -15,3 +15,6 @@ projects/
 graphify-out/
 # 打包产物（build/pack.py 可重建，不入库）
 build/
+# 个人/客户项目档案与画像 — 公开仓只放方法与程序，个案一律不进库
+memory/project_*.md
+memory/user_*.md

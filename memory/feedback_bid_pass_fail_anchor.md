@@ -44,4 +44,4 @@ bid-gen 项目，**当 `disqualification_rules.md` 中 `tech_evaluation_method: 
 - 砍掉招标第七章列出但本项目无对应内容的子节（如本项目无暖廊、无大型钢结构、无镀锌钢管管网） → 评委按目录找不到 → 不合格风险
 - 强行展开本项目无对应内容的子节（如让本项目编造"大型钢结构施工方案"） → 触发 B1.17 不符合技术规范
 
-**关联：** 私有项目归档 记录了具体修补；feedback_bid_output_layout.md 是结构层规范；本条是逻辑层规范；feedback_boq_must_read.md 是数据采集层规范，四者互补。
+**关联：** 具体修补记录在私有项目归档中（不入库）；feedback_bid_output_layout.md 是结构层规范；本条是逻辑层规范；feedback_boq_must_read.md 是数据采集层规范，四者互补。
