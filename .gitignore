@@ -13,3 +13,5 @@ projects/
 .claude/
 *.local.json
 graphify-out/
+# 打包产物（build/pack.py 可重建，不入库）
+build/
